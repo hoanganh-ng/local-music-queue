@@ -65,6 +65,37 @@ The project follows **Clean Architecture** principles to ensure maintainability 
    ```
    *Default port: 5173*
 
+### Docker Setup
+
+#### Backend
+1. Build the image:
+   ```bash
+   docker build -t local-music-queue-backend -f Dockerfile.backend .
+   ```
+2. Run the container:
+   ```bash
+   docker run -p 1111:1111 \
+     -v $(pwd)/.localdb:/app/data \
+     local-music-queue-backend
+   ```
+
+#### Frontend
+1. Build the image:
+   ```bash
+   cd frontend
+   docker build -t local-music-queue-frontend .
+   ```
+2. Run the container:
+   ```bash
+   docker run -p 80:80 local-music-queue-frontend
+   ```
+
+> [!TIP]
+> To run both components together seamlessly, use Docker Compose:
+> ```bash
+> docker-compose up --build
+> ```
+
 ## ⚙️ Configuration
 
 The backend can be configured via environment variables:
