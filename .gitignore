@@ -1,5 +1,4 @@
 .agents
 .localdb
 .vscode
-frontend/node_modules
 tmp
