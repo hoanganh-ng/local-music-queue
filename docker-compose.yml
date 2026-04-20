@@ -1,0 +1,26 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "1111:1111"
+    volumes:
+      - ./.localdb:/app/data
+    environment:
+      - PORT=1111
+      - CLIENT_PIN=5555
+      - HOST_PIN=6666
+      - DB_PATH=/app/data/music_queue.db
+      - YTDLP_PATH=/usr/bin/yt-dlp
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
