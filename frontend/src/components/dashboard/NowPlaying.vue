@@ -132,16 +132,18 @@ function onPlayerStateChange(event) {
 }
 
 // Watch for song changes to update the player
-watch(() => props.currentSong, (newSong, oldSong) => {
+watch(() => videoId.value, (newId, oldId) => {
   if (props.isHost && ytPlayer && ytPlayer.loadVideoById) {
-    if (newSong && newSong.url) {
-      ytPlayer.loadVideoById(videoId.value)
-      if (props.status === 'playing') ytPlayer.playVideo()
+    if (newId) {
+      if (newId !== oldId) {
+        ytPlayer.loadVideoById(newId)
+        if (props.status === 'playing') ytPlayer.playVideo()
+      }
     } else {
       ytPlayer.stopVideo()
     }
   }
-}, { deep: true })
+})
 
 // Watch for status changes (Play/Pause commands from clients)
 watch(() => props.status, (newStatus) => {

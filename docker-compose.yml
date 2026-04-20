@@ -2,7 +2,6 @@ services:
   backend:
     build:
       context: .
-      dockerfile: Dockerfile.backend
     ports:
       - "1111:1111"
     volumes:
@@ -20,7 +19,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "80:80"
+      - "8011:80"
     depends_on:
       - backend
     restart: unless-stopped

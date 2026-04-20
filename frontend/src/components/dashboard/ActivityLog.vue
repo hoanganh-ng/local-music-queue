@@ -5,20 +5,18 @@
       <div v-if="logs.length === 0" class="empty-state">
         No recent activity.
       </div>
-      <div
-        v-for="(log, idx) in logs"
-        :key="idx"
-        class="log-entry animate-fade-in"
-      >
-        <span class="log-time">{{ formatTime(log.timestamp) }}</span>
-        <span class="log-message"><strong>{{ log.user }}</strong> {{ log.description }}</span>
+      <div v-for="(log, idx) in logs" :key="log.timestamp + idx" class="log-entry animate-fade-in">
+        <div class="message-bubble">
+          <span class="user-name">{{ log.user }}</span>
+          <span class="description">{{ log.description }}</span>
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, watch, nextTick } from 'vue'
+import { ref, watch, nextTick, computed } from 'vue'
 
 const props = defineProps({
   logs: {
@@ -29,19 +27,19 @@ const props = defineProps({
 
 const logContainer = ref(null)
 
-// Auto-scroll to bottom when new logs arrive
-watch(() => props.logs, async () => {
+// Newest logs at the top
+const displayLogs = computed(() => [...props.logs])
+
+// Auto-scroll to top when new logs arrive
+watch(() => logs, async () => {
   await nextTick()
   if (logContainer.value) {
-    logContainer.value.scrollTop = logContainer.value.scrollHeight
+    logContainer.value.scrollTo({
+      top: 0,
+      behavior: 'smooth'
+    })
   }
 }, { deep: true })
-
-function formatTime(isoString) {
-  if (!isoString) return ''
-  const date = new Date(isoString)
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-}
 </script>
 
 <style scoped>
@@ -73,14 +71,17 @@ function formatTime(isoString) {
 .log-container::-webkit-scrollbar {
   width: 6px;
 }
+
 .log-container::-webkit-scrollbar-track {
   background: rgba(0, 0, 0, 0.1);
   border-radius: 4px;
 }
+
 .log-container::-webkit-scrollbar-thumb {
   background: var(--navy-border);
   border-radius: 4px;
 }
+
 .log-container::-webkit-scrollbar-thumb:hover {
   background: var(--accent);
 }
@@ -94,27 +95,40 @@ function formatTime(isoString) {
 
 .log-entry {
   display: flex;
+  flex-direction: column;
   align-items: flex-start;
-  gap: 0.75rem;
-  font-size: 0.875rem;
-  background: rgba(255, 255, 255, 0.03);
-  padding: 0.5rem 0.75rem;
-  border-radius: var(--radius-sm);
-  border-left: 2px solid var(--accent);
+  margin-bottom: 0.5rem;
 }
 
-.log-time {
-  color: var(--text-muted);
+.message-bubble {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0.75rem 1rem;
+  border-radius: 12px;
+  border-bottom-left-radius: 4px;
+  max-width: 90%;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  transition: transform 0.2s ease;
+}
+
+.message-bubble:hover {
+  transform: translateY(-2px);
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.user-name {
+  display: block;
   font-size: 0.75rem;
-  white-space: nowrap;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 0.25rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
-.log-message {
+.description {
   color: var(--text-main);
+  font-size: 0.9rem;
+  line-height: 1.4;
   word-break: break-word;
-}
-
-.log-message strong {
-  color: var(--accent-hover);
 }
 </style>
