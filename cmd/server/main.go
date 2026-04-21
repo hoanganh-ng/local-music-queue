@@ -23,7 +23,7 @@ func main() {
 	// Start Server
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,
-		Handler: enableCORS(mux),
+		Handler: requestLogger(enableCORS(mux)),
 	}
 
 	log.Printf("Server listening on http://localhost:%s", cfg.Port)
@@ -83,22 +83,4 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	mux.HandleFunc("/ws", hub.RegisterHandler)
 
 	return mux, cfg, nil
-}
-
-// enableCORS is a middleware that adds CORS headers to the response
-func enableCORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Allow any origin for development
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		// Handle preflight requests
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
 }

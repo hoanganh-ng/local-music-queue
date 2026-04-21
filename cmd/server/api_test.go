@@ -38,7 +38,7 @@ func TestAPIIntegration(t *testing.T) {
 		t.Fatalf("Failed to setup app: %v", err)
 	}
 
-	server := httptest.NewServer(enableCORS(mux))
+	server := httptest.NewServer(requestLogger(enableCORS(mux)))
 	defer server.Close()
 
 	client := server.Client()
