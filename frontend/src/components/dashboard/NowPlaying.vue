@@ -74,6 +74,8 @@ const emit = defineEmits(['toggle-playback', 'skip', 'song-end'])
 let ytPlayer = null
 const showPlayer = ref(true)
 let syncInterval = null
+const isUpdatingFromProp = ref(false)
+let statusChangeTimeout = null
 
 // Helper to extract Video ID from URL
 const videoId = computed(() => {
@@ -106,9 +108,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  if (syncInterval) {
-    clearInterval(syncInterval)
-  }
+  if (syncInterval) clearInterval(syncInterval)
+  if (statusChangeTimeout) clearTimeout(statusChangeTimeout)
 })
 
 function initPlayer() {
@@ -137,8 +138,28 @@ function initPlayer() {
 }
 
 function onPlayerStateChange(event) {
-  if (event.data === window.YT.PlayerState.ENDED) {
+  // Prevent loop: skip if change came from prop watcher
+  if (isUpdatingFromProp.value) return
+
+  const state = event.data
+  let newStatus = null
+
+  if (state === window.YT.PlayerState.PLAYING) {
+    newStatus = 'playing'
+  } else if (state === window.YT.PlayerState.PAUSED) {
+    newStatus = 'paused'
+  } else if (state === window.YT.PlayerState.ENDED) {
     api.songEnded().catch(err => console.error('Song ended call failed:', err))
+    return
+  }
+
+  // Debounce status changes
+  if (newStatus && newStatus !== props.status) {
+    if (statusChangeTimeout) clearTimeout(statusChangeTimeout)
+    statusChangeTimeout = setTimeout(() => {
+      api.setStatus(newStatus, globalStore.currentUser.display_name)
+        .catch(err => console.error('Status sync failed:', err))
+    }, 300)
   }
 }
 
@@ -171,6 +192,8 @@ watch(() => videoId.value, (newId, oldId) => {
 // Watch for status changes (Play/Pause commands from clients)
 watch(() => props.status, (newStatus) => {
   if (props.isHost && ytPlayer && ytPlayer.playVideo) {
+    isUpdatingFromProp.value = true
+
     if (newStatus === 'playing') {
       ytPlayer.playVideo()
     } else if (newStatus === 'paused') {
@@ -178,6 +201,11 @@ watch(() => props.status, (newStatus) => {
     } else {
       ytPlayer.stopVideo()
     }
+
+    // Reset flag after a short delay to allow player state to settle
+    setTimeout(() => {
+      isUpdatingFromProp.value = false
+    }, 500)
   }
 })
 
