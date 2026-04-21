@@ -11,13 +11,8 @@
       <!-- Thumbnail/Visuals -->
       <div class="artwork-container">
         <!-- We can use the default maxresdefault thumbnail from YouTube -->
-        <img 
-          v-if="!isHost || !showPlayer" 
-          :src="thumbnailUrl" 
-          alt="Album Art" 
-          class="artwork-img"
-        />
-        
+        <img v-if="!isHost || !showPlayer" :src="thumbnailUrl" alt="Album Art" class="artwork-img" />
+
         <!-- Host Only: The actual YouTube IFrame -->
         <div v-if="isHost && showPlayer" class="youtube-wrapper">
           <div id="youtube-player"></div>
@@ -31,23 +26,14 @@
 
       <!-- Controls (Host only) -->
       <div v-if="isHost" class="host-controls">
-        <BaseButton
-          variant="secondary"
-          @click="$emit('toggle-playback')"
-        >
+        <BaseButton variant="secondary" @click="$emit('toggle-playback')">
           <span v-if="status === 'playing'">Pause</span>
           <span v-else>Play</span>
         </BaseButton>
-        <BaseButton
-          variant="primary"
-          @click="handlePrev"
-        >
+        <BaseButton variant="primary" @click="handlePrev">
           Previous
         </BaseButton>
-        <BaseButton
-          variant="primary"
-          @click="$emit('skip')"
-        >
+        <BaseButton variant="primary" @click="$emit('skip')">
           Skip
         </BaseButton>
       </div>
@@ -112,6 +98,7 @@ onMounted(() => {
       firstScriptTag.parentNode.insertBefore(tag, firstScriptTag)
 
       window.onYouTubeIframeAPIReady = initPlayer
+      setPausedWhenInitPlayer()
     } else {
       initPlayer()
     }
@@ -161,6 +148,10 @@ async function handlePrev() {
   } catch (err) {
     console.error('Previous song failed:', err)
   }
+}
+
+async function setPausedWhenInitPlayer() {
+  await api.setStatus('paused', globalStore.currentUser.display_name)
 }
 
 // Watch for song changes to update the player
@@ -330,8 +321,16 @@ watch(() => props.status, (newStatus) => {
 }
 
 @keyframes float {
-  0% { transform: translateY(0px); }
-  50% { transform: translateY(-10px); }
-  100% { transform: translateY(0px); }
+  0% {
+    transform: translateY(0px);
+  }
+
+  50% {
+    transform: translateY(-10px);
+  }
+
+  100% {
+    transform: translateY(0px);
+  }
 }
 </style>

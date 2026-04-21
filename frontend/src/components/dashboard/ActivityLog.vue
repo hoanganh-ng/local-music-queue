@@ -16,7 +16,7 @@
 </template>
 
 <script setup>
-import { ref, watch, nextTick, computed } from 'vue'
+import { ref, watch, nextTick } from 'vue'
 
 const props = defineProps({
   logs: {
@@ -27,11 +27,8 @@ const props = defineProps({
 
 const logContainer = ref(null)
 
-// Newest logs at the top
-const displayLogs = computed(() => [...props.logs])
-
 // Auto-scroll to top when new logs arrive
-watch(() => logs, async () => {
+watch(() => props.logs, async () => {
   await nextTick()
   if (logContainer.value) {
     logContainer.value.scrollTo({
