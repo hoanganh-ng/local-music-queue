@@ -69,5 +69,12 @@ export const api = {
       method: 'POST',
       body: { status, requested_by: requestedBy }
     })
+  },
+
+  // YouTube Search
+  async searchYouTube(query) {
+    return this.request(`/youtube/search?q=${encodeURIComponent(query)}`, {
+      method: 'GET'
+    })
   }
 }

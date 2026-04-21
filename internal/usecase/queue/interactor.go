@@ -109,3 +109,17 @@ func (i *Interactor) SetStatus(ctx context.Context, requestedBy string, status e
 
 	return nil
 }
+
+// SearchYouTube searches YouTube and returns search results.
+func (i *Interactor) SearchYouTube(ctx context.Context, query string) ([]*entity.SearchResult, error) {
+	if query == "" {
+		return nil, fmt.Errorf("search query cannot be empty")
+	}
+
+	results, err := i.youtube.SearchYouTube(ctx, query, 5)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search YouTube: %w", err)
+	}
+
+	return results, nil
+}

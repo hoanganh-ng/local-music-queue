@@ -242,3 +242,78 @@ func TestHandleSetStatus_Error(t *testing.T) {
 		t.Errorf("expected 500, got %d", rr.Code)
 	}
 }
+
+// --- SearchYouTube Tests ---
+
+func TestHandleSearchYouTube_Success(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows: requires shell scripts")
+	}
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	repo, err := persistence.NewSQLiteRepository(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+
+	// Create a fake yt-dlp script that returns search results
+	script := filepath.Join(dir, "fake-ytdlp")
+	content := `#!/bin/sh
+cat <<'EOF'
+{"id":"result1","title":"Test Song 1","uploader":"Artist 1","duration":180.0,"thumbnail":"thumb1.jpg","webpage_url":"https://youtube.com/watch?v=result1"}
+{"id":"result2","title":"Test Song 2","uploader":"Artist 2","duration":240.0,"thumbnail":"thumb2.jpg","webpage_url":"https://youtube.com/watch?v=result2"}
+EOF
+`
+	os.WriteFile(script, []byte(content), 0755)
+	ytSvc := youtube.NewYTDLPService(script)
+
+	queueInteractor := queue.NewInteractor(repo, ytSvc)
+	authInteractor := auth.NewInteractor("1234", "5678")
+	actInteractor := activity.NewInteractor(repo)
+	hub := ws.NewHub(queueInteractor.GetState)
+	go hub.Run()
+
+	h := NewHandlers(queueInteractor, authInteractor, actInteractor, hub)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/youtube/search?q=test", nil)
+	rr := httptest.NewRecorder()
+
+	h.HandleSearchYouTube(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+
+	var results []map[string]interface{}
+	json.NewDecoder(rr.Body).Decode(&results)
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+}
+
+func TestHandleSearchYouTube_MissingQuery(t *testing.T) {
+	h := newTestHandlers(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/youtube/search", nil)
+	rr := httptest.NewRecorder()
+
+	h.HandleSearchYouTube(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rr.Code)
+	}
+}
+
+func TestHandleSearchYouTube_EmptyQuery(t *testing.T) {
+	h := newTestHandlers(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/youtube/search?q=", nil)
+	rr := httptest.NewRecorder()
+
+	h.HandleSearchYouTube(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rr.Code)
+	}
+}

@@ -219,12 +219,12 @@ const handleSongEnd = async () => {
   flex: 2;
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: 1rem;
   min-width: 400px;
 }
 
 .player-wrapper {
-  flex-grow: 1;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
 }

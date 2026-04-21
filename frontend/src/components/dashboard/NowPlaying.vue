@@ -164,8 +164,7 @@ watch(() => props.status, (newStatus) => {
 .now-playing {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  padding: 2rem;
+  padding: 1.5rem;
   overflow: hidden;
 }
 
@@ -173,7 +172,7 @@ watch(() => props.status, (newStatus) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 2rem;
+  margin-bottom: 1.5rem;
 }
 
 .player-header h2 {
@@ -212,14 +211,13 @@ watch(() => props.status, (newStatus) => {
 .song-details {
   display: flex;
   flex-direction: column;
-  flex-grow: 1;
-  gap: 1.5rem;
+  gap: 1rem;
   align-items: center;
 }
 
 .artwork-container {
   width: 100%;
-  max-width: 480px;
+  max-width: 400px;
   aspect-ratio: 16 / 9;
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -282,7 +280,7 @@ watch(() => props.status, (newStatus) => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  height: 100%;
+  min-height: 200px;
   color: var(--text-muted);
 }
 
