@@ -24,8 +24,8 @@
         <p class="song-meta">Added by: <strong>{{ currentSong.added_by }}</strong></p>
       </div>
 
-      <!-- Controls (Host only) -->
-      <div v-if="isHost" class="host-controls">
+      <!-- Controls (Host or Admin) -->
+      <div v-if="canControl" class="host-controls">
         <BaseButton variant="secondary" @click="$emit('toggle-playback')">
           <span v-if="status === 'playing'">Pause</span>
           <span v-else>Play</span>
@@ -63,6 +63,10 @@ const props = defineProps({
     default: 'stopped'
   },
   isHost: {
+    type: Boolean,
+    default: false
+  },
+  canControl: {
     type: Boolean,
     default: false
   }

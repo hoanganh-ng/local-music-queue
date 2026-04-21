@@ -13,13 +13,15 @@ var (
 type Interactor struct {
 	clientPIN string
 	hostPIN   string
+	adminPIN  string
 }
 
 // NewInteractor creates a new Auth Interactor.
-func NewInteractor(clientPIN, hostPIN string) *Interactor {
+func NewInteractor(clientPIN, hostPIN, adminPIN string) *Interactor {
 	return &Interactor{
 		clientPIN: clientPIN,
 		hostPIN:   hostPIN,
+		adminPIN:  adminPIN,
 	}
 }
 
@@ -30,6 +32,8 @@ func (i *Interactor) Login(pin string, displayName string) (*entity.User, error)
 	switch pin {
 	case i.hostPIN:
 		role = entity.RoleHost
+	case i.adminPIN:
+		role = entity.RoleAdmin
 	case i.clientPIN:
 		role = entity.RoleGuest
 	default:

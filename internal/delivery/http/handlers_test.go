@@ -44,7 +44,7 @@ EOF
 	}
 
 	queueInteractor := queue.NewInteractor(repo, ytSvc)
-	authInteractor := auth.NewInteractor("1234", "5678")
+	authInteractor := auth.NewInteractor("1234", "5678", "9999")
 	actInteractor := activity.NewInteractor(repo)
 	hub := ws.NewHub(queueInteractor.GetState)
 	go hub.Run()
@@ -269,7 +269,7 @@ EOF
 	ytSvc := youtube.NewYTDLPService(script)
 
 	queueInteractor := queue.NewInteractor(repo, ytSvc)
-	authInteractor := auth.NewInteractor("1234", "5678")
+	authInteractor := auth.NewInteractor("1234", "5678", "9999")
 	actInteractor := activity.NewInteractor(repo)
 	hub := ws.NewHub(queueInteractor.GetState)
 	go hub.Run()

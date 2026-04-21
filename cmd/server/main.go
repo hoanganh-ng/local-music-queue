@@ -37,6 +37,7 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	cfg := config.Load()
 	log.Printf("Client PIN: %s", cfg.ClientPIN)
 	log.Printf("Host PIN: %s", cfg.HostPIN)
+	log.Printf("Admin PIN: %s", cfg.AdminPIN)
 	log.Printf("Starting Local Music Queue server on port %s", cfg.Port)
 
 	// Validate configuration
@@ -54,7 +55,7 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 
 	// 3. Initialize Usecases
 	qInteractor := usecaseQueue.NewInteractor(repo, ytService)
-	authInteractor := usecaseAuth.NewInteractor(cfg.ClientPIN, cfg.HostPIN)
+	authInteractor := usecaseAuth.NewInteractor(cfg.ClientPIN, cfg.HostPIN, cfg.AdminPIN)
 	actInteractor := usecaseActivity.NewInteractor(repo)
 
 	// 4. Initialize Delivery with queue state callback

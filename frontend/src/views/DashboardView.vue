@@ -5,8 +5,8 @@
         <h2>Local Music Queue</h2>
       </div>
       <div class="user-info">
-        <span class="user-role" :class="isHost ? 'role-host' : 'role-guest'">
-          {{ isHost ? 'Host' : 'Guest' }}
+        <span class="user-role" :class="roleBadgeClass">
+          {{ roleBadgeLabel }}
         </span>
         <span class="user-name">{{ currentUser?.display_name }}</span>
         <button class="logout-btn" @click="handleLogout">Exit</button>
@@ -26,6 +26,7 @@
             :currentSong="globalStore.queueState.current_song"
             :status="globalStore.queueState.status"
             :isHost="isHost"
+            :canControl="canControl"
             @toggle-playback="togglePlayback"
             @skip="skipSong"
           />
@@ -40,6 +41,7 @@
         <QueueList
           :queue="globalStore.queueState.queue || []"
           :isHost="isHost"
+          :canControl="canControl"
           :currentIndex="globalStore.queueState.current_index"
         />
       </aside>
@@ -63,6 +65,21 @@ const router = useRouter()
 
 const currentUser = computed(() => globalStore.currentUser)
 const isHost = computed(() => currentUser.value?.role === 'host')
+const canControl = computed(() => ['host', 'admin'].includes(currentUser.value?.role))
+
+const roleBadgeClass = computed(() => {
+  const role = currentUser.value?.role
+  if (role === 'host') return 'role-host'
+  if (role === 'admin') return 'role-admin'
+  return 'role-guest'
+})
+
+const roleBadgeLabel = computed(() => {
+  const role = currentUser.value?.role
+  if (role === 'host') return 'Host'
+  if (role === 'admin') return 'Admin'
+  return 'Guest'
+})
 
 const submitFormRef = ref(null)
 let unsubscribeSongAdded = null
@@ -164,6 +181,12 @@ const skipSong = async () => {
   background: rgba(46, 204, 113, 0.2);
   color: #2ecc71;
   border: 1px solid rgba(46, 204, 113, 0.4);
+}
+
+.role-admin {
+  background: rgba(230, 126, 34, 0.2);
+  color: #e67e22;
+  border: 1px solid rgba(230, 126, 34, 0.4);
 }
 
 .role-guest {

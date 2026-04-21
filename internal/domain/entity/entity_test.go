@@ -269,6 +269,11 @@ func TestUser_CanControlPlayback(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "admin can control",
+			user: User{DisplayName: "Admin", Role: RoleAdmin},
+			want: true,
+		},
+		{
 			name: "guest cannot control",
 			user: User{DisplayName: "Guest", Role: RoleGuest},
 			want: false,
@@ -285,6 +290,44 @@ func TestUser_CanControlPlayback(t *testing.T) {
 			got := tt.user.CanControlPlayback()
 			if got != tt.want {
 				t.Errorf("User.CanControlPlayback() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUser_CanHostPlayer(t *testing.T) {
+	tests := []struct {
+		name string
+		user User
+		want bool
+	}{
+		{
+			name: "host can host player",
+			user: User{DisplayName: "Host", Role: RoleHost},
+			want: true,
+		},
+		{
+			name: "admin cannot host player",
+			user: User{DisplayName: "Admin", Role: RoleAdmin},
+			want: false,
+		},
+		{
+			name: "guest cannot host player",
+			user: User{DisplayName: "Guest", Role: RoleGuest},
+			want: false,
+		},
+		{
+			name: "empty role cannot host player",
+			user: User{DisplayName: "Unknown", Role: ""},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.user.CanHostPlayer()
+			if got != tt.want {
+				t.Errorf("User.CanHostPlayer() = %v, want %v", got, tt.want)
 			}
 		})
 	}

@@ -11,6 +11,7 @@ type Config struct {
 	Port      string
 	ClientPIN string
 	HostPIN   string
+	AdminPIN  string
 	DBPath    string
 	YTDLPPath string
 }
@@ -20,7 +21,8 @@ func Load() *Config {
 	return &Config{
 		Port:      getEnv("PORT", "1111"),
 		ClientPIN: getEnv("CLIENT_PIN", "5555"),
-		HostPIN:   getEnv("HOST_PIN", "6666"),
+		HostPIN:   getEnv("HOST_PIN", "9512"),
+		AdminPIN:  getEnv("ADMIN_PIN", "1598"),
 		DBPath:    getEnv("DB_PATH", "./.localdb/music_queue.db"),
 		YTDLPPath: getEnv("YTDLP_PATH", "yt-dlp"),
 	}

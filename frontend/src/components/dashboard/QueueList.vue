@@ -3,7 +3,7 @@
     <div class="queue-header">
       <h3>Up Next</h3>
       <div class="header-controls">
-        <button v-if="isHost && queue.length > 0" class="clear-btn" @click="handleClear">Clear</button>
+        <button v-if="canControl && queue.length > 0" class="clear-btn" @click="handleClear">Clear</button>
         <span class="queue-count">{{ queue.length }} songs</span>
       </div>
     </div>
@@ -20,7 +20,7 @@
             <div class="item-title">{{ song.title || song.url }}</div>
             <div class="item-meta">Added by {{ song.added_by }}</div>
           </div>
-          <button v-if="isHost" class="remove-btn" @click="handleRemove(index)" title="Remove from queue">
+          <button v-if="canControl" class="remove-btn" @click="handleRemove(index)" title="Remove from queue">
             &times;
           </button>
         </div>
@@ -47,6 +47,10 @@ const props = defineProps({
     default: -1
   },
   isHost: {
+    type: Boolean,
+    default: false
+  },
+  canControl: {
     type: Boolean,
     default: false
   }
