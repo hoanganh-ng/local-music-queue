@@ -5,6 +5,20 @@ class WebSocketClient {
     this.ws = null
     this.reconnectTimer = null
     this.isConnecting = false
+    this.lastSeqNum = 0
+    this.callbacks = {
+      songAdded: []
+    }
+  }
+
+  onSongAdded(callback) {
+    this.callbacks.songAdded.push(callback)
+    return () => {
+      const index = this.callbacks.songAdded.indexOf(callback)
+      if (index > -1) {
+        this.callbacks.songAdded.splice(index, 1)
+      }
+    }
   }
 
   connect() {
@@ -53,7 +67,46 @@ class WebSocketClient {
   }
 
   handleMessage(message) {
+    // Track sequence number
+    if (message.seq_num !== undefined) {
+      // Detect gap (missed messages)
+      if (this.lastSeqNum > 0 && message.seq_num > this.lastSeqNum + 1) {
+        console.warn(`Sequence gap detected: ${this.lastSeqNum} -> ${message.seq_num}`)
+        // For now, just log. Could request full sync here.
+      }
+      this.lastSeqNum = message.seq_num
+    }
+
     switch (message.type) {
+      case 'full_sync':
+        globalStore.updateQueueState(message.data.state)
+        break
+      case 'user_joined':
+        globalStore.addActivity(message.data.activity)
+        break
+      case 'song_added':
+        globalStore.addSong(message.data.song, message.data.position)
+        globalStore.addActivity(message.data.activity)
+        this.callbacks.songAdded.forEach(cb => {
+          try {
+            cb(message.data.song)
+          } catch (e) {
+            console.error('Error in songAdded callback:', e)
+          }
+        })
+        break
+      case 'song_skipped':
+        globalStore.updateCurrentIndex(message.data.new_index, message.data.current_song)
+        globalStore.updatePlaybackStatus(message.data.status)
+        globalStore.updateElapsed(message.data.elapsed)
+        globalStore.addActivity(message.data.activity)
+        break
+      case 'status_changed':
+        globalStore.updatePlaybackStatus(message.data.status)
+        globalStore.updateElapsed(message.data.elapsed)
+        globalStore.addActivity(message.data.activity)
+        break
+      // Keep backward compatibility
       case 'queue_updated':
       case 'status_updated':
         if (message.state) {

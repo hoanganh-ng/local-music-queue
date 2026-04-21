@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"fmt"
 	"local-music-queue/internal/delivery/ws"
 	"local-music-queue/internal/domain/entity"
 	"local-music-queue/internal/usecase/activity"
@@ -48,11 +49,11 @@ func (h *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	joinActivity := entity.NewActivity(entity.ActivityUserJoined, user.DisplayName, "joined the room")
 	_ = h.activity.LogActivity(r.Context(), joinActivity)
 
-	// Broadcast update so others see the join in their activity log
-	state, _ := h.queue.GetState(r.Context())
-	h.hub.Broadcast(map[string]interface{}{
-		"type":  "queue_updated",
-		"state": state,
+	// Broadcast DELTA: only user info and activity
+	h.hub.Broadcast(ws.EventUserJoined, ws.UserJoinedData{
+		DisplayName: user.DisplayName,
+		Role:        string(user.Role),
+		Activity:    joinActivity,
 	})
 
 	json.NewEncoder(w).Encode(user)
@@ -85,11 +86,19 @@ func (h *Handlers) HandleAddSong(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Broadcast update
+	// Get current state to determine position
 	state, _ := h.queue.GetState(r.Context())
-	h.hub.Broadcast(map[string]interface{}{
-		"type":  "queue_updated",
-		"state": state,
+	position := len(state.Songs) - 1 // Song was added at end
+
+	// Get the activity that was just logged
+	activity := entity.NewActivity(entity.ActivitySongAdded, req.AddedBy,
+		fmt.Sprintf("added \"%s\"", song.Title))
+
+	// Broadcast DELTA: only the new song
+	h.hub.Broadcast(ws.EventSongAdded, ws.SongAddedData{
+		Song:     *song,
+		Position: position,
+		Activity: activity,
 	})
 
 	json.NewEncoder(w).Encode(song)
@@ -106,17 +115,35 @@ func (h *Handlers) HandleSkipSong(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get state before skip to know previous index
+	stateBefore, _ := h.queue.GetState(r.Context())
+	previousIndex := stateBefore.CurrentIndex
+
 	err := h.queue.SkipSong(r.Context(), req.RequestedBy)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Broadcast update
-	state, _ := h.queue.GetState(r.Context())
-	h.hub.Broadcast(map[string]interface{}{
-		"type":  "queue_updated",
-		"state": state,
+	// Get state after skip
+	stateAfter, _ := h.queue.GetState(r.Context())
+
+	var currentSong *entity.Song
+	if stateAfter.CurrentIndex >= 0 && stateAfter.CurrentIndex < len(stateAfter.Songs) {
+		currentSong = &stateAfter.Songs[stateAfter.CurrentIndex]
+	}
+
+	activity := entity.NewActivity(entity.ActivitySongSkipped, req.RequestedBy,
+		"skipped the current song")
+
+	// Broadcast DELTA: only index changes and new current song
+	h.hub.Broadcast(ws.EventSongSkipped, ws.SongSkippedData{
+		PreviousIndex: previousIndex,
+		NewIndex:      stateAfter.CurrentIndex,
+		CurrentSong:   currentSong,
+		Status:        stateAfter.Status,
+		Elapsed:       stateAfter.Elapsed,
+		Activity:      activity,
 	})
 
 	w.WriteHeader(http.StatusNoContent)
@@ -140,11 +167,15 @@ func (h *Handlers) HandleSetStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Broadcast update
 	state, _ := h.queue.GetState(r.Context())
-	h.hub.Broadcast(map[string]interface{}{
-		"type":  "status_updated",
-		"state": state,
+	activity := entity.NewActivity(entity.ActivityPlayback, req.RequestedBy,
+		fmt.Sprintf("changed status to %s", string(req.Status)))
+
+	// Broadcast DELTA: only status and elapsed
+	h.hub.Broadcast(ws.EventStatusChanged, ws.StatusChangedData{
+		Status:   state.Status,
+		Elapsed:  state.Elapsed,
+		Activity: activity,
 	})
 
 	w.WriteHeader(http.StatusNoContent)

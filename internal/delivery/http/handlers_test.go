@@ -46,7 +46,7 @@ EOF
 	queueInteractor := queue.NewInteractor(repo, ytSvc)
 	authInteractor := auth.NewInteractor("1234", "5678")
 	actInteractor := activity.NewInteractor(repo)
-	hub := ws.NewHub()
+	hub := ws.NewHub(queueInteractor.GetState)
 	go hub.Run()
 
 	return NewHandlers(queueInteractor, authInteractor, actInteractor, hub)

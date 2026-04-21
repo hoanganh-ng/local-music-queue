@@ -32,7 +32,7 @@
           />
         </div>
         <div class="input-wrapper">
-          <SubmitForm @submit="addSong" />
+          <SubmitForm ref="submitFormRef" @submit="addSong" />
         </div>
       </section>
 
@@ -45,7 +45,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { globalStore } from '../store'
 import { api } from '../services/api'
@@ -61,9 +61,18 @@ const router = useRouter()
 const currentUser = computed(() => globalStore.currentUser)
 const isHost = computed(() => currentUser.value?.role === 'host')
 
+const submitFormRef = ref(null)
+let unsubscribeSongAdded = null
+
 onMounted(async () => {
   // Connect WebSocket
   wsClient.connect()
+
+  unsubscribeSongAdded = wsClient.onSongAdded((song) => {
+    if (submitFormRef.value) {
+      submitFormRef.value.handleSongAdded(song)
+    }
+  })
 
   // Fetch initial queue state
   try {
@@ -75,6 +84,9 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (unsubscribeSongAdded) {
+    unsubscribeSongAdded()
+  }
   wsClient.disconnect()
 })
 
@@ -85,12 +97,7 @@ const handleLogout = () => {
 }
 
 const addSong = async (url) => {
-  try {
-    await api.addSong(url, currentUser.value.display_name)
-  } catch (e) {
-    console.error("Failed to add song:", e)
-    alert("Failed to add song. Check URL or try again.")
-  }
+  await api.addSong(url, currentUser.value.display_name)
 }
 
 const togglePlayback = async () => {

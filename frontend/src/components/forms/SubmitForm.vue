@@ -22,7 +22,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, onUnmounted } from 'vue'
 import BaseInput from '../ui/BaseInput.vue'
 import BaseButton from '../ui/BaseButton.vue'
 
@@ -31,11 +31,38 @@ const emit = defineEmits(['submit'])
 const url = ref('')
 const isLoading = ref(false)
 const error = ref('')
+const pendingUrl = ref(null)
+const completionTimeout = ref(null)
+
+const handleSongAdded = (song) => {
+  if (!pendingUrl.value) return
+
+  if (normalizeUrl(song.url) === normalizeUrl(pendingUrl.value)) {
+    clearTimeout(completionTimeout.value)
+    url.value = ''
+    isLoading.value = false
+    pendingUrl.value = null
+    error.value = ''
+  }
+}
+
+const normalizeUrl = (urlString) => {
+  try {
+    const url = new URL(urlString)
+    if (url.hostname.includes('youtube.com')) {
+      return url.searchParams.get('v') || urlString
+    } else if (url.hostname.includes('youtu.be')) {
+      return url.pathname.slice(1) || urlString
+    }
+    return urlString
+  } catch {
+    return urlString
+  }
+}
 
 const submit = async () => {
   if (!url.value.trim()) return
 
-  // Basic youtube url validation
   const ytRegex = /^(https?\:\/\/)?(www\.youtube\.com|youtu\.?be)\/.+$/
   if (!ytRegex.test(url.value.trim())) {
     error.value = "Please enter a valid YouTube URL."
@@ -44,17 +71,35 @@ const submit = async () => {
 
   error.value = ''
   isLoading.value = true
+  pendingUrl.value = url.value.trim()
 
   try {
-    emit('submit', url.value.trim())
-    url.value = '' // Clear on successful submit init
-  } finally {
-    // Parent should handle actual loading state if needed, but we reset here quickly
-    setTimeout(() => {
-      isLoading.value = false
-    }, 500)
+    await emit('submit', pendingUrl.value)
+
+    completionTimeout.value = setTimeout(() => {
+      if (pendingUrl.value) {
+        error.value = "Request timed out. Please try again."
+        isLoading.value = false
+        pendingUrl.value = null
+      }
+    }, 45000)
+
+  } catch (e) {
+    error.value = e.message || "Failed to add song. Please try again."
+    isLoading.value = false
+    pendingUrl.value = null
   }
 }
+
+onUnmounted(() => {
+  if (completionTimeout.value) {
+    clearTimeout(completionTimeout.value)
+  }
+})
+
+defineExpose({
+  handleSongAdded
+})
 </script>
 
 <style scoped>

@@ -57,8 +57,8 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	authInteractor := usecaseAuth.NewInteractor(cfg.ClientPIN, cfg.HostPIN)
 	actInteractor := usecaseActivity.NewInteractor(repo)
 
-	// 4. Initialize Delivery
-	hub := ws.NewHub()
+	// 4. Initialize Delivery with queue state callback
+	hub := ws.NewHub(qInteractor.GetState)
 	go hub.Run() // Start WebSocket hub loop
 
 	handlers := delivery.NewHandlers(qInteractor, authInteractor, actInteractor, hub)

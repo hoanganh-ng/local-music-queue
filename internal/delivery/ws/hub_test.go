@@ -14,7 +14,8 @@ import (
 
 func setupTestHub(t *testing.T) (*Hub, *httptest.Server) {
 	t.Helper()
-	hub := NewHub()
+	// Pass nil for getQueueState since tests don't need initial sync
+	hub := NewHub(nil)
 	go hub.Run()
 
 	server := httptest.NewServer(http.HandlerFunc(hub.RegisterHandler))
@@ -41,9 +42,9 @@ func TestHub_RegisterAndBroadcast(t *testing.T) {
 	// Wait for registration to be processed
 	time.Sleep(50 * time.Millisecond)
 
-	// Broadcast a message
-	msg := map[string]string{"type": "test", "data": "hello"}
-	hub.Broadcast(msg)
+	// Broadcast a message using new signature
+	testData := map[string]string{"message": "hello"}
+	hub.Broadcast("test", testData)
 
 	// Read the message
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -52,15 +53,22 @@ func TestHub_RegisterAndBroadcast(t *testing.T) {
 		t.Fatalf("failed to read message: %v", err)
 	}
 
-	var received map[string]string
+	var received struct {
+		Type   string            `json:"type"`
+		Data   map[string]string `json:"data"`
+		SeqNum int64             `json:"seq_num"`
+	}
 	if err := json.Unmarshal(data, &received); err != nil {
 		t.Fatalf("failed to unmarshal: %v", err)
 	}
-	if received["type"] != "test" {
-		t.Errorf("expected type 'test', got '%s'", received["type"])
+	if received.Type != "test" {
+		t.Errorf("expected type 'test', got '%s'", received.Type)
 	}
-	if received["data"] != "hello" {
-		t.Errorf("expected data 'hello', got '%s'", received["data"])
+	if received.Data["message"] != "hello" {
+		t.Errorf("expected message 'hello', got '%s'", received.Data["message"])
+	}
+	if received.SeqNum != 1 {
+		t.Errorf("expected seq_num 1, got %d", received.SeqNum)
 	}
 }
 
@@ -75,8 +83,7 @@ func TestHub_MultipleClients(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	msg := map[string]string{"type": "broadcast"}
-	hub.Broadcast(msg)
+	hub.Broadcast("broadcast", map[string]string{"test": "data"})
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -89,10 +96,12 @@ func TestHub_MultipleClients(t *testing.T) {
 			t.Errorf("%s: failed to read: %v", name, err)
 			return
 		}
-		var received map[string]string
+		var received struct {
+			Type string `json:"type"`
+		}
 		json.Unmarshal(data, &received)
-		if received["type"] != "broadcast" {
-			t.Errorf("%s: expected type 'broadcast', got '%s'", name, received["type"])
+		if received.Type != "broadcast" {
+			t.Errorf("%s: expected type 'broadcast', got '%s'", name, received.Type)
 		}
 	}
 
@@ -128,7 +137,7 @@ func TestHub_ClientDisconnect(t *testing.T) {
 	// Send broadcasts to trigger cleanup of the dead client.
 	// The hub removes clients when WriteMessage fails.
 	for i := 0; i < 3; i++ {
-		hub.Broadcast(map[string]string{"type": "cleanup"})
+		hub.Broadcast("cleanup", map[string]string{"test": "data"})
 		time.Sleep(100 * time.Millisecond)
 	}
 
@@ -175,7 +184,7 @@ func TestHub_Unregister(t *testing.T) {
 }
 
 func TestHub_RegisterHandler_UpgradeError(t *testing.T) {
-	hub := NewHub()
+	hub := NewHub(nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	// Not an upgrade request, so upgrader.Upgrade will fail
@@ -197,7 +206,7 @@ func TestHub_Broadcast_MarshalError(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Broadcast an unmarshalable value (a channel)
-	hub.Broadcast(make(chan int))
+	hub.Broadcast("test", make(chan int))
 
 	time.Sleep(50 * time.Millisecond)
 
