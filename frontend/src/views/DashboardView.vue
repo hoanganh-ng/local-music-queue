@@ -22,13 +22,12 @@
       <!-- Center Column: Player and Input -->
       <section class="col-center">
         <div class="player-wrapper">
-          <NowPlaying 
+          <NowPlaying
             :currentSong="globalStore.queueState.current_song"
             :status="globalStore.queueState.status"
             :isHost="isHost"
             @toggle-playback="togglePlayback"
             @skip="skipSong"
-            @song-end="handleSongEnd"
           />
         </div>
         <div class="input-wrapper">
@@ -38,7 +37,11 @@
 
       <!-- Right Column: Queue List -->
       <aside class="col-right">
-        <QueueList :queue="globalStore.queueState.queue || []" />
+        <QueueList
+          :queue="globalStore.queueState.queue || []"
+          :isHost="isHost"
+          :currentIndex="globalStore.queueState.current_index"
+        />
       </aside>
     </main>
   </div>
@@ -115,17 +118,6 @@ const skipSong = async () => {
     await api.skipSong(currentUser.value.display_name)
   } catch (e) {
     console.error("Failed to skip song:", e)
-  }
-}
-
-const handleSongEnd = async () => {
-  if (isHost.value) {
-    // If the song ends naturally, the host skips to the next
-    try {
-      await api.skipSong("System (Auto-Skip)")
-    } catch (e) {
-      console.error("Failed to auto-skip song:", e)
-    }
   }
 }
 </script>

@@ -106,6 +106,25 @@ class WebSocketClient {
         globalStore.updateElapsed(message.data.elapsed)
         globalStore.addActivity(message.data.activity)
         break
+      case 'elapsed_sync':
+        globalStore.updateElapsed(message.data.elapsed)
+        break
+      case 'song_previous':
+        globalStore.updateCurrentIndex(message.data.new_index, message.data.current_song)
+        globalStore.updatePlaybackStatus(message.data.status)
+        globalStore.updateElapsed(message.data.elapsed)
+        globalStore.addActivity(message.data.activity)
+        break
+      case 'song_removed':
+        globalStore.removeSong(message.data.removed_index)
+        globalStore.updatePlaybackStatus(message.data.status)
+        globalStore.addActivity(message.data.activity)
+        break
+      case 'queue_cleared':
+        globalStore.clearQueue()
+        globalStore.updatePlaybackStatus(message.data.status)
+        globalStore.addActivity(message.data.activity)
+        break
       // Keep backward compatibility
       case 'queue_updated':
       case 'status_updated':

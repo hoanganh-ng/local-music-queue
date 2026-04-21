@@ -84,6 +84,55 @@ func (q *Queue) Add(song Song) {
 	}
 }
 
+// Remove removes a song at the specified index from the queue.
+func (q *Queue) Remove(index int) error {
+	if index < 0 || index >= len(q.Songs) {
+		return errors.New("invalid index")
+	}
+
+	// Remove the song
+	q.Songs = append(q.Songs[:index], q.Songs[index+1:]...)
+
+	// Adjust the current index if necessary
+	if index < q.CurrentIndex {
+		q.CurrentIndex--
+	} else if index == q.CurrentIndex {
+		// If the currently playing song is removed
+		if len(q.Songs) == 0 {
+			q.CurrentIndex = -1
+			q.Status = StatusIdle
+			q.Elapsed = 0
+		} else if q.CurrentIndex >= len(q.Songs) {
+			// It was the last song in the list
+			q.CurrentIndex = len(q.Songs) - 1
+			q.Status = StatusPlaying
+			q.Elapsed = 0
+		} else {
+			// A new song takes its place
+			q.Elapsed = 0
+			q.Status = StatusPlaying
+		}
+	}
+
+	return nil
+}
+
+// Clear removes all upcoming songs from the queue, leaving only the currently playing one.
+func (q *Queue) Clear() {
+	if q.CurrentIndex == -1 || len(q.Songs) == 0 {
+		q.Songs = []Song{}
+		q.CurrentIndex = -1
+		q.Status = StatusIdle
+		q.Elapsed = 0
+		return
+	}
+
+	// Keep only the currently playing song
+	currentSong := q.Songs[q.CurrentIndex]
+	q.Songs = []Song{currentSong}
+	q.CurrentIndex = 0
+}
+
 // IsValidTransition checks if a status transition is valid (simplified).
 func (q *Queue) IsValidTransition(newStatus PlaybackStatus) bool {
 	if q.CurrentIndex == -1 && newStatus != StatusIdle {

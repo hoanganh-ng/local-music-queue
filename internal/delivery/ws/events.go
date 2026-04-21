@@ -11,6 +11,10 @@ const (
 	EventSongAdded     = "song_added"
 	EventSongSkipped   = "song_skipped"
 	EventStatusChanged = "status_changed"
+	EventElapsedSync   = "elapsed_sync"
+	EventSongPrevious  = "song_previous"
+	EventSongRemoved   = "song_removed"
+	EventQueueCleared  = "queue_cleared"
 )
 
 // UserJoinedData contains only the new user info
@@ -47,4 +51,33 @@ type StatusChangedData struct {
 // FullSyncData contains complete state for initial sync
 type FullSyncData struct {
 	State *entity.Queue `json:"state"`
+}
+
+// ElapsedSyncData contains the updated elapsed time without activity log
+type ElapsedSyncData struct {
+	Elapsed int `json:"elapsed"`
+}
+
+// SongPreviousData contains index changes for previous song
+type SongPreviousData struct {
+	PreviousIndex int                   `json:"previous_index"`
+	NewIndex      int                   `json:"new_index"`
+	CurrentSong   *entity.Song          `json:"current_song"`
+	Status        entity.PlaybackStatus `json:"status"`
+	Elapsed       int                   `json:"elapsed"`
+	Activity      entity.Activity       `json:"activity"`
+}
+
+// SongRemovedData contains info about removed song
+type SongRemovedData struct {
+	RemovedIndex int             `json:"removed_index"`
+	NewIndex     int             `json:"new_index"`
+	Status       entity.PlaybackStatus `json:"status"`
+	Activity     entity.Activity `json:"activity"`
+}
+
+// QueueClearedData signals queue has been cleared
+type QueueClearedData struct {
+	Status   entity.PlaybackStatus `json:"status"`
+	Activity entity.Activity       `json:"activity"`
 }

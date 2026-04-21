@@ -31,15 +31,21 @@
 
       <!-- Controls (Host only) -->
       <div v-if="isHost" class="host-controls">
-        <BaseButton 
-          variant="secondary" 
+        <BaseButton
+          variant="secondary"
           @click="$emit('toggle-playback')"
         >
           <span v-if="status === 'playing'">Pause</span>
           <span v-else>Play</span>
         </BaseButton>
-        <BaseButton 
-          variant="primary" 
+        <BaseButton
+          variant="primary"
+          @click="handlePrev"
+        >
+          Previous
+        </BaseButton>
+        <BaseButton
+          variant="primary"
           @click="$emit('skip')"
         >
           Skip
@@ -56,7 +62,9 @@
 </template>
 
 <script setup>
-import { computed, watch, onMounted, ref } from 'vue'
+import { computed, watch, onMounted, ref, onUnmounted } from 'vue'
+import { api } from '../../services/api'
+import { globalStore } from '../../store'
 import BaseButton from '../ui/BaseButton.vue'
 
 const props = defineProps({
@@ -79,6 +87,7 @@ const emit = defineEmits(['toggle-playback', 'skip', 'song-end'])
 // The iframe player instance
 let ytPlayer = null
 const showPlayer = ref(true)
+let syncInterval = null
 
 // Helper to extract Video ID from URL
 const videoId = computed(() => {
@@ -101,11 +110,17 @@ onMounted(() => {
       tag.src = "https://www.youtube.com/iframe_api"
       const firstScriptTag = document.getElementsByTagName('script')[0]
       firstScriptTag.parentNode.insertBefore(tag, firstScriptTag)
-      
+
       window.onYouTubeIframeAPIReady = initPlayer
     } else {
       initPlayer()
     }
+  }
+})
+
+onUnmounted(() => {
+  if (syncInterval) {
+    clearInterval(syncInterval)
   }
 })
 
@@ -123,11 +138,28 @@ function initPlayer() {
       'onStateChange': onPlayerStateChange
     }
   })
+
+  // Start sync interval for playback time
+  if (syncInterval) clearInterval(syncInterval)
+  syncInterval = setInterval(() => {
+    if (ytPlayer && ytPlayer.getCurrentTime && props.status === 'playing') {
+      const elapsed = Math.floor(ytPlayer.getCurrentTime())
+      api.syncPlayback(elapsed).catch(err => console.error('Sync failed:', err))
+    }
+  }, 5000)
 }
 
 function onPlayerStateChange(event) {
   if (event.data === window.YT.PlayerState.ENDED) {
-    emit('song-end')
+    api.songEnded().catch(err => console.error('Song ended call failed:', err))
+  }
+}
+
+async function handlePrev() {
+  try {
+    await api.prevSong(globalStore.currentUser.display_name)
+  } catch (err) {
+    console.error('Previous song failed:', err)
   }
 }
 

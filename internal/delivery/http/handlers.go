@@ -196,3 +196,159 @@ func (h *Handlers) HandleSearchYouTube(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(results)
 }
+
+type SyncPlaybackRequest struct {
+	Elapsed int `json:"elapsed"`
+}
+
+func (h *Handlers) HandleSyncPlayback(w http.ResponseWriter, r *http.Request) {
+	var req SyncPlaybackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	err := h.queue.SyncPlayback(r.Context(), req.Elapsed)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	h.hub.Broadcast(ws.EventElapsedSync, ws.ElapsedSyncData{
+		Elapsed: req.Elapsed,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handlers) HandleSongEnded(w http.ResponseWriter, r *http.Request) {
+	stateBefore, _ := h.queue.GetState(r.Context())
+	previousIndex := stateBefore.CurrentIndex
+
+	err := h.queue.SongEnded(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	stateAfter, _ := h.queue.GetState(r.Context())
+
+	var currentSong *entity.Song
+	if stateAfter.CurrentIndex >= 0 && stateAfter.CurrentIndex < len(stateAfter.Songs) {
+		currentSong = &stateAfter.Songs[stateAfter.CurrentIndex]
+	}
+
+	activity := entity.NewActivity(entity.ActivityPlayback, "System", "song finished playing")
+
+	h.hub.Broadcast(ws.EventSongSkipped, ws.SongSkippedData{
+		PreviousIndex: previousIndex,
+		NewIndex:      stateAfter.CurrentIndex,
+		CurrentSong:   currentSong,
+		Status:        stateAfter.Status,
+		Elapsed:       stateAfter.Elapsed,
+		Activity:      activity,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type PrevRequest struct {
+	RequestedBy string `json:"requested_by"`
+}
+
+func (h *Handlers) HandlePrevSong(w http.ResponseWriter, r *http.Request) {
+	var req PrevRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	stateBefore, _ := h.queue.GetState(r.Context())
+	previousIndex := stateBefore.CurrentIndex
+
+	err := h.queue.PrevSong(r.Context(), req.RequestedBy)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	stateAfter, _ := h.queue.GetState(r.Context())
+
+	var currentSong *entity.Song
+	if stateAfter.CurrentIndex >= 0 && stateAfter.CurrentIndex < len(stateAfter.Songs) {
+		currentSong = &stateAfter.Songs[stateAfter.CurrentIndex]
+	}
+
+	activity := entity.NewActivity(entity.ActivityPlayback, req.RequestedBy, "went to the previous song")
+
+	h.hub.Broadcast(ws.EventSongPrevious, ws.SongPreviousData{
+		PreviousIndex: previousIndex,
+		NewIndex:      stateAfter.CurrentIndex,
+		CurrentSong:   currentSong,
+		Status:        stateAfter.Status,
+		Elapsed:       stateAfter.Elapsed,
+		Activity:      activity,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type RemoveSongRequest struct {
+	Index       int    `json:"index"`
+	RequestedBy string `json:"requested_by"`
+}
+
+func (h *Handlers) HandleRemoveSong(w http.ResponseWriter, r *http.Request) {
+	var req RemoveSongRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	err := h.queue.RemoveSong(r.Context(), req.RequestedBy, req.Index)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	stateAfter, _ := h.queue.GetState(r.Context())
+	activity := entity.NewActivity(entity.ActivityPlayback, req.RequestedBy, "removed a song from queue")
+
+	h.hub.Broadcast(ws.EventSongRemoved, ws.SongRemovedData{
+		RemovedIndex: req.Index,
+		NewIndex:     stateAfter.CurrentIndex,
+		Status:       stateAfter.Status,
+		Activity:     activity,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type ClearQueueRequest struct {
+	RequestedBy string `json:"requested_by"`
+}
+
+func (h *Handlers) HandleClearQueue(w http.ResponseWriter, r *http.Request) {
+	var req ClearQueueRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	err := h.queue.ClearQueue(r.Context(), req.RequestedBy)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	stateAfter, _ := h.queue.GetState(r.Context())
+	activity := entity.NewActivity(entity.ActivityPlayback, req.RequestedBy, "cleared the queue")
+
+	h.hub.Broadcast(ws.EventQueueCleared, ws.QueueClearedData{
+		Status:   stateAfter.Status,
+		Activity: activity,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+

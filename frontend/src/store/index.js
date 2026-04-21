@@ -85,6 +85,51 @@ export const globalStore = reactive({
     this.queueState.status = status === 'idle' ? 'stopped' : status
   },
 
+  // NEW: Remove song by index
+  removeSong(index) {
+    if (index < 0 || index >= this.queueState.songs.length) return
+
+    this.queueState.songs.splice(index, 1)
+
+    // Adjust current index if necessary (mirroring backend logic)
+    if (index < this.queueState.current_index) {
+      this.queueState.current_index--
+    } else if (index === this.queueState.current_index) {
+      if (this.queueState.songs.length === 0) {
+        this.queueState.current_index = -1
+        this.queueState.current_song = null
+        this.queueState.status = 'stopped'
+        this.queueState.elapsed = 0
+      } else if (this.queueState.current_index >= this.queueState.songs.length) {
+        this.queueState.current_index = this.queueState.songs.length - 1
+        this.queueState.current_song = this.queueState.songs[this.queueState.current_index]
+        this.queueState.elapsed = 0
+      } else {
+        // A new song takes its place at same index
+        this.queueState.current_song = this.queueState.songs[this.queueState.current_index]
+        this.queueState.elapsed = 0
+      }
+    }
+
+    this.recalculateQueue()
+  },
+
+  // NEW: Clear queue (keep only current)
+  clearQueue() {
+    if (this.queueState.current_index === -1 || this.queueState.songs.length === 0) {
+      this.queueState.songs = []
+      this.queueState.current_index = -1
+      this.queueState.current_song = null
+      this.queueState.status = 'stopped'
+      this.queueState.elapsed = 0
+    } else {
+      const currentSong = this.queueState.songs[this.queueState.current_index]
+      this.queueState.songs = [currentSong]
+      this.queueState.current_index = 0
+    }
+    this.recalculateQueue()
+  },
+
   // NEW: Update elapsed time
   updateElapsed(elapsed) {
     this.queueState.elapsed = elapsed
