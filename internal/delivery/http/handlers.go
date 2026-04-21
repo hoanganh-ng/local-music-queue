@@ -69,8 +69,9 @@ func (h *Handlers) HandleGetQueue(w http.ResponseWriter, r *http.Request) {
 }
 
 type AddSongRequest struct {
-	URL     string `json:"url"`
-	AddedBy string `json:"added_by"`
+	URL      string                 `json:"url"`
+	AddedBy  string                 `json:"added_by"`
+	Metadata *entity.SearchResult   `json:"metadata,omitempty"`
 }
 
 func (h *Handlers) HandleAddSong(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +81,7 @@ func (h *Handlers) HandleAddSong(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	song, err := h.queue.AddSong(r.Context(), req.URL, req.AddedBy)
+	song, err := h.queue.AddSong(r.Context(), req.URL, req.AddedBy, req.Metadata)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

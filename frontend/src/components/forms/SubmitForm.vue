@@ -29,7 +29,12 @@
             :class="{ selected: index === selectedIndex }"
             @mouseenter="selectedIndex = index"
           >
-            <img :src="result.thumbnail" :alt="result.title" class="result-thumbnail" />
+            <img
+              :src="result.thumbnail || `https://i.ytimg.com/vi/${result.id}/mqdefault.jpg`"
+              :alt="result.title"
+              class="result-thumbnail"
+              @error="e => e.target.src = `https://i.ytimg.com/vi/${result.id}/mqdefault.jpg`"
+            />
             <div class="result-info" @click="selectResult(result)">
               <div class="result-title">{{ result.title }}</div>
               <div class="result-meta">
@@ -145,7 +150,7 @@ const addResultDirectly = async (result) => {
   searchResults.value = []
   selectedIndex.value = -1
 
-  await submit()
+  await submit(result)
 }
 
 const handleKeydown = (event) => {
@@ -203,7 +208,7 @@ const normalizeUrl = (urlString) => {
   }
 }
 
-const submit = async () => {
+const submit = async (metadata = null) => {
   if (!inputValue.value.trim() || !isYouTubeUrl.value) return
 
   error.value = ''
@@ -212,7 +217,7 @@ const submit = async () => {
   showResults.value = false
 
   try {
-    await emit('submit', pendingUrl.value)
+    emit('submit', pendingUrl.value, metadata)
 
     completionTimeout.value = setTimeout(() => {
       if (pendingUrl.value) {

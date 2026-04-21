@@ -99,8 +99,8 @@ const handleLogout = () => {
   router.push({ name: 'Auth' })
 }
 
-const addSong = async (url) => {
-  await api.addSong(url, currentUser.value.display_name)
+const addSong = async (url, metadata = null) => {
+  await api.addSong(url, currentUser.value.display_name, metadata)
 }
 
 const togglePlayback = async () => {

@@ -7,12 +7,21 @@ import (
 	"fmt"
 	"local-music-queue/internal/domain/entity"
 	"os/exec"
+	"sync"
 	"time"
 )
 
+type cacheEntry struct {
+	results   []*entity.SearchResult
+	expiresAt time.Time
+}
+
 // YTDLPService implements the YouTubeService interface using yt-dlp.
 type YTDLPService struct {
-	binaryPath string
+	binaryPath  string
+	cache       map[string]cacheEntry
+	cacheMu     sync.RWMutex
+	cacheTTL    time.Duration
 }
 
 // NewYTDLPService creates a new yt-dlp service.
@@ -22,6 +31,8 @@ func NewYTDLPService(binaryPath string) *YTDLPService {
 	}
 	return &YTDLPService{
 		binaryPath: binaryPath,
+		cache:      make(map[string]cacheEntry),
+		cacheTTL:   5 * time.Minute,
 	}
 }
 
@@ -68,9 +79,19 @@ func (s *YTDLPService) FetchMetadata(ctx context.Context, url string) (*entity.S
 
 // SearchYouTube searches YouTube and returns search results.
 func (s *YTDLPService) SearchYouTube(ctx context.Context, query string, maxResults int) ([]*entity.SearchResult, error) {
+	cacheKey := fmt.Sprintf("%s:%d", query, maxResults)
+
+	s.cacheMu.RLock()
+	if entry, found := s.cache[cacheKey]; found && time.Now().Before(entry.expiresAt) {
+		s.cacheMu.RUnlock()
+		return entry.results, nil
+	}
+	s.cacheMu.RUnlock()
+
 	searchQuery := fmt.Sprintf("ytsearch%d:%s", maxResults, query)
 
 	cmd := exec.CommandContext(ctx, s.binaryPath,
+		"--flat-playlist",
 		"--print-json",
 		"--skip-download",
 		searchQuery,
@@ -93,15 +114,27 @@ func (s *YTDLPService) SearchYouTube(ctx context.Context, query string, maxResul
 			continue
 		}
 
+		thumbnail := data.Thumbnail
+		if thumbnail == "" {
+			thumbnail = fmt.Sprintf("https://i.ytimg.com/vi/%s/mqdefault.jpg", data.ID)
+		}
+
 		results = append(results, &entity.SearchResult{
 			ID:        data.ID,
 			Title:     data.Title,
 			Artist:    data.Uploader,
 			Duration:  int(data.Duration),
-			Thumbnail: data.Thumbnail,
+			Thumbnail: thumbnail,
 			URL:       data.WebpageURL,
 		})
 	}
+
+	s.cacheMu.Lock()
+	s.cache[cacheKey] = cacheEntry{
+		results:   results,
+		expiresAt: time.Now().Add(s.cacheTTL),
+	}
+	s.cacheMu.Unlock()
 
 	return results, nil
 }

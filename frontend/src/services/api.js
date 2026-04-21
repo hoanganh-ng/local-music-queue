@@ -50,10 +50,14 @@ export const api = {
     })
   },
 
-  async addSong(url, addedBy) {
+  async addSong(url, addedBy, metadata = null) {
+    const body = { url, added_by: addedBy }
+    if (metadata) {
+      body.metadata = metadata
+    }
     return this.request('/queue/add', {
       method: 'POST',
-      body: { url, added_by: addedBy }
+      body
     })
   },
 

@@ -7,6 +7,7 @@ import (
 	"local-music-queue/internal/domain/repository"
 	"local-music-queue/internal/domain/service"
 	"sync"
+	"time"
 )
 
 // Interactor handles queue-related business logic.
@@ -24,14 +25,31 @@ func NewInteractor(repo repository.QueueRepository, youtube service.YouTubeServi
 	}
 }
 
-// AddSong fetches metadata for a URL and adds it to the queue.
-func (i *Interactor) AddSong(ctx context.Context, url string, addedBy string) (*entity.Song, error) {
-	song, err := i.youtube.FetchMetadata(ctx, url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch metadata: %w", err)
-	}
+// AddSong adds a song to the queue. If metadata is provided (e.g. from a prior
+// search result) it is used directly, skipping the yt-dlp metadata fetch.
+func (i *Interactor) AddSong(ctx context.Context, url string, addedBy string, metadata *entity.SearchResult) (*entity.Song, error) {
+	var song *entity.Song
 
-	song.AddedBy = addedBy
+	if metadata != nil {
+		// Fast path: search result already contains everything we need.
+		song = &entity.Song{
+			ID:        metadata.ID,
+			Title:     metadata.Title,
+			Artist:    metadata.Artist,
+			Duration:  time.Duration(metadata.Duration) * time.Second,
+			Thumbnail: metadata.Thumbnail,
+			URL:       metadata.URL,
+			AddedBy:   addedBy,
+		}
+	} else {
+		// Slow path: bare URL — must fetch metadata via yt-dlp.
+		fetched, err := i.youtube.FetchMetadata(ctx, url)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch metadata: %w", err)
+		}
+		fetched.AddedBy = addedBy
+		song = fetched
+	}
 
 	i.mu.Lock()
 	defer i.mu.Unlock()

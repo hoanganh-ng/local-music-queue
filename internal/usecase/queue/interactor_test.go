@@ -90,7 +90,7 @@ func TestAddSong_Success(t *testing.T) {
 	}
 	interactor := NewInteractor(repo, yt)
 
-	song, err := interactor.AddSong(context.Background(), "https://youtube.com/watch?v=vid1", "Alice")
+	song, err := interactor.AddSong(context.Background(), "https://youtube.com/watch?v=vid1", "Alice", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -116,6 +116,42 @@ func TestAddSong_Success(t *testing.T) {
 	}
 }
 
+func TestAddSong_WithMetadata_SkipsFetch(t *testing.T) {
+	repo := &mockQueueRepo{}
+	yt := &mockYouTubeService{}
+	interactor := NewInteractor(repo, yt)
+
+	metadata := &entity.SearchResult{
+		ID:        "vid2",
+		Title:     "Fast Song",
+		Artist:    "Fast Artist",
+		Duration:  200,
+		Thumbnail: "thumb.jpg",
+		URL:       "https://youtube.com/watch?v=vid2",
+	}
+
+	song, err := interactor.AddSong(context.Background(), "https://youtube.com/watch?v=vid2", "Bob", metadata)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if yt.fetchCalled {
+		t.Error("expected FetchMetadata NOT to be called when metadata is provided")
+	}
+	if !repo.saveCalled {
+		t.Error("expected Save to be called")
+	}
+	if song.ID != "vid2" {
+		t.Errorf("expected song ID 'vid2', got '%s'", song.ID)
+	}
+	if song.Title != "Fast Song" {
+		t.Errorf("expected title 'Fast Song', got '%s'", song.Title)
+	}
+	if song.AddedBy != "Bob" {
+		t.Errorf("expected AddedBy 'Bob', got '%s'", song.AddedBy)
+	}
+}
+
 func TestAddSong_FetchMetadataFails(t *testing.T) {
 	repo := &mockQueueRepo{}
 	yt := &mockYouTubeService{
@@ -123,7 +159,7 @@ func TestAddSong_FetchMetadataFails(t *testing.T) {
 	}
 	interactor := NewInteractor(repo, yt)
 
-	_, err := interactor.AddSong(context.Background(), "bad-url", "Alice")
+	_, err := interactor.AddSong(context.Background(), "bad-url", "Alice", nil)
 	if err == nil {
 		t.Fatal("expected error when FetchMetadata fails")
 	}
@@ -147,7 +183,7 @@ func TestAddSong_SaveFails(t *testing.T) {
 	}
 	interactor := NewInteractor(repo, yt)
 
-	_, err := interactor.AddSong(context.Background(), "url", "Alice")
+	_, err := interactor.AddSong(context.Background(), "url", "Alice", nil)
 	if err == nil {
 		t.Fatal("expected error when Save fails")
 	}
@@ -162,7 +198,7 @@ func TestAddSong_LoadFails_CreatesNewQueue(t *testing.T) {
 	}
 	interactor := NewInteractor(repo, yt)
 
-	song, err := interactor.AddSong(context.Background(), "url", "Alice")
+	song, err := interactor.AddSong(context.Background(), "url", "Alice", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
