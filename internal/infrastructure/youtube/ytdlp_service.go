@@ -1,6 +1,7 @@
 package youtube
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -63,4 +64,44 @@ func (s *YTDLPService) FetchMetadata(ctx context.Context, url string) (*entity.S
 		Thumbnail: data.Thumbnail,
 		URL:       data.WebpageURL,
 	}, nil
+}
+
+// SearchYouTube searches YouTube and returns search results.
+func (s *YTDLPService) SearchYouTube(ctx context.Context, query string, maxResults int) ([]*entity.SearchResult, error) {
+	searchQuery := fmt.Sprintf("ytsearch%d:%s", maxResults, query)
+
+	cmd := exec.CommandContext(ctx, s.binaryPath,
+		"--print-json",
+		"--skip-download",
+		searchQuery,
+	)
+
+	output, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("yt-dlp search error: %s", string(exitErr.Stderr))
+		}
+		return nil, fmt.Errorf("failed to run yt-dlp search: %w", err)
+	}
+
+	var results []*entity.SearchResult
+	decoder := json.NewDecoder(bytes.NewReader(output))
+
+	for decoder.More() {
+		var data YTDLPOutput
+		if err := decoder.Decode(&data); err != nil {
+			continue
+		}
+
+		results = append(results, &entity.SearchResult{
+			ID:        data.ID,
+			Title:     data.Title,
+			Artist:    data.Uploader,
+			Duration:  int(data.Duration),
+			Thumbnail: data.Thumbnail,
+			URL:       data.WebpageURL,
+		})
+	}
+
+	return results, nil
 }

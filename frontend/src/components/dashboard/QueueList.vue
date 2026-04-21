@@ -2,7 +2,10 @@
   <div class="queue-list glass-panel">
     <div class="queue-header">
       <h3>Up Next</h3>
-      <span class="queue-count">{{ queue.length }} songs</span>
+      <div class="header-controls">
+        <button v-if="isHost && queue.length > 0" class="clear-btn" @click="handleClear">Clear</button>
+        <span class="queue-count">{{ queue.length }} songs</span>
+      </div>
     </div>
 
     <div class="queue-items" v-if="queue.length > 0">
@@ -17,6 +20,9 @@
             <div class="item-title">{{ song.title || song.url }}</div>
             <div class="item-meta">Added by {{ song.added_by }}</div>
           </div>
+          <button v-if="isHost" class="remove-btn" @click="handleRemove(index)" title="Remove from queue">
+            &times;
+          </button>
         </div>
       </TransitionGroup>
     </div>
@@ -28,12 +34,43 @@
 </template>
 
 <script setup>
-defineProps({
+import { api } from '../../services/api'
+import { globalStore } from '../../store'
+
+const props = defineProps({
   queue: {
     type: Array,
     default: () => []
+  },
+  currentIndex: {
+    type: Number,
+    default: -1
+  },
+  isHost: {
+    type: Boolean,
+    default: false
   }
 })
+
+async function handleRemove(indexInQueue) {
+  // indexInQueue is index in "Up Next" list, we need index in full "songs" list
+  const fullIndex = props.currentIndex + 1 + indexInQueue
+  try {
+    await api.removeSong(fullIndex, globalStore.currentUser.display_name)
+  } catch (err) {
+    console.error('Remove song failed:', err)
+  }
+}
+
+async function handleClear() {
+  if (confirm('Are you sure you want to clear all upcoming songs?')) {
+    try {
+      await api.clearQueue(globalStore.currentUser.display_name)
+    } catch (err) {
+      console.error('Clear queue failed:', err)
+    }
+  }
+}
 </script>
 
 <style scoped>
@@ -65,6 +102,29 @@ defineProps({
   background: rgba(67, 97, 238, 0.15);
   padding: 0.25rem 0.75rem;
   border-radius: var(--radius-full);
+}
+
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.clear-btn {
+  background: rgba(231, 76, 60, 0.1);
+  color: #e74c3c;
+  border: 1px solid rgba(231, 76, 60, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 0.2rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.clear-btn:hover {
+  background: rgba(231, 76, 60, 0.2);
+  border-color: #e74c3c;
 }
 
 .queue-items {
@@ -132,6 +192,27 @@ defineProps({
   font-size: 0.75rem;
   color: var(--text-muted);
   margin-top: 0.25rem;
+}
+
+.remove-btn {
+  margin-left: auto;
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  font-size: 1.25rem;
+  padding: 0 0.5rem;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.2s ease;
+}
+
+.queue-item:hover .remove-btn {
+  opacity: 1;
+}
+
+.remove-btn:hover {
+  color: #e74c3c;
+  transform: scale(1.2);
 }
 
 .empty-queue {

@@ -57,8 +57,8 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	authInteractor := usecaseAuth.NewInteractor(cfg.ClientPIN, cfg.HostPIN)
 	actInteractor := usecaseActivity.NewInteractor(repo)
 
-	// 4. Initialize Delivery
-	hub := ws.NewHub()
+	// 4. Initialize Delivery with queue state callback
+	hub := ws.NewHub(qInteractor.GetState)
 	go hub.Run() // Start WebSocket hub loop
 
 	handlers := delivery.NewHandlers(qInteractor, authInteractor, actInteractor, hub)
@@ -72,6 +72,12 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	mux.HandleFunc("POST /api/queue/add", handlers.HandleAddSong)
 	mux.HandleFunc("POST /api/queue/skip", handlers.HandleSkipSong)
 	mux.HandleFunc("POST /api/queue/status", handlers.HandleSetStatus)
+	mux.HandleFunc("POST /api/queue/sync", handlers.HandleSyncPlayback)
+	mux.HandleFunc("POST /api/queue/ended", handlers.HandleSongEnded)
+	mux.HandleFunc("POST /api/queue/prev", handlers.HandlePrevSong)
+	mux.HandleFunc("POST /api/queue/remove", handlers.HandleRemoveSong)
+	mux.HandleFunc("POST /api/queue/clear", handlers.HandleClearQueue)
+	mux.HandleFunc("GET /api/youtube/search", handlers.HandleSearchYouTube)
 
 	// WebSocket
 	mux.HandleFunc("/ws", hub.RegisterHandler)

@@ -22,30 +22,33 @@
       <!-- Center Column: Player and Input -->
       <section class="col-center">
         <div class="player-wrapper">
-          <NowPlaying 
+          <NowPlaying
             :currentSong="globalStore.queueState.current_song"
             :status="globalStore.queueState.status"
             :isHost="isHost"
             @toggle-playback="togglePlayback"
             @skip="skipSong"
-            @song-end="handleSongEnd"
           />
         </div>
         <div class="input-wrapper">
-          <SubmitForm @submit="addSong" />
+          <SubmitForm ref="submitFormRef" @submit="addSong" />
         </div>
       </section>
 
       <!-- Right Column: Queue List -->
       <aside class="col-right">
-        <QueueList :queue="globalStore.queueState.queue || []" />
+        <QueueList
+          :queue="globalStore.queueState.queue || []"
+          :isHost="isHost"
+          :currentIndex="globalStore.queueState.current_index"
+        />
       </aside>
     </main>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { globalStore } from '../store'
 import { api } from '../services/api'
@@ -61,9 +64,18 @@ const router = useRouter()
 const currentUser = computed(() => globalStore.currentUser)
 const isHost = computed(() => currentUser.value?.role === 'host')
 
+const submitFormRef = ref(null)
+let unsubscribeSongAdded = null
+
 onMounted(async () => {
   // Connect WebSocket
   wsClient.connect()
+
+  unsubscribeSongAdded = wsClient.onSongAdded((song) => {
+    if (submitFormRef.value) {
+      submitFormRef.value.handleSongAdded(song)
+    }
+  })
 
   // Fetch initial queue state
   try {
@@ -75,6 +87,9 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (unsubscribeSongAdded) {
+    unsubscribeSongAdded()
+  }
   wsClient.disconnect()
 })
 
@@ -85,12 +100,7 @@ const handleLogout = () => {
 }
 
 const addSong = async (url) => {
-  try {
-    await api.addSong(url, currentUser.value.display_name)
-  } catch (e) {
-    console.error("Failed to add song:", e)
-    alert("Failed to add song. Check URL or try again.")
-  }
+  await api.addSong(url, currentUser.value.display_name)
 }
 
 const togglePlayback = async () => {
@@ -108,17 +118,6 @@ const skipSong = async () => {
     await api.skipSong(currentUser.value.display_name)
   } catch (e) {
     console.error("Failed to skip song:", e)
-  }
-}
-
-const handleSongEnd = async () => {
-  if (isHost.value) {
-    // If the song ends naturally, the host skips to the next
-    try {
-      await api.skipSong("System (Auto-Skip)")
-    } catch (e) {
-      console.error("Failed to auto-skip song:", e)
-    }
   }
 }
 </script>
@@ -212,12 +211,12 @@ const handleSongEnd = async () => {
   flex: 2;
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: 1rem;
   min-width: 400px;
 }
 
 .player-wrapper {
-  flex-grow: 1;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
 }

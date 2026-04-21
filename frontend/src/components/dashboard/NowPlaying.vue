@@ -11,13 +11,8 @@
       <!-- Thumbnail/Visuals -->
       <div class="artwork-container">
         <!-- We can use the default maxresdefault thumbnail from YouTube -->
-        <img 
-          v-if="!isHost || !showPlayer" 
-          :src="thumbnailUrl" 
-          alt="Album Art" 
-          class="artwork-img"
-        />
-        
+        <img v-if="!isHost || !showPlayer" :src="thumbnailUrl" alt="Album Art" class="artwork-img" />
+
         <!-- Host Only: The actual YouTube IFrame -->
         <div v-if="isHost && showPlayer" class="youtube-wrapper">
           <div id="youtube-player"></div>
@@ -31,17 +26,14 @@
 
       <!-- Controls (Host only) -->
       <div v-if="isHost" class="host-controls">
-        <BaseButton 
-          variant="secondary" 
-          @click="$emit('toggle-playback')"
-        >
+        <BaseButton variant="secondary" @click="$emit('toggle-playback')">
           <span v-if="status === 'playing'">Pause</span>
           <span v-else>Play</span>
         </BaseButton>
-        <BaseButton 
-          variant="primary" 
-          @click="$emit('skip')"
-        >
+        <BaseButton variant="primary" @click="handlePrev">
+          Previous
+        </BaseButton>
+        <BaseButton variant="primary" @click="$emit('skip')">
           Skip
         </BaseButton>
       </div>
@@ -56,7 +48,9 @@
 </template>
 
 <script setup>
-import { computed, watch, onMounted, ref } from 'vue'
+import { computed, watch, onMounted, ref, onUnmounted } from 'vue'
+import { api } from '../../services/api'
+import { globalStore } from '../../store'
 import BaseButton from '../ui/BaseButton.vue'
 
 const props = defineProps({
@@ -79,6 +73,7 @@ const emit = defineEmits(['toggle-playback', 'skip', 'song-end'])
 // The iframe player instance
 let ytPlayer = null
 const showPlayer = ref(true)
+let syncInterval = null
 
 // Helper to extract Video ID from URL
 const videoId = computed(() => {
@@ -101,11 +96,18 @@ onMounted(() => {
       tag.src = "https://www.youtube.com/iframe_api"
       const firstScriptTag = document.getElementsByTagName('script')[0]
       firstScriptTag.parentNode.insertBefore(tag, firstScriptTag)
-      
+
       window.onYouTubeIframeAPIReady = initPlayer
+      setPausedWhenInitPlayer()
     } else {
       initPlayer()
     }
+  }
+})
+
+onUnmounted(() => {
+  if (syncInterval) {
+    clearInterval(syncInterval)
   }
 })
 
@@ -123,12 +125,33 @@ function initPlayer() {
       'onStateChange': onPlayerStateChange
     }
   })
+
+  // Start sync interval for playback time
+  if (syncInterval) clearInterval(syncInterval)
+  syncInterval = setInterval(() => {
+    if (ytPlayer && ytPlayer.getCurrentTime && props.status === 'playing') {
+      const elapsed = Math.floor(ytPlayer.getCurrentTime())
+      api.syncPlayback(elapsed).catch(err => console.error('Sync failed:', err))
+    }
+  }, 5000)
 }
 
 function onPlayerStateChange(event) {
   if (event.data === window.YT.PlayerState.ENDED) {
-    emit('song-end')
+    api.songEnded().catch(err => console.error('Song ended call failed:', err))
   }
+}
+
+async function handlePrev() {
+  try {
+    await api.prevSong(globalStore.currentUser.display_name)
+  } catch (err) {
+    console.error('Previous song failed:', err)
+  }
+}
+
+async function setPausedWhenInitPlayer() {
+  await api.setStatus('paused', globalStore.currentUser.display_name)
 }
 
 // Watch for song changes to update the player
@@ -164,8 +187,7 @@ watch(() => props.status, (newStatus) => {
 .now-playing {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  padding: 2rem;
+  padding: 1.5rem;
   overflow: hidden;
 }
 
@@ -173,7 +195,7 @@ watch(() => props.status, (newStatus) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 2rem;
+  margin-bottom: 1.5rem;
 }
 
 .player-header h2 {
@@ -212,14 +234,13 @@ watch(() => props.status, (newStatus) => {
 .song-details {
   display: flex;
   flex-direction: column;
-  flex-grow: 1;
-  gap: 1.5rem;
+  gap: 1rem;
   align-items: center;
 }
 
 .artwork-container {
   width: 100%;
-  max-width: 480px;
+  max-width: 400px;
   aspect-ratio: 16 / 9;
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -282,7 +303,7 @@ watch(() => props.status, (newStatus) => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  height: 100%;
+  min-height: 200px;
   color: var(--text-muted);
 }
 
@@ -300,8 +321,16 @@ watch(() => props.status, (newStatus) => {
 }
 
 @keyframes float {
-  0% { transform: translateY(0px); }
-  50% { transform: translateY(-10px); }
-  100% { transform: translateY(0px); }
+  0% {
+    transform: translateY(0px);
+  }
+
+  50% {
+    transform: translateY(-10px);
+  }
+
+  100% {
+    transform: translateY(0px);
+  }
 }
 </style>

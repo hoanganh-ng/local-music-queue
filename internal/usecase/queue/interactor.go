@@ -6,12 +6,14 @@ import (
 	"local-music-queue/internal/domain/entity"
 	"local-music-queue/internal/domain/repository"
 	"local-music-queue/internal/domain/service"
+	"sync"
 )
 
 // Interactor handles queue-related business logic.
 type Interactor struct {
 	repo    repository.QueueRepository
 	youtube service.YouTubeService
+	mu      sync.RWMutex
 }
 
 // NewInteractor creates a new Queue Interactor.
@@ -30,6 +32,9 @@ func (i *Interactor) AddSong(ctx context.Context, url string, addedBy string) (*
 	}
 
 	song.AddedBy = addedBy
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
 
 	queue, err := i.repo.Load(ctx)
 	if err != nil {
@@ -51,6 +56,9 @@ func (i *Interactor) AddSong(ctx context.Context, url string, addedBy string) (*
 
 // SkipSong moves to the next song in the queue.
 func (i *Interactor) SkipSong(ctx context.Context, requestedBy string) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
 	queue, err := i.repo.Load(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load queue: %w", err)
@@ -74,6 +82,9 @@ func (i *Interactor) SkipSong(ctx context.Context, requestedBy string) error {
 
 // GetState returns the current queue state.
 func (i *Interactor) GetState(ctx context.Context) (*entity.Queue, error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
 	queue, err := i.repo.Load(ctx)
 	if err != nil {
 		queue = entity.NewQueue()
@@ -89,6 +100,9 @@ func (i *Interactor) GetState(ctx context.Context) (*entity.Queue, error) {
 
 // SetStatus updates the playback status (Play/Pause).
 func (i *Interactor) SetStatus(ctx context.Context, requestedBy string, status entity.PlaybackStatus) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
 	queue, err := i.repo.Load(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load queue: %w", err)
@@ -109,3 +123,144 @@ func (i *Interactor) SetStatus(ctx context.Context, requestedBy string, status e
 
 	return nil
 }
+
+// SyncPlayback updates the elapsed time without generating an activity log.
+func (i *Interactor) SyncPlayback(ctx context.Context, elapsed int) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	queue, err := i.repo.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load queue: %w", err)
+	}
+
+	queue.Elapsed = elapsed
+	err = i.repo.Save(ctx, queue)
+	if err != nil {
+		return fmt.Errorf("failed to save queue: %w", err)
+	}
+
+	return nil
+}
+
+// SongEnded is called when a song naturally finishes playing.
+func (i *Interactor) SongEnded(ctx context.Context) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	queue, err := i.repo.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load queue: %w", err)
+	}
+
+	err = queue.Next()
+	if err != nil {
+		return err
+	}
+
+	err = i.repo.Save(ctx, queue)
+	if err != nil {
+		return fmt.Errorf("failed to save queue: %w", err)
+	}
+
+	activity := entity.NewActivity(entity.ActivityPlayback, "System", "song finished playing")
+	_ = i.repo.AddActivity(ctx, activity)
+
+	return nil
+}
+
+// PrevSong moves to the previous song in the queue.
+func (i *Interactor) PrevSong(ctx context.Context, requestedBy string) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	queue, err := i.repo.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load queue: %w", err)
+	}
+
+	err = queue.Prev()
+	if err != nil {
+		return err
+	}
+
+	err = i.repo.Save(ctx, queue)
+	if err != nil {
+		return fmt.Errorf("failed to save queue: %w", err)
+	}
+
+	activity := entity.NewActivity(entity.ActivityPlayback, requestedBy, "went to the previous song")
+	_ = i.repo.AddActivity(ctx, activity)
+
+	return nil
+}
+
+// RemoveSong removes a song at the specified index.
+func (i *Interactor) RemoveSong(ctx context.Context, requestedBy string, index int) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	queue, err := i.repo.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load queue: %w", err)
+	}
+
+	if index < 0 || index >= len(queue.Songs) {
+		return fmt.Errorf("invalid song index")
+	}
+
+	songTitle := queue.Songs[index].Title
+
+	err = queue.Remove(index)
+	if err != nil {
+		return err
+	}
+
+	err = i.repo.Save(ctx, queue)
+	if err != nil {
+		return fmt.Errorf("failed to save queue: %w", err)
+	}
+
+	activity := entity.NewActivity(entity.ActivityPlayback, requestedBy, fmt.Sprintf("removed \"%s\" from queue", songTitle))
+	_ = i.repo.AddActivity(ctx, activity)
+
+	return nil
+}
+
+// ClearQueue clears all upcoming songs.
+func (i *Interactor) ClearQueue(ctx context.Context, requestedBy string) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	queue, err := i.repo.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load queue: %w", err)
+	}
+
+	queue.Clear()
+
+	err = i.repo.Save(ctx, queue)
+	if err != nil {
+		return fmt.Errorf("failed to save queue: %w", err)
+	}
+
+	activity := entity.NewActivity(entity.ActivityPlayback, requestedBy, "cleared the queue")
+	_ = i.repo.AddActivity(ctx, activity)
+
+	return nil
+}
+
+// SearchYouTube searches YouTube and returns search results.
+func (i *Interactor) SearchYouTube(ctx context.Context, query string) ([]*entity.SearchResult, error) {
+	if query == "" {
+		return nil, fmt.Errorf("search query cannot be empty")
+	}
+
+	results, err := i.youtube.SearchYouTube(ctx, query, 5)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search YouTube: %w", err)
+	}
+
+	return results, nil
+}
+

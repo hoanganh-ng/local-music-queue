@@ -62,15 +62,23 @@ func (m *mockQueueRepo) GetActivities(_ context.Context, limit int) ([]entity.Ac
 // --- Mock YouTubeService ---
 
 type mockYouTubeService struct {
-	song *entity.Song
-	err  error
+	song    *entity.Song
+	err     error
+	results []*entity.SearchResult
+	searchErr error
 
-	fetchCalled bool
+	fetchCalled  bool
+	searchCalled bool
 }
 
 func (m *mockYouTubeService) FetchMetadata(_ context.Context, _ string) (*entity.Song, error) {
 	m.fetchCalled = true
 	return m.song, m.err
+}
+
+func (m *mockYouTubeService) SearchYouTube(_ context.Context, _ string, _ int) ([]*entity.SearchResult, error) {
+	m.searchCalled = true
+	return m.results, m.searchErr
 }
 
 // --- AddSong Tests ---
@@ -284,5 +292,46 @@ func TestSetStatus_LoadFails(t *testing.T) {
 	err := interactor.SetStatus(context.Background(), "Alice", entity.StatusPlaying)
 	if err == nil {
 		t.Fatal("expected error when Load fails")
+	}
+}
+
+// --- SearchYouTube Tests ---
+
+func TestSearchYouTube_Success(t *testing.T) {
+	results := []*entity.SearchResult{
+		{ID: "1", Title: "Song 1", Artist: "Artist 1", Duration: 180, URL: "url1"},
+		{ID: "2", Title: "Song 2", Artist: "Artist 2", Duration: 240, URL: "url2"},
+	}
+	yt := &mockYouTubeService{results: results}
+	interactor := NewInteractor(&mockQueueRepo{}, yt)
+
+	res, err := interactor.SearchYouTube(context.Background(), "test query")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(res) != 2 {
+		t.Errorf("expected 2 results, got %d", len(res))
+	}
+	if !yt.searchCalled {
+		t.Error("expected SearchYouTube to be called")
+	}
+}
+
+func TestSearchYouTube_EmptyQuery(t *testing.T) {
+	interactor := NewInteractor(&mockQueueRepo{}, &mockYouTubeService{})
+
+	_, err := interactor.SearchYouTube(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error for empty query")
+	}
+}
+
+func TestSearchYouTube_ServiceError(t *testing.T) {
+	yt := &mockYouTubeService{searchErr: errors.New("search failed")}
+	interactor := NewInteractor(&mockQueueRepo{}, yt)
+
+	_, err := interactor.SearchYouTube(context.Background(), "test")
+	if err == nil {
+		t.Fatal("expected error when service fails")
 	}
 }

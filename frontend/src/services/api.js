@@ -69,5 +69,46 @@ export const api = {
       method: 'POST',
       body: { status, requested_by: requestedBy }
     })
+  },
+
+  async syncPlayback(elapsed) {
+    return this.request('/queue/sync', {
+      method: 'POST',
+      body: { elapsed }
+    })
+  },
+
+  async songEnded() {
+    return this.request('/queue/ended', {
+      method: 'POST'
+    })
+  },
+
+  async prevSong(requestedBy) {
+    return this.request('/queue/prev', {
+      method: 'POST',
+      body: { requested_by: requestedBy }
+    })
+  },
+
+  async removeSong(index, requestedBy) {
+    return this.request('/queue/remove', {
+      method: 'POST',
+      body: { index, requested_by: requestedBy }
+    })
+  },
+
+  async clearQueue(requestedBy) {
+    return this.request('/queue/clear', {
+      method: 'POST',
+      body: { requested_by: requestedBy }
+    })
+  },
+
+  // YouTube Search
+  async searchYouTube(query) {
+    return this.request(`/youtube/search?q=${encodeURIComponent(query)}`, {
+      method: 'GET'
+    })
   }
 }
