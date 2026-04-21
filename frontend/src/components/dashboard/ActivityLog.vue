@@ -5,12 +5,14 @@
       <div v-if="logs.length === 0" class="empty-state">
         No recent activity.
       </div>
-      <div v-for="(log, idx) in logs" :key="log.timestamp + idx" class="log-entry animate-fade-in">
-        <div class="message-bubble">
-          <span class="user-name">{{ log.user }}</span>
-          <span class="description">{{ log.description }}</span>
+      <TransitionGroup v-else name="log" tag="div">
+        <div v-for="log in logs" :key="log.timestamp" class="log-entry">
+          <div class="message-bubble">
+            <span class="user-name">{{ log.user }}</span>
+            <span class="description">{{ log.description }}</span>
+          </div>
         </div>
-      </div>
+      </TransitionGroup>
     </div>
   </div>
 </template>
@@ -127,5 +129,24 @@ watch(() => props.logs, async () => {
   font-size: 0.9rem;
   line-height: 1.4;
   word-break: break-word;
+}
+
+/* TransitionGroup animations */
+.log-enter-active {
+  transition: all 0.4s ease-out;
+}
+
+.log-enter-from {
+  opacity: 0;
+  transform: translateY(-10px);
+}
+
+.log-enter-to {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.log-move {
+  transition: transform 0.4s ease;
 }
 </style>
