@@ -44,7 +44,8 @@ COPY --from=builder /app/server .
 # Set environment variables
 ENV PORT=1111
 ENV CLIENT_PIN=5555
-ENV HOST_PIN=6666
+ENV HOST_PIN=9512
+ENV ADMIN_PIN=1598
 ENV DB_PATH=/app/data/music_queue.db
 ENV YTDLP_PATH=/usr/bin/yt-dlp
 

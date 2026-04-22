@@ -71,7 +71,7 @@ func (s *YTDLPService) FetchMetadata(ctx context.Context, url string) (*entity.S
 		ID:        data.ID,
 		Title:     data.Title,
 		Artist:    data.Uploader,
-		Duration:  time.Duration(data.Duration * float64(time.Second)),
+		Duration:  int(data.Duration),
 		Thumbnail: data.Thumbnail,
 		URL:       data.WebpageURL,
 	}, nil

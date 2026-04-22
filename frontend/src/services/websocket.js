@@ -85,6 +85,11 @@ class WebSocketClient {
         globalStore.addActivity(message.data.activity)
         break
       case 'song_added':
+        console.log('WebSocket song_added event:', message.data)
+        if (!message.data.song || !message.data.song.id) {
+          console.error('Received invalid song object:', message.data.song)
+          break
+        }
         globalStore.addSong(message.data.song, message.data.position)
         globalStore.addActivity(message.data.activity)
         this.callbacks.songAdded.forEach(cb => {

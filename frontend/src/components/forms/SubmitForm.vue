@@ -56,7 +56,7 @@
 
       <BaseButton
         variant="primary"
-        @click="submit"
+        @click="submit()"
         :disabled="isLoading || !inputValue || !isYouTubeUrl"
       >
         <span v-if="isLoading">Adding...</span>

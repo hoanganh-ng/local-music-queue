@@ -7,7 +7,6 @@ import (
 	"local-music-queue/internal/domain/repository"
 	"local-music-queue/internal/domain/service"
 	"sync"
-	"time"
 )
 
 // Interactor handles queue-related business logic.
@@ -36,7 +35,7 @@ func (i *Interactor) AddSong(ctx context.Context, url string, addedBy string, me
 			ID:        metadata.ID,
 			Title:     metadata.Title,
 			Artist:    metadata.Artist,
-			Duration:  time.Duration(metadata.Duration) * time.Second,
+			Duration:  metadata.Duration,
 			Thumbnail: metadata.Thumbnail,
 			URL:       metadata.URL,
 			AddedBy:   addedBy,
