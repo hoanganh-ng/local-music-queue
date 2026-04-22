@@ -1,7 +1,7 @@
 # Backend Advanced Features
 
 > Documentation of features implemented beyond the initial requirements (v0.1)
-> Last Updated: 2026-04-21
+> Last Updated: 2026-04-22
 
 ## Overview
 
@@ -311,6 +311,41 @@ Prevent invalid playback state transitions.
 
 ---
 
+## 9. Volume Control
+
+### 9.1 Remote Volume Control via WebSocket
+**Location**: `internal/usecase/queue/interactor.go:285-293`
+
+Allow admin users to control the host's YouTube player volume remotely.
+
+**Implementation**:
+- `ChangeVolume(direction)` validates direction ("up" or "down")
+- Broadcasts `volume_changed` WebSocket event to all clients
+- Host's player receives event and adjusts volume by ±10%
+- No state persistence (volume is ephemeral)
+
+**API Endpoint**: `POST /api/queue/volume`
+
+**Payload**:
+
+```json
+{
+  "direction": "up"
+}
+```
+
+**WebSocket Event**:
+
+- Event type: `volume_changed`
+- Payload: `{ "direction": "up" | "down" }`
+- Host watches for this event and adjusts YouTube player volume
+
+**Use Case**: Admin user wants to adjust volume without physical access to host device.
+
+**Design Decision**: Volume state is not persisted or synced back to UI to keep implementation simple and reduce WebSocket traffic.
+
+---
+
 ## Summary of Enhancements
 
 | Feature | Benefit | Performance Impact |
@@ -325,6 +360,7 @@ Prevent invalid playback state transitions.
 | Sequence Numbers | Prevents desync | Minimal |
 | Request Logging | Debugging & monitoring | <1ms overhead |
 | Activity Limit | Bounded memory usage | Prevents growth |
+| Volume Control | Remote volume adjustment | Minimal |
 
 ---
 
@@ -336,6 +372,7 @@ Prevent invalid playback state transitions.
 - `POST /api/queue/clear` - Clear upcoming songs
 - `POST /api/queue/sync` - Sync elapsed time
 - `POST /api/queue/ended` - Handle song end
+- `POST /api/queue/volume` - Change volume (up/down)
 - `GET /api/youtube/search` - Search YouTube
 
 ### Enhanced Endpoints

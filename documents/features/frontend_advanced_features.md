@@ -1,7 +1,7 @@
 # Frontend Advanced Features
 
 > Documentation of features implemented beyond the initial requirements (v0.1)
-> Last Updated: 2026-04-21
+> Last Updated: 2026-04-22
 
 ## Overview
 
@@ -398,7 +398,78 @@ handleKeydown(event) {
 
 ---
 
-## 6. Responsive Design
+## 6. Volume Control
+
+### 6.1 YouTube Player Volume Control
+**Location**: `frontend/src/components/dashboard/NowPlaying.vue`
+
+Host and admin users can control the YouTube player volume with simple up/down buttons.
+
+**Implementation**:
+- Two buttons: "Vol -" and "Vol +" positioned next to the artwork
+- Each click adjusts volume by 10% (0-100 range)
+- Host: Direct control via YouTube Player API
+- Admin: Remote control via WebSocket events
+
+**Features**:
+
+- **Host Behavior**: 
+  - Calls `ytPlayer.getVolume()` to get current volume
+  - Calls `ytPlayer.setVolume(newVolume)` to adjust
+  - Immediate local control without network delay
+  
+- **Admin Behavior**:
+  - Sends API request to `POST /api/queue/volume`
+  - Backend broadcasts `volume_changed` WebSocket event
+  - Host's player receives event and adjusts volume
+  
+- **No State Sync**: Volume state is not synced back to UI
+  - Keeps implementation simple
+  - Reduces WebSocket traffic
+  - YouTube player maintains volume in browser localStorage
+
+**API Endpoint**:
+
+- `POST /api/queue/volume`
+- Request body: `{ "direction": "up" | "down" }`
+- Validates direction and broadcasts WebSocket event
+
+**WebSocket Event**:
+
+- Event type: `volume_changed`
+- Payload: `{ "direction": "up" | "down" }`
+- Host watches for this event and adjusts player volume
+
+**UI Design**:
+
+- Buttons positioned vertically next to artwork
+- Simple text labels: "Vol -" / "Vol +"
+- Visible only when `canControl` is true (host or admin)
+- Consistent with existing glassmorphism design
+
+**Volume Adjustment Logic**:
+
+```javascript
+// Volume Up
+const currentVolume = ytPlayer.getVolume()
+const newVolume = Math.min(100, currentVolume + 10)
+ytPlayer.setVolume(newVolume)
+
+// Volume Down
+const currentVolume = ytPlayer.getVolume()
+const newVolume = Math.max(0, currentVolume - 10)
+ytPlayer.setVolume(newVolume)
+```
+
+**Why ±10 increments?**:
+
+- Standard increment size (10% of range)
+- Provides fine-grained control (10 steps from 0-100)
+- Matches common media player behavior
+
+---
+
+## 7. Responsive Design
 
 ### 6.1 Three-Column Layout
 **Location**: `frontend/src/views/DashboardView.vue`
@@ -539,6 +610,7 @@ Playwright tests for critical user flows.
 | Role-Based UI | Clear permissions | **High** - Security |
 | Progress Bar | Visual feedback | Medium - Awareness |
 | Error Handling | Clear feedback | **High** - User confidence |
+| Volume Control | Easy volume adjustment | Medium - Convenience |
 
 ---
 
@@ -568,7 +640,8 @@ Playwright tests for critical user flows.
 - Full sync request on sequence gap detection
 - Offline mode with service worker
 - Mobile app (React Native / Flutter)
-- Volume control
 - Playlist save/load
 - User avatars
 - Dark/light theme toggle
+- Volume slider with visual feedback
+- Mute/unmute toggle
