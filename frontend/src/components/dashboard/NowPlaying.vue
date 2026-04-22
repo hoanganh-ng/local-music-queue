@@ -8,14 +8,26 @@
     </div>
 
     <div v-if="currentSong" class="song-details">
-      <!-- Thumbnail/Visuals -->
-      <div class="artwork-container">
-        <!-- We can use the default maxresdefault thumbnail from YouTube -->
-        <img v-if="!isHost || !showPlayer" :src="thumbnailUrl" alt="Album Art" class="artwork-img" />
+      <!-- Thumbnail/Visuals and Volume Controls -->
+      <div class="artwork-section">
+        <div class="artwork-container">
+          <!-- We can use the default maxresdefault thumbnail from YouTube -->
+          <img v-if="!isHost || !showPlayer" :src="thumbnailUrl" alt="Album Art" class="artwork-img" />
 
-        <!-- Host Only: The actual YouTube IFrame -->
-        <div v-if="isHost && showPlayer" class="youtube-wrapper">
-          <div id="youtube-player"></div>
+          <!-- Host Only: The actual YouTube IFrame -->
+          <div v-if="isHost && showPlayer" class="youtube-wrapper">
+            <div id="youtube-player"></div>
+          </div>
+        </div>
+
+        <!-- Volume Controls next to artwork -->
+        <div v-if="canControl" class="volume-controls">
+          <BaseButton variant="secondary" @click="handleVolumeDown" title="Volume Down">
+            Vol -
+          </BaseButton>
+          <BaseButton variant="secondary" @click="handleVolumeUp" title="Volume Up">
+            Vol +
+          </BaseButton>
         </div>
       </div>
 
@@ -175,6 +187,34 @@ async function handlePrev() {
   }
 }
 
+async function handleVolumeUp() {
+  if (props.isHost && ytPlayer && ytPlayer.getVolume) {
+    const currentVolume = ytPlayer.getVolume()
+    const newVolume = Math.min(100, currentVolume + 10)
+    ytPlayer.setVolume(newVolume)
+  } else {
+    try {
+      await api.changeVolume('up')
+    } catch (err) {
+      console.error('Volume up failed:', err)
+    }
+  }
+}
+
+async function handleVolumeDown() {
+  if (props.isHost && ytPlayer && ytPlayer.getVolume) {
+    const currentVolume = ytPlayer.getVolume()
+    const newVolume = Math.max(0, currentVolume - 10)
+    ytPlayer.setVolume(newVolume)
+  } else {
+    try {
+      await api.changeVolume('down')
+    } catch (err) {
+      console.error('Volume down failed:', err)
+    }
+  }
+}
+
 async function setPausedWhenInitPlayer() {
   await api.setStatus('paused', globalStore.currentUser.display_name)
 }
@@ -210,6 +250,22 @@ watch(() => props.status, (newStatus) => {
     setTimeout(() => {
       isUpdatingFromProp.value = false
     }, 500)
+  }
+})
+
+// Watch for volume change events from WebSocket (admin remote control)
+watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
+  if (props.isHost && ytPlayer && ytPlayer.getVolume) {
+    const direction = globalStore.queueState.volumeChangeDirection
+    if (direction === 'up') {
+      const currentVolume = ytPlayer.getVolume()
+      const newVolume = Math.min(100, currentVolume + 10)
+      ytPlayer.setVolume(newVolume)
+    } else if (direction === 'down') {
+      const currentVolume = ytPlayer.getVolume()
+      const newVolume = Math.max(0, currentVolume - 10)
+      ytPlayer.setVolume(newVolume)
+    }
   }
 })
 
@@ -270,6 +326,14 @@ watch(() => props.status, (newStatus) => {
   align-items: center;
 }
 
+.artwork-section {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  width: 100%;
+  justify-content: center;
+}
+
 .artwork-container {
   width: 100%;
   max-width: 400px;
@@ -328,6 +392,14 @@ watch(() => props.status, (newStatus) => {
   display: flex;
   gap: 1rem;
   margin-top: 1rem;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.volume-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
 .empty-state {

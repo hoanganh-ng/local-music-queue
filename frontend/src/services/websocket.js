@@ -130,6 +130,9 @@ class WebSocketClient {
         globalStore.updatePlaybackStatus(message.data.status)
         globalStore.addActivity(message.data.activity)
         break
+      case 'volume_changed':
+        globalStore.handleVolumeChange(message.data.direction)
+        break
       // Keep backward compatibility
       case 'queue_updated':
       case 'status_updated':

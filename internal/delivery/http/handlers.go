@@ -353,3 +353,26 @@ func (h *Handlers) HandleClearQueue(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type VolumeRequest struct {
+	Direction string `json:"direction"`
+}
+
+func (h *Handlers) HandleChangeVolume(w http.ResponseWriter, r *http.Request) {
+	var req VolumeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	err := h.queue.ChangeVolume(r.Context(), req.Direction)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	h.hub.Broadcast(ws.EventVolumeChanged, ws.VolumeChangedData{
+		Direction: req.Direction,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
+}

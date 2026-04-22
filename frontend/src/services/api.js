@@ -109,6 +109,13 @@ export const api = {
     })
   },
 
+  async changeVolume(direction) {
+    return this.request('/queue/volume', {
+      method: 'POST',
+      body: { direction }
+    })
+  },
+
   // YouTube Search
   async searchYouTube(query) {
     return this.request(`/youtube/search?q=${encodeURIComponent(query)}`, {

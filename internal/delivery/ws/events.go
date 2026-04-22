@@ -15,6 +15,7 @@ const (
 	EventSongPrevious  = "song_previous"
 	EventSongRemoved   = "song_removed"
 	EventQueueCleared  = "queue_cleared"
+	EventVolumeChanged = "volume_changed"
 )
 
 // UserJoinedData contains only the new user info
@@ -80,4 +81,9 @@ type SongRemovedData struct {
 type QueueClearedData struct {
 	Status   entity.PlaybackStatus `json:"status"`
 	Activity entity.Activity       `json:"activity"`
+}
+
+// VolumeChangedData contains volume change direction
+type VolumeChangedData struct {
+	Direction string `json:"direction"`
 }

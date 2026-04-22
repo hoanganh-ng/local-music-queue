@@ -281,3 +281,12 @@ func (i *Interactor) SearchYouTube(ctx context.Context, query string) ([]*entity
 	return results, nil
 }
 
+// ChangeVolume broadcasts a volume change event.
+func (i *Interactor) ChangeVolume(ctx context.Context, direction string) error {
+	if direction != "up" && direction != "down" {
+		return fmt.Errorf("invalid direction: must be 'up' or 'down'")
+	}
+
+	return nil
+}
+

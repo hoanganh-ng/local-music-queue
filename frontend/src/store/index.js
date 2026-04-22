@@ -157,9 +157,15 @@ export const globalStore = reactive({
       this.queueState.queue = songs
     }
   },
-  
+
   updatePlaybackStatus(status) {
     this.queueState.status = status === 'idle' ? 'stopped' : status
+  },
+
+  // NEW: Handle volume change event
+  handleVolumeChange(direction) {
+    this.queueState.volumeChangeDirection = direction
+    this.queueState.volumeChangeTimestamp = Date.now()
   }
 })
 

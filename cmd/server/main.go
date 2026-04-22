@@ -78,6 +78,7 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	mux.HandleFunc("POST /api/queue/prev", handlers.HandlePrevSong)
 	mux.HandleFunc("POST /api/queue/remove", handlers.HandleRemoveSong)
 	mux.HandleFunc("POST /api/queue/clear", handlers.HandleClearQueue)
+	mux.HandleFunc("POST /api/queue/volume", handlers.HandleChangeVolume)
 	mux.HandleFunc("GET /api/youtube/search", handlers.HandleSearchYouTube)
 
 	// WebSocket
