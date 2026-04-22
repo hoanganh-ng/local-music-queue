@@ -26,11 +26,9 @@ class WebSocketClient {
 
     this.isConnecting = true
 
-    // Determine WS protocol based on current location protocol
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    // Get host, fallback to localhost:8080 if not running on the same port
-    const host = window.location.port === '5173' ? 'localhost:1111' : window.location.host
-    const wsUrl = `${protocol}//${host}/ws`
+    // Get backend URL from environment and convert to WebSocket URL
+    const API_BASE = import.meta.env.VITE_API_BASE_URL || 'https://localhost:443'
+    const wsUrl = API_BASE.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws'
 
     console.log(`Connecting to WebSocket at ${wsUrl}`)
     this.ws = new WebSocket(wsUrl)
@@ -132,6 +130,23 @@ class WebSocketClient {
         break
       case 'volume_changed':
         globalStore.handleVolumeChange(message.data.direction)
+        break
+      case 'song_prioritized':
+        globalStore.prioritizeSong(
+          message.data.from_index,
+          message.data.to_index,
+          message.data.song
+        )
+        globalStore.addActivity(message.data.activity)
+
+        if (globalStore.currentUser?.id === message.data.user_id) {
+          globalStore.updatePriorityBalance(message.data.user_balance)
+        }
+        break
+      case 'priority_balance_updated':
+        if (globalStore.currentUser?.id === message.data.user_id) {
+          globalStore.updatePriorityBalance(message.data.balance)
+        }
         break
       // Keep backward compatibility
       case 'queue_updated':

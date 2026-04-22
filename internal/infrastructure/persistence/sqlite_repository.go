@@ -31,6 +31,11 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 	return repo, nil
 }
 
+// DB returns the underlying database connection.
+func (r *SQLiteRepository) DB() *sql.DB {
+	return r.db
+}
+
 func (r *SQLiteRepository) init() error {
 	query := `
 	CREATE TABLE IF NOT EXISTS queue_state (
@@ -45,6 +50,39 @@ func (r *SQLiteRepository) init() error {
 		type TEXT NOT NULL,
 		user TEXT NOT NULL,
 		description TEXT NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS users (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		email TEXT NOT NULL UNIQUE,
+		display_name TEXT NOT NULL,
+		profile_picture TEXT,
+		role TEXT NOT NULL,
+		priority_balance INTEGER NOT NULL DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS user_sessions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL,
+		session_date DATE NOT NULL,
+		first_seen_at DATETIME NOT NULL,
+		last_seen_at DATETIME NOT NULL,
+		FOREIGN KEY (user_id) REFERENCES users(id),
+		UNIQUE(user_id, session_date)
+	);
+
+	CREATE TABLE IF NOT EXISTS priority_transactions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL,
+		song_id TEXT NOT NULL,
+		song_title TEXT NOT NULL,
+		transaction_type TEXT NOT NULL,
+		amount INTEGER NOT NULL,
+		balance_after INTEGER NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (user_id) REFERENCES users(id)
 	);
 	`
 	_, err := r.db.Exec(query)

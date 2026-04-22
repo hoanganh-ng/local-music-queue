@@ -1,69 +1,154 @@
 package auth
 
 import (
+	"context"
+	"errors"
 	"local-music-queue/internal/domain/entity"
 	"testing"
+	"time"
 )
 
-func TestLogin_HostPIN(t *testing.T) {
-	interactor := NewInteractor("1234", "5678", "9999")
+var ErrNotFound = errors.New("not found")
 
-	user, err := interactor.Login("5678", "HostUser")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if user.Role != entity.RoleHost {
-		t.Errorf("expected role %s, got %s", entity.RoleHost, user.Role)
-	}
-	if user.DisplayName != "HostUser" {
-		t.Errorf("expected display name 'HostUser', got '%s'", user.DisplayName)
+// Mock UserRepository for testing
+type mockUserRepo struct {
+	users       map[string]*entity.User
+	createErr   error
+	getErr      error
+	updateErr   error
+	nextID      int
+}
+
+func newMockUserRepo() *mockUserRepo {
+	return &mockUserRepo{
+		users:  make(map[string]*entity.User),
+		nextID: 1,
 	}
 }
 
-func TestLogin_ClientPIN(t *testing.T) {
-	interactor := NewInteractor("1234", "5678", "9999")
-
-	user, err := interactor.Login("1234", "GuestUser")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func (m *mockUserRepo) CreateUser(ctx context.Context, user *entity.User) error {
+	if m.createErr != nil {
+		return m.createErr
 	}
-	if user.Role != entity.RoleGuest {
-		t.Errorf("expected role %s, got %s", entity.RoleGuest, user.Role)
+	user.ID = m.nextID
+	m.nextID++
+	m.users[user.Email] = user
+	return nil
+}
+
+func (m *mockUserRepo) GetUserByEmail(ctx context.Context, email string) (*entity.User, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
+	user, ok := m.users[email]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return user, nil
+}
+
+func (m *mockUserRepo) GetUserByID(ctx context.Context, id int) (*entity.User, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
+	for _, user := range m.users {
+		if user.ID == id {
+			return user, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (m *mockUserRepo) UpdateUser(ctx context.Context, user *entity.User) error {
+	if m.updateErr != nil {
+		return m.updateErr
+	}
+	m.users[user.Email] = user
+	return nil
+}
+
+func (m *mockUserRepo) DecrementPriority(ctx context.Context, userID int) error {
+	return nil
+}
+
+func (m *mockUserRepo) IncrementPriority(ctx context.Context, userID int) error {
+	return nil
+}
+
+func (m *mockUserRepo) RecordSession(ctx context.Context, userID int, sessionDate time.Time) error {
+	return nil
+}
+
+func (m *mockUserRepo) GetLastSessionDate(ctx context.Context, userID int) (*time.Time, error) {
+	return nil, nil
+}
+
+func (m *mockUserRepo) LogPriorityTransaction(ctx context.Context, userID int, songID, songTitle, txType string, amount, balanceAfter int) error {
+	return nil
+}
+
+func TestNewInteractor(t *testing.T) {
+	repo := newMockUserRepo()
+	clientID := "test-client-id"
+	hostEmails := []string{"host@example.com"}
+	adminEmails := []string{"admin@example.com"}
+
+	interactor := NewInteractor(repo, clientID, hostEmails, adminEmails)
+
+	if interactor == nil {
+		t.Fatal("expected non-nil interactor")
+	}
+	if interactor.clientID != clientID {
+		t.Errorf("expected clientID %s, got %s", clientID, interactor.clientID)
 	}
 }
 
-func TestLogin_InvalidPIN(t *testing.T) {
-	interactor := NewInteractor("1234", "5678", "9999")
+func TestIsHostEmail(t *testing.T) {
+	repo := newMockUserRepo()
+	interactor := NewInteractor(repo, "client-id", []string{"host@example.com", "Host2@Example.com"}, []string{})
 
-	_, err := interactor.Login("0000", "User")
-	if err != ErrInvalidPIN {
-		t.Errorf("expected ErrInvalidPIN, got %v", err)
+	tests := []struct {
+		email    string
+		expected bool
+	}{
+		{"host@example.com", true},
+		{"HOST@EXAMPLE.COM", true},
+		{"host2@example.com", true},
+		{"guest@example.com", false},
+		{"admin@example.com", false},
+	}
+
+	for _, tt := range tests {
+		result := interactor.isHostEmail(tt.email)
+		if result != tt.expected {
+			t.Errorf("isHostEmail(%s) = %v, expected %v", tt.email, result, tt.expected)
+		}
 	}
 }
 
-func TestLogin_EmptyDisplayName(t *testing.T) {
-	interactor := NewInteractor("1234", "5678", "9999")
+func TestIsAdminEmail(t *testing.T) {
+	repo := newMockUserRepo()
+	interactor := NewInteractor(repo, "client-id", []string{}, []string{"admin@example.com", "Admin2@Example.com"})
 
-	user, err := interactor.Login("1234", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	tests := []struct {
+		email    string
+		expected bool
+	}{
+		{"admin@example.com", true},
+		{"ADMIN@EXAMPLE.COM", true},
+		{"admin2@example.com", true},
+		{"guest@example.com", false},
+		{"host@example.com", false},
 	}
-	if user.DisplayName != "Anonymous" {
-		t.Errorf("expected 'Anonymous', got '%s'", user.DisplayName)
+
+	for _, tt := range tests {
+		result := interactor.isAdminEmail(tt.email)
+		if result != tt.expected {
+			t.Errorf("isAdminEmail(%s) = %v, expected %v", tt.email, result, tt.expected)
+		}
 	}
 }
 
-func TestLogin_AdminPIN(t *testing.T) {
-	interactor := NewInteractor("1234", "5678", "9999")
-
-	user, err := interactor.Login("9999", "AdminUser")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if user.Role != entity.RoleAdmin {
-		t.Errorf("expected role %s, got %s", entity.RoleAdmin, user.Role)
-	}
-	if user.DisplayName != "AdminUser" {
-		t.Errorf("expected display name 'AdminUser', got '%s'", user.DisplayName)
-	}
-}
+// Note: Testing LoginWithGoogle and VerifyGoogleToken would require mocking HTTP calls
+// to Google's tokeninfo endpoint, which is beyond the scope of unit tests.
+// These should be tested with integration tests or by mocking the HTTP client.

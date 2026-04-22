@@ -1,4 +1,4 @@
-const API_BASE = window.location.port === '5173' ? 'http://localhost:1111/api' : '/api'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'https://localhost:443'
 
 export const api = {
   async request(endpoint, options = {}) {
@@ -43,6 +43,13 @@ export const api = {
     })
   },
 
+  async loginWithGoogle(idToken) {
+    return this.request('/auth/google', {
+      method: 'POST',
+      body: { id_token: idToken }
+    })
+  },
+
   // Queue Operations
   async getQueue() {
     return this.request('/queue', {
@@ -50,8 +57,8 @@ export const api = {
     })
   },
 
-  async addSong(url, addedBy, metadata = null) {
-    const body = { url, added_by: addedBy }
+  async addSong(url, addedBy, addedByID, metadata = null) {
+    const body = { url, added_by: addedBy, added_by_id: addedByID }
     if (metadata) {
       body.metadata = metadata
     }
@@ -119,6 +126,20 @@ export const api = {
   // YouTube Search
   async searchYouTube(query) {
     return this.request(`/youtube/search?q=${encodeURIComponent(query)}`, {
+      method: 'GET'
+    })
+  },
+
+  // Priority
+  async prioritizeSong(userID, songIndex) {
+    return this.request('/queue/prioritize', {
+      method: 'POST',
+      body: { user_id: userID, song_index: songIndex }
+    })
+  },
+
+  async getPriorityBalance(userID) {
+    return this.request(`/user/priority-balance?user_id=${userID}`, {
       method: 'GET'
     })
   }

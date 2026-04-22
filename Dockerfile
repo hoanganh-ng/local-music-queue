@@ -3,8 +3,8 @@ FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
 
-# Install build dependencies if any (none expected for CGO-free sqlite)
-RUN apk add --no-cache git
+# Install build dependencies
+RUN apk add --no-cache git gcc musl-dev
 
 # Copy go mod and sum files
 COPY go.mod go.sum ./
@@ -15,42 +15,42 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the application
-# Use CGO_ENABLED=0 for a static binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/server/*
+# Build the application with CGO enabled for SQLite
+RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o server ./cmd/server
 
 # Final stage
 FROM alpine:latest
 
 WORKDIR /app
 
-# Install runtime dependencies
-# yt-dlp requires python3
-# ffmpeg is recommended for yt-dlp metadata/extraction tasks
-# ca-certificates is required for HTTPS
+# Install runtime dependencies including openssl for certificate generation
 RUN apk add --no-cache \
     python3 \
     yt-dlp \
     ffmpeg \
     ca-certificates \
-    tzdata
+    tzdata \
+    openssl
 
-# Create directory for the database
-RUN mkdir -p /app/data
+# Create directories
+RUN mkdir -p /app/data /app/certs
 
 # Copy binary from builder
 COPY --from=builder /app/server .
 
-# Set environment variables
-ENV PORT=1111
-ENV CLIENT_PIN=5555
-ENV HOST_PIN=9512
-ENV ADMIN_PIN=1598
+# Copy certificate generation script
+COPY docker/generate-backend-cert.sh /app/generate-cert.sh
+RUN chmod +x /app/generate-cert.sh
+
+# Set environment variables (will be overridden by docker-compose)
+ENV PORT=443
 ENV DB_PATH=/app/data/music_queue.db
 ENV YTDLP_PATH=/usr/bin/yt-dlp
+ENV CERT_FILE=/app/certs/server.crt
+ENV KEY_FILE=/app/certs/server.key
 
-# Expose the application port
-EXPOSE 1111
+# Expose HTTPS port
+EXPOSE 443
 
-# Run the server
-CMD ["./server"]
+# Generate certificate and start server
+CMD ["/bin/sh", "-c", "/app/generate-cert.sh && /app/server"]

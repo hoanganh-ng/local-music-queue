@@ -3,6 +3,9 @@
     <div class="queue-header">
       <h3>Up Next</h3>
       <div class="header-controls">
+        <span v-if="currentUser" class="priority-badge">
+          ⚡ {{ currentUser.priority_balance }}
+        </span>
         <button v-if="canControl && queue.length > 0" class="clear-btn" @click="handleClear">Clear</button>
         <span class="queue-count">{{ queue.length }} songs</span>
       </div>
@@ -10,16 +13,30 @@
 
     <div class="queue-items" v-if="queue.length > 0">
       <TransitionGroup name="list">
-        <div 
-          v-for="(song, index) in queue" 
+        <div
+          v-for="(song, index) in queue"
           :key="song.id || index"
           class="queue-item"
+          :class="{ 'prioritized': song.is_prioritized }"
         >
           <div class="item-number">{{ index + 1 }}</div>
           <div class="item-details">
-            <div class="item-title">{{ song.title || song.url }}</div>
+            <div class="item-title">
+              <span v-if="song.is_prioritized" class="priority-icon">⚡</span>
+              {{ song.title || song.url }}
+            </div>
             <div class="item-meta">Added by {{ song.added_by }}</div>
           </div>
+
+          <button
+            v-if="canPrioritize(song)"
+            class="prioritize-btn"
+            @click="handlePrioritize(index)"
+            title="Use priority token to move to front"
+          >
+            ⚡ Prioritize
+          </button>
+
           <button v-if="canControl" class="remove-btn" @click="handleRemove(index)" title="Remove from queue">
             &times;
           </button>
@@ -34,6 +51,7 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import { api } from '../../services/api'
 import { globalStore } from '../../store'
 
@@ -55,6 +73,38 @@ const props = defineProps({
     default: false
   }
 })
+
+const currentUser = computed(() => globalStore.currentUser)
+
+function canPrioritize(song) {
+  if (!currentUser.value) return false
+
+  // User must own the song
+  const ownsTheSong = song.added_by_id === currentUser.value.id
+
+  // User must have priority balance
+  const hasPriority = currentUser.value.priority_balance > 0
+
+  // Song must not already be prioritized
+  const notAlreadyPrioritized = !song.is_prioritized
+
+  return ownsTheSong && hasPriority && notAlreadyPrioritized
+}
+
+async function handlePrioritize(indexInQueue) {
+  const fullIndex = props.currentIndex + 1 + indexInQueue
+
+  if (!confirm('Use 1 priority token to move this song to the front?')) {
+    return
+  }
+
+  try {
+    await api.prioritizeSong(currentUser.value.id, fullIndex)
+  } catch (err) {
+    console.error('Prioritize failed:', err)
+    alert('Failed to prioritize song: ' + err.message)
+  }
+}
 
 async function handleRemove(indexInQueue) {
   // indexInQueue is index in "Up Next" list, we need index in full "songs" list
@@ -176,6 +226,131 @@ async function handleClear() {
   width: 20px;
   text-align: center;
 }
+
+.item-details {
+  flex-grow: 1;
+  min-width: 0;
+}
+
+.item-title {
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.item-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.25rem;
+}
+
+.priority-badge {
+  font-size: 0.875rem;
+  color: #f39c12;
+  background: rgba(243, 156, 18, 0.15);
+  padding: 0.25rem 0.75rem;
+  border-radius: var(--radius-full);
+  font-weight: 600;
+}
+
+.prioritize-btn {
+  background: rgba(243, 156, 18, 0.1);
+  color: #f39c12;
+  border: 1px solid rgba(243, 156, 18, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 0.3rem 0.7rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-right: 0.5rem;
+  opacity: 0;
+}
+
+.queue-item:hover .prioritize-btn {
+  opacity: 1;
+}
+
+.prioritize-btn:hover {
+  background: rgba(243, 156, 18, 0.2);
+  border-color: #f39c12;
+  transform: scale(1.05);
+}
+
+.prioritize-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.queue-item.prioritized {
+  border-left: 3px solid #f39c12;
+  background: rgba(243, 156, 18, 0.05);
+}
+
+.priority-icon {
+  color: #f39c12;
+  margin-right: 0.25rem;
+}
+
+.remove-btn {
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+  opacity: 0;
+}
+
+.queue-item:hover .remove-btn {
+  opacity: 1;
+}
+
+.remove-btn:hover {
+  background: rgba(231, 76, 60, 0.1);
+  color: #e74c3c;
+}
+
+.empty-queue {
+  flex-grow: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
+/* List Transitions */
+.list-move,
+.list-enter-active,
+.list-leave-active {
+  transition: all 0.3s ease;
+}
+
+.list-enter-from {
+  opacity: 0;
+  transform: translateX(-20px);
+}
+
+.list-leave-to {
+  opacity: 0;
+  transform: translateX(20px);
+}
+
+.list-leave-active {
+  position: absolute;
+}
+</style>
 
 .item-details {
   display: flex;

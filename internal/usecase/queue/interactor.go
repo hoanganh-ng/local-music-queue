@@ -26,7 +26,7 @@ func NewInteractor(repo repository.QueueRepository, youtube service.YouTubeServi
 
 // AddSong adds a song to the queue. If metadata is provided (e.g. from a prior
 // search result) it is used directly, skipping the yt-dlp metadata fetch.
-func (i *Interactor) AddSong(ctx context.Context, url string, addedBy string, metadata *entity.SearchResult) (*entity.Song, error) {
+func (i *Interactor) AddSong(ctx context.Context, url string, addedBy string, addedByID int, metadata *entity.SearchResult) (*entity.Song, error) {
 	var song *entity.Song
 
 	if metadata != nil {
@@ -39,6 +39,7 @@ func (i *Interactor) AddSong(ctx context.Context, url string, addedBy string, me
 			Thumbnail: metadata.Thumbnail,
 			URL:       metadata.URL,
 			AddedBy:   addedBy,
+			AddedByID: addedByID,
 		}
 	} else {
 		// Slow path: bare URL — must fetch metadata via yt-dlp.
@@ -47,6 +48,7 @@ func (i *Interactor) AddSong(ctx context.Context, url string, addedBy string, me
 			return nil, fmt.Errorf("failed to fetch metadata: %w", err)
 		}
 		fetched.AddedBy = addedBy
+		fetched.AddedByID = addedByID
 		song = fetched
 	}
 

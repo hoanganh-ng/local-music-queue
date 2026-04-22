@@ -166,6 +166,31 @@ export const globalStore = reactive({
   handleVolumeChange(direction) {
     this.queueState.volumeChangeDirection = direction
     this.queueState.volumeChangeTimestamp = Date.now()
+  },
+
+  // NEW: Prioritize song
+  prioritizeSong(fromIndex, toIndex, song) {
+    // Remove from old position
+    this.queueState.songs.splice(fromIndex, 1)
+
+    // Insert at new position
+    this.queueState.songs.splice(toIndex, 0, song)
+
+    // Adjust current_index if needed
+    if (fromIndex < this.queueState.current_index && toIndex >= this.queueState.current_index) {
+      this.queueState.current_index--
+    } else if (fromIndex > this.queueState.current_index && toIndex <= this.queueState.current_index) {
+      this.queueState.current_index++
+    }
+
+    this.recalculateQueue()
+  },
+
+  // NEW: Update priority balance
+  updatePriorityBalance(balance) {
+    if (this.currentUser) {
+      this.currentUser.priority_balance = balance
+    }
   }
 })
 

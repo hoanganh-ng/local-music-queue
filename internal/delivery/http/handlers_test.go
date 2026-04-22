@@ -9,6 +9,7 @@ import (
 	"local-music-queue/internal/infrastructure/youtube"
 	"local-music-queue/internal/usecase/activity"
 	"local-music-queue/internal/usecase/auth"
+	"local-music-queue/internal/usecase/priority"
 	"local-music-queue/internal/usecase/queue"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,9 @@ func newTestHandlers(t *testing.T) *Handlers {
 		t.Fatalf("failed to create repo: %v", err)
 	}
 
+	// Create user repository
+	userRepo := persistence.NewSQLiteUserRepository(repo.DB())
+
 	// Create a fake yt-dlp script
 	var ytSvc *youtube.YTDLPService
 	if runtime.GOOS != "windows" {
@@ -44,17 +48,18 @@ EOF
 	}
 
 	queueInteractor := queue.NewInteractor(repo, ytSvc)
-	authInteractor := auth.NewInteractor("1234", "5678", "9999")
+	authInteractor := auth.NewInteractor(userRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"})
 	actInteractor := activity.NewInteractor(repo)
+	priorityInteractor := priority.NewInteractor(userRepo, repo)
 	hub := ws.NewHub(queueInteractor.GetState)
 	go hub.Run()
 
-	return NewHandlers(queueInteractor, authInteractor, actInteractor, hub)
+	return NewHandlers(queueInteractor, authInteractor, actInteractor, priorityInteractor, hub)
 }
 
 // --- Login Tests ---
 
-func TestHandleLogin_Success(t *testing.T) {
+func TestHandleLogin_Deprecated(t *testing.T) {
 	h := newTestHandlers(t)
 
 	body, _ := json.Marshal(LoginRequest{PIN: "1234", DisplayName: "TestUser"})
@@ -63,21 +68,13 @@ func TestHandleLogin_Success(t *testing.T) {
 
 	h.HandleLogin(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", rr.Code)
-	}
-
-	var user entity.User
-	json.NewDecoder(rr.Body).Decode(&user)
-	if user.Role != entity.RoleGuest {
-		t.Errorf("expected role guest, got %s", user.Role)
-	}
-	if user.DisplayName != "TestUser" {
-		t.Errorf("expected 'TestUser', got '%s'", user.DisplayName)
+	// PIN login is deprecated, should return 400
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 (deprecated), got %d", rr.Code)
 	}
 }
 
-func TestHandleLogin_InvalidPIN(t *testing.T) {
+func TestHandleLogin_InvalidPIN_Deprecated(t *testing.T) {
 	h := newTestHandlers(t)
 
 	body, _ := json.Marshal(LoginRequest{PIN: "0000", DisplayName: "User"})
@@ -86,8 +83,9 @@ func TestHandleLogin_InvalidPIN(t *testing.T) {
 
 	h.HandleLogin(rr, req)
 
-	if rr.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", rr.Code)
+	// PIN login is deprecated, should return 400
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 (deprecated), got %d", rr.Code)
 	}
 }
 
@@ -268,13 +266,17 @@ EOF
 	os.WriteFile(script, []byte(content), 0755)
 	ytSvc := youtube.NewYTDLPService(script)
 
+	// Create user repository
+	userRepo := persistence.NewSQLiteUserRepository(repo.DB())
+
 	queueInteractor := queue.NewInteractor(repo, ytSvc)
-	authInteractor := auth.NewInteractor("1234", "5678", "9999")
+	authInteractor := auth.NewInteractor(userRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"})
 	actInteractor := activity.NewInteractor(repo)
+	priorityInteractor := priority.NewInteractor(userRepo, repo)
 	hub := ws.NewHub(queueInteractor.GetState)
 	go hub.Run()
 
-	h := NewHandlers(queueInteractor, authInteractor, actInteractor, hub)
+	h := NewHandlers(queueInteractor, authInteractor, actInteractor, priorityInteractor, hub)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/youtube/search?q=test", nil)
 	rr := httptest.NewRecorder()

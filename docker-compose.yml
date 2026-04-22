@@ -1,25 +1,50 @@
+version: '3.8'
+
 services:
   backend:
     build:
       context: .
+      dockerfile: Dockerfile
+    container_name: music-queue-backend
     ports:
-      - "1111:1111"
+      - "443:443"  # HTTPS
     volumes:
-      - ./.localdb:/app/data
+      - ./data:/app/data
+      - ./certs:/app/certs  # Persist certificates
     environment:
-      - PORT=1111
-      - CLIENT_PIN=5555
-      - HOST_PIN=6666
+      - PORT=443
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - HOST_EMAILS=${HOST_EMAILS}
+      - ADMIN_EMAILS=${ADMIN_EMAILS}
+      - LOCAL_IP=${LOCAL_IP}
       - DB_PATH=/app/data/music_queue.db
       - YTDLP_PATH=/usr/bin/yt-dlp
+      - CERT_FILE=/app/certs/server.crt
+      - KEY_FILE=/app/certs/server.key
     restart: unless-stopped
+    networks:
+      - app-network
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    container_name: music-queue-frontend
     ports:
-      - "8011:80"
+      - "80:80"      # HTTP → HTTPS redirect
+      - "8443:443"   # HTTPS
+    volumes:
+      - ./frontend-certs:/etc/nginx/ssl  # Persist certificates
+    environment:
+      - LOCAL_IP=${LOCAL_IP}
+      - CERT_FILE=/etc/nginx/ssl/cert.crt
+      - KEY_FILE=/etc/nginx/ssl/cert.key
     depends_on:
       - backend
     restart: unless-stopped
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge

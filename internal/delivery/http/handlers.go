@@ -7,6 +7,7 @@ import (
 	"local-music-queue/internal/domain/entity"
 	"local-music-queue/internal/usecase/activity"
 	"local-music-queue/internal/usecase/auth"
+	"local-music-queue/internal/usecase/priority"
 	"local-music-queue/internal/usecase/queue"
 	"net/http"
 )
@@ -15,35 +16,42 @@ type Handlers struct {
 	queue    *queue.Interactor
 	auth     *auth.Interactor
 	activity *activity.Interactor
+	priority *priority.Interactor
 	hub      *ws.Hub
 }
 
-func NewHandlers(q *queue.Interactor, a *auth.Interactor, act *activity.Interactor, hub *ws.Hub) *Handlers {
+func NewHandlers(q *queue.Interactor, a *auth.Interactor, act *activity.Interactor, p *priority.Interactor, hub *ws.Hub) *Handlers {
 	return &Handlers{
 		queue:    q,
 		auth:     a,
 		activity: act,
+		priority: p,
 		hub:      hub,
 	}
 }
 
-type LoginRequest struct {
-	PIN         string `json:"pin"`
-	DisplayName string `json:"display_name"`
+type GoogleLoginRequest struct {
+	IDToken string `json:"id_token"`
 }
 
-func (h *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
-	var req LoginRequest
+func (h *Handlers) HandleGoogleLogin(w http.ResponseWriter, r *http.Request) {
+	var req GoogleLoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 
-	user, err := h.auth.Login(req.PIN, req.DisplayName)
+	user, err := h.auth.LoginWithGoogle(r.Context(), req.IDToken)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
+
+	// Check and award daily priority
+	_ = h.priority.CheckAndAwardDailyPriority(r.Context(), user.ID)
+
+	// Reload user to get updated priority balance
+	user, _ = h.auth.LoginWithGoogle(r.Context(), req.IDToken)
 
 	// Log join activity
 	joinActivity := entity.NewActivity(entity.ActivityUserJoined, user.DisplayName, "joined the room")
@@ -59,6 +67,22 @@ func (h *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(user)
 }
 
+type LoginRequest struct {
+	PIN         string `json:"pin"`
+	DisplayName string `json:"display_name"`
+}
+
+func (h *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
+	var req LoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// This is deprecated - keeping for backward compatibility
+	http.Error(w, "PIN login is deprecated, please use Google Sign-In", http.StatusBadRequest)
+}
+
 func (h *Handlers) HandleGetQueue(w http.ResponseWriter, r *http.Request) {
 	state, err := h.queue.GetState(r.Context())
 	if err != nil {
@@ -69,9 +93,10 @@ func (h *Handlers) HandleGetQueue(w http.ResponseWriter, r *http.Request) {
 }
 
 type AddSongRequest struct {
-	URL      string                 `json:"url"`
-	AddedBy  string                 `json:"added_by"`
-	Metadata *entity.SearchResult   `json:"metadata,omitempty"`
+	URL       string               `json:"url"`
+	AddedBy   string               `json:"added_by"`
+	AddedByID int                  `json:"added_by_id"`
+	Metadata  *entity.SearchResult `json:"metadata,omitempty"`
 }
 
 func (h *Handlers) HandleAddSong(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +106,7 @@ func (h *Handlers) HandleAddSong(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	song, err := h.queue.AddSong(r.Context(), req.URL, req.AddedBy, req.Metadata)
+	song, err := h.queue.AddSong(r.Context(), req.URL, req.AddedBy, req.AddedByID, req.Metadata)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -351,6 +376,75 @@ func (h *Handlers) HandleClearQueue(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type PrioritizeSongRequest struct {
+	UserID    int `json:"user_id"`
+	SongIndex int `json:"song_index"`
+}
+
+func (h *Handlers) HandlePrioritizeSong(w http.ResponseWriter, r *http.Request) {
+	var req PrioritizeSongRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// Get state before prioritization
+	stateBefore, _ := h.queue.GetState(r.Context())
+
+	err := h.priority.PrioritizeSong(r.Context(), req.UserID, req.SongIndex)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Get state after prioritization
+	stateAfter, _ := h.queue.GetState(r.Context())
+
+	// Get user for balance
+	balance, _ := h.priority.GetUserPriorityBalance(r.Context(), req.UserID)
+
+	// Find the prioritized song
+	targetIndex := stateBefore.CurrentIndex + 1
+	song := stateAfter.Songs[targetIndex]
+
+	activity := entity.NewActivity(entity.ActivityPlayback, song.AddedBy,
+		fmt.Sprintf("prioritized \"%s\"", song.Title))
+
+	// Broadcast delta event
+	h.hub.Broadcast(ws.EventSongPrioritized, ws.SongPrioritizedData{
+		FromIndex:   req.SongIndex,
+		ToIndex:     targetIndex,
+		Song:        song,
+		UserID:      req.UserID,
+		UserBalance: balance,
+		Activity:    activity,
+	})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handlers) HandleGetPriorityBalance(w http.ResponseWriter, r *http.Request) {
+	userIDStr := r.URL.Query().Get("user_id")
+	if userIDStr == "" {
+		http.Error(w, "user_id parameter required", http.StatusBadRequest)
+		return
+	}
+
+	var userID int
+	if _, err := fmt.Sscanf(userIDStr, "%d", &userID); err != nil {
+		http.Error(w, "invalid user_id", http.StatusBadRequest)
+		return
+	}
+
+	balance, err := h.priority.GetUserPriorityBalance(r.Context(), userID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]int{"balance": balance})
 }
 
 type VolumeRequest struct {
