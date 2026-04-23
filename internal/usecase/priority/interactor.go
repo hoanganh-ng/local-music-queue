@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"local-music-queue/internal/domain/entity"
 	"local-music-queue/internal/domain/repository"
+	"strings"
 	"sync"
 	"time"
 )
@@ -91,15 +92,24 @@ func (i *Interactor) CheckAndAwardDailyPriority(ctx context.Context, userID int)
 
 	// Check last session date
 	lastSession, err := i.userRepo.GetLastSessionDate(ctx, userID)
-	if err != nil || lastSession == nil || lastSession.Before(today) {
-		// Award priority for today
-		if err := i.userRepo.IncrementPriority(ctx, userID); err != nil {
-			return err
+	if err != nil {
+		return fmt.Errorf("failed to check session: %w", err)
+	}
+
+	// Only award if no session today
+	if lastSession == nil || lastSession.Before(today) {
+		// Record session FIRST - this acts as distributed lock via UNIQUE constraint
+		if err := i.userRepo.RecordSession(ctx, userID, today); err != nil {
+			// If conflict (session already exists), another request won the race - skip award
+			if strings.Contains(err.Error(), "UNIQUE constraint") {
+				return nil
+			}
+			return fmt.Errorf("failed to record session: %w", err)
 		}
 
-		// Record session
-		if err := i.userRepo.RecordSession(ctx, userID, today); err != nil {
-			return err
+		// Award token ONLY after session successfully recorded
+		if err := i.userRepo.IncrementPriority(ctx, userID); err != nil {
+			return fmt.Errorf("failed to increment priority: %w", err)
 		}
 
 		// Log transaction
