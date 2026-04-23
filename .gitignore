@@ -3,3 +3,9 @@ bin
 .localdb
 .vscode
 tmp
+.env
+server
+letsencrypt*
+frontend-certs
+certs
+data

@@ -3,6 +3,8 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
+	"strings"
 
 	delivery "local-music-queue/internal/delivery/http"
 	"local-music-queue/internal/delivery/ws"
@@ -11,6 +13,7 @@ import (
 	"local-music-queue/internal/infrastructure/youtube"
 	usecaseActivity "local-music-queue/internal/usecase/activity"
 	usecaseAuth "local-music-queue/internal/usecase/auth"
+	usecasePriority "local-music-queue/internal/usecase/priority"
 	usecaseQueue "local-music-queue/internal/usecase/queue"
 )
 
@@ -26,19 +29,56 @@ func main() {
 		Handler: requestLogger(enableCORS(mux)),
 	}
 
-	log.Printf("Server listening on http://localhost:%s", cfg.Port)
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	// Check if we should serve HTTPS
+	certFile := os.Getenv("CERT_FILE")
+	keyFile := os.Getenv("KEY_FILE")
+
+	if certFile != "" && keyFile != "" {
+		log.Printf("Server listening on https://0.0.0.0:%s", cfg.Port)
+		if err := server.ListenAndServeTLS(certFile, keyFile); err != nil {
+			log.Fatalf("Server failed: %v", err)
+		}
+	} else {
+		log.Printf("Server listening on http://localhost:%s", cfg.Port)
+		if err := server.ListenAndServe(); err != nil {
+			log.Fatalf("Server failed: %v", err)
+		}
 	}
 }
 
 func setupApp() (*http.ServeMux, *config.Config, error) {
 	// 1. Load configuration
 	cfg := config.Load()
-	log.Printf("Client PIN: %s", cfg.ClientPIN)
-	log.Printf("Host PIN: %s", cfg.HostPIN)
-	log.Printf("Admin PIN: %s", cfg.AdminPIN)
 	log.Printf("Starting Local Music Queue server on port %s", cfg.Port)
+
+	// Load Google OAuth config from environment
+	googleClientID := os.Getenv("GOOGLE_CLIENT_ID")
+	if googleClientID == "" {
+		log.Println("Warning: GOOGLE_CLIENT_ID not set")
+	}
+
+	hostEmailsStr := os.Getenv("HOST_EMAILS")
+	adminEmailsStr := os.Getenv("ADMIN_EMAILS")
+
+	var hostEmails []string
+	var adminEmails []string
+
+	if hostEmailsStr != "" {
+		hostEmails = strings.Split(hostEmailsStr, ",")
+		for i := range hostEmails {
+			hostEmails[i] = strings.TrimSpace(hostEmails[i])
+		}
+	}
+
+	if adminEmailsStr != "" {
+		adminEmails = strings.Split(adminEmailsStr, ",")
+		for i := range adminEmails {
+			adminEmails[i] = strings.TrimSpace(adminEmails[i])
+		}
+	}
+
+	log.Printf("Host emails: %v", hostEmails)
+	log.Printf("Admin emails: %v", adminEmails)
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
@@ -51,24 +91,29 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 		return nil, nil, err
 	}
 
+	// Initialize user repository
+	userRepo := persistence.NewSQLiteUserRepository(repo.DB())
+
 	ytService := youtube.NewYTDLPService(cfg.YTDLPPath)
 
 	// 3. Initialize Usecases
 	qInteractor := usecaseQueue.NewInteractor(repo, ytService)
-	authInteractor := usecaseAuth.NewInteractor(cfg.ClientPIN, cfg.HostPIN, cfg.AdminPIN)
+	authInteractor := usecaseAuth.NewInteractor(userRepo, googleClientID, hostEmails, adminEmails)
 	actInteractor := usecaseActivity.NewInteractor(repo)
+	priorityInteractor := usecasePriority.NewInteractor(userRepo, repo)
 
 	// 4. Initialize Delivery with queue state callback
 	hub := ws.NewHub(qInteractor.GetState)
 	go hub.Run() // Start WebSocket hub loop
 
-	handlers := delivery.NewHandlers(qInteractor, authInteractor, actInteractor, hub)
+	handlers := delivery.NewHandlers(qInteractor, authInteractor, actInteractor, priorityInteractor, hub)
 
 	// 5. Setup Routes
 	mux := http.NewServeMux()
 
 	// HTTP API
-	mux.HandleFunc("POST /api/auth", handlers.HandleLogin)
+	mux.HandleFunc("POST /api/auth/google", handlers.HandleGoogleLogin)
+	mux.HandleFunc("POST /api/auth", handlers.HandleLogin) // Deprecated
 	mux.HandleFunc("GET /api/queue", handlers.HandleGetQueue)
 	mux.HandleFunc("POST /api/queue/add", handlers.HandleAddSong)
 	mux.HandleFunc("POST /api/queue/skip", handlers.HandleSkipSong)
@@ -79,6 +124,8 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	mux.HandleFunc("POST /api/queue/remove", handlers.HandleRemoveSong)
 	mux.HandleFunc("POST /api/queue/clear", handlers.HandleClearQueue)
 	mux.HandleFunc("POST /api/queue/volume", handlers.HandleChangeVolume)
+	mux.HandleFunc("POST /api/queue/prioritize", handlers.HandlePrioritizeSong)
+	mux.HandleFunc("GET /api/user/priority-balance", handlers.HandleGetPriorityBalance)
 	mux.HandleFunc("GET /api/youtube/search", handlers.HandleSearchYouTube)
 
 	// WebSocket

@@ -3,76 +3,52 @@
     <div class="auth-card glass-panel">
       <div class="auth-header">
         <h1>Local Music Queue</h1>
-        <p>Enter your PIN to join the party</p>
+        <p>Sign in with your Google account</p>
       </div>
 
-      <form @submit.prevent="handleLogin" class="auth-form">
-        <BaseInput
-          id="displayName"
-          v-model="displayName"
-          label="Display Name (Optional)"
-          placeholder="e.g. DJ Sparkles"
-        />
+      <div id="g_id_onload"
+           :data-client_id="googleClientId"
+           data-callback="handleGoogleCallback"
+           data-auto_prompt="false">
+      </div>
 
-        <BaseInput
-          id="pin"
-          v-model="pin"
-          type="password"
-          label="PIN Code"
-          placeholder="Enter PIN"
-          required
-        />
+      <div class="g_id_signin"
+           data-type="standard"
+           data-size="large"
+           data-theme="filled_blue"
+           data-text="sign_in_with"
+           data-shape="rectangular"
+           data-logo_alignment="left">
+      </div>
 
-        <div v-if="error" class="error-message">
-          {{ error }}
-        </div>
-
-        <BaseButton
-          variant="primary"
-          type="submit"
-          class="submit-btn"
-          :disabled="isLoading"
-        >
-          {{ isLoading ? 'Connecting...' : 'Join' }}
-        </BaseButton>
-      </form>
+      <div v-if="error" class="error-message">
+        {{ error }}
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { globalStore } from '../store'
 import { api } from '../services/api'
-import BaseInput from '../components/ui/BaseInput.vue'
-import BaseButton from '../components/ui/BaseButton.vue'
 
 const router = useRouter()
-const pin = ref('')
-const displayName = ref('')
 const error = ref('')
-const isLoading = ref(false)
+const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID
 
-const handleLogin = async () => {
-  if (!pin.value) {
-    error.value = "PIN is required"
-    return
+onMounted(() => {
+  window.handleGoogleCallback = async (response) => {
+    try {
+      const user = await api.loginWithGoogle(response.credential)
+      globalStore.setUser(user)
+      router.push({ name: 'Dashboard' })
+    } catch (err) {
+      error.value = err.message || "Failed to authenticate"
+    }
   }
-
-  error.value = ''
-  isLoading.value = true
-
-  try {
-    const user = await api.login(pin.value, displayName.value)
-    globalStore.setUser(user)
-    router.push({ name: 'Dashboard' })
-  } catch (err) {
-    error.value = err.message || "Failed to authenticate"
-  } finally {
-    isLoading.value = false
-  }
-}
+})
 </script>
 
 <style scoped>
@@ -109,17 +85,6 @@ const handleLogin = async () => {
   font-size: 0.875rem;
 }
 
-.auth-form {
-  display: flex;
-  flex-direction: column;
-  gap: 1.25rem;
-}
-
-.submit-btn {
-  margin-top: 1rem;
-  width: 100%;
-}
-
 .error-message {
   color: var(--danger);
   font-size: 0.875rem;
@@ -127,5 +92,14 @@ const handleLogin = async () => {
   padding: 0.5rem;
   background: rgba(239, 35, 60, 0.1);
   border-radius: var(--radius-sm);
+}
+
+#g_id_onload {
+  display: none;
+}
+
+.g_id_signin {
+  display: flex;
+  justify-content: center;
 }
 </style>

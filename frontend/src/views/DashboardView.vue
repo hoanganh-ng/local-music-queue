@@ -117,7 +117,7 @@ const handleLogout = () => {
 }
 
 const addSong = async (url, metadata = null) => {
-  await api.addSong(url, currentUser.value.display_name, metadata)
+  await api.addSong(url, currentUser.value.display_name, currentUser.value.id, metadata)
 }
 
 const togglePlayback = async () => {

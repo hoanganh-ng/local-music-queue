@@ -140,3 +140,49 @@ func (q *Queue) IsValidTransition(newStatus PlaybackStatus) bool {
 	}
 	return true
 }
+
+// Prioritize moves a song to the front of the queue (after current song).
+func (q *Queue) Prioritize(songIndex int) error {
+	// Validate index
+	if songIndex < 0 || songIndex >= len(q.Songs) {
+		return errors.New("invalid song index")
+	}
+
+	// Cannot prioritize currently playing song
+	if songIndex == q.CurrentIndex {
+		return errors.New("cannot prioritize currently playing song")
+	}
+
+	// Target position: right after current song
+	targetIndex := q.CurrentIndex + 1
+
+	// Already at target position
+	if songIndex == targetIndex {
+		return nil
+	}
+
+	// Extract and mark song
+	song := q.Songs[songIndex]
+	song.IsPrioritized = true
+
+	// Remove from current position
+	q.Songs = append(q.Songs[:songIndex], q.Songs[songIndex+1:]...)
+
+	// Adjust target if removed from before it
+	if songIndex < targetIndex {
+		targetIndex--
+	}
+
+	// Insert at target position
+	q.Songs = append(q.Songs[:targetIndex], append([]Song{song}, q.Songs[targetIndex:]...)...)
+
+	// Adjust current index if needed
+	if songIndex < q.CurrentIndex {
+		q.CurrentIndex--
+	}
+	if targetIndex <= q.CurrentIndex {
+		q.CurrentIndex++
+	}
+
+	return nil
+}

@@ -6,16 +6,18 @@ import (
 
 // Event type constants
 const (
-	EventFullSync      = "full_sync"
-	EventUserJoined    = "user_joined"
-	EventSongAdded     = "song_added"
-	EventSongSkipped   = "song_skipped"
-	EventStatusChanged = "status_changed"
-	EventElapsedSync   = "elapsed_sync"
-	EventSongPrevious  = "song_previous"
-	EventSongRemoved   = "song_removed"
-	EventQueueCleared  = "queue_cleared"
-	EventVolumeChanged = "volume_changed"
+	EventFullSync              = "full_sync"
+	EventUserJoined            = "user_joined"
+	EventSongAdded             = "song_added"
+	EventSongSkipped           = "song_skipped"
+	EventStatusChanged         = "status_changed"
+	EventElapsedSync           = "elapsed_sync"
+	EventSongPrevious          = "song_previous"
+	EventSongRemoved           = "song_removed"
+	EventQueueCleared          = "queue_cleared"
+	EventVolumeChanged         = "volume_changed"
+	EventSongPrioritized       = "song_prioritized"
+	EventPriorityBalanceUpdated = "priority_balance_updated"
 )
 
 // UserJoinedData contains only the new user info
@@ -86,4 +88,20 @@ type QueueClearedData struct {
 // VolumeChangedData contains volume change direction
 type VolumeChangedData struct {
 	Direction string `json:"direction"`
+}
+
+// SongPrioritizedData contains info about prioritized song
+type SongPrioritizedData struct {
+	FromIndex   int             `json:"from_index"`
+	ToIndex     int             `json:"to_index"`
+	Song        entity.Song     `json:"song"`
+	UserID      int             `json:"user_id"`
+	UserBalance int             `json:"user_balance"`
+	Activity    entity.Activity `json:"activity"`
+}
+
+// PriorityBalanceUpdatedData contains updated priority balance
+type PriorityBalanceUpdatedData struct {
+	UserID  int `json:"user_id"`
+	Balance int `json:"balance"`
 }
