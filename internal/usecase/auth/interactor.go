@@ -98,6 +98,11 @@ func (i *Interactor) LoginWithGoogle(ctx context.Context, idToken string) (*enti
 		return nil, err
 	}
 
+	// 1.1 Check if email is in allow domain (optional, can be skipped if we allow any Google account)
+	if !strings.HasSuffix(googleUser.Email, "@urekamedia.vn") {
+		return nil, errors.New("email not allowed")
+	}
+
 	// 2. Check if user exists by email
 	user, err := i.userRepo.GetUserByEmail(ctx, googleUser.Email)
 	if err != nil {

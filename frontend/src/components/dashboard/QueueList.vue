@@ -350,7 +350,6 @@ async function handleClear() {
 .list-leave-active {
   position: absolute;
 }
-</style>
 
 .item-details {
   display: flex;

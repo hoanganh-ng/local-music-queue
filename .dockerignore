@@ -3,6 +3,7 @@ bin/
 tmp/
 .localdb/
 *.db
+.env
 
 # Frontend (if building from root)
 frontend/node_modules/

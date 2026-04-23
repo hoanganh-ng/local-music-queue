@@ -23,14 +23,17 @@ FROM alpine:latest
 
 WORKDIR /app
 
-# Install runtime dependencies including openssl for certificate generation
+# Install runtime dependencies including certbot for Let's Encrypt certificates
 RUN apk add --no-cache \
     python3 \
+    py3-pip \
     yt-dlp \
     ffmpeg \
     ca-certificates \
     tzdata \
-    openssl
+    certbot \
+    cronie && \
+    pip3 install --break-system-packages certbot-dns-duckdns
 
 # Create directories
 RUN mkdir -p /app/data /app/certs
@@ -38,9 +41,9 @@ RUN mkdir -p /app/data /app/certs
 # Copy binary from builder
 COPY --from=builder /app/server .
 
-# Copy certificate generation script
-COPY docker/generate-backend-cert.sh /app/generate-cert.sh
-RUN chmod +x /app/generate-cert.sh
+# Copy certificate setup script
+COPY docker/setup-certs.sh /app/setup-certs.sh
+RUN chmod +x /app/setup-certs.sh
 
 # Set environment variables (will be overridden by docker-compose)
 ENV PORT=443
@@ -52,5 +55,5 @@ ENV KEY_FILE=/app/certs/server.key
 # Expose HTTPS port
 EXPOSE 443
 
-# Generate certificate and start server
-CMD ["/bin/sh", "-c", "/app/generate-cert.sh && /app/server"]
+# Start cron, setup certificates, and start server
+CMD ["/bin/sh", "-c", "crond && /app/setup-certs.sh && /app/server"]

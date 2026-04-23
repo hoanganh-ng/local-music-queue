@@ -18,8 +18,14 @@ RUN npm run build
 # Production stage
 FROM nginx:alpine AS production-stage
 
-# Install openssl for certificate generation
-RUN apk add --no-cache openssl
+# Install certbot and cronie for Let's Encrypt certificates
+RUN apk add --no-cache \
+    python3 \
+    py3-pip \
+    certbot \
+    cronie \
+    openssl && \
+    pip3 install --break-system-packages certbot-dns-duckdns
 
 # Copy the build output from the build stage
 COPY --from=build-stage /app/dist /usr/share/nginx/html
@@ -27,9 +33,10 @@ COPY --from=build-stage /app/dist /usr/share/nginx/html
 # Copy the nginx configuration
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Copy and set up entrypoint script
+# Copy certificate setup script and entrypoint script
+COPY setup-certs.sh /setup-certs.sh
 COPY docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod +x /docker-entrypoint.sh
+RUN chmod +x /setup-certs.sh /docker-entrypoint.sh
 
 # Expose both HTTP and HTTPS
 EXPOSE 80 443

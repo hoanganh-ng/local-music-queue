@@ -2,7 +2,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || 'https://localhost:443'
 
 export const api = {
   async request(endpoint, options = {}) {
-    const url = `${API_BASE}${endpoint}`
+    const url = `${API_BASE}/api${endpoint}`
 
     const defaultHeaders = {
       'Content-Type': 'application/json'
