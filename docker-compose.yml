@@ -8,10 +8,6 @@ services:
     container_name: music-queue-backend
     ports:
       - "${BACKEND_PORT:-443}:443"  # HTTPS
-    volumes:
-      - ./data:/app/data
-      - ./letsencrypt-backend:/etc/letsencrypt  # Let's Encrypt certificates
-      - ./certs:/app/certs  # Certificate symlinks
     environment:
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - HOST_EMAILS=${HOST_EMAILS}
@@ -31,9 +27,6 @@ services:
     ports:
       - "${FRONTEND_HTTP_PORT:-80}:80"      # HTTP → HTTPS redirect
       - "${FRONTEND_HTTPS_PORT:-443}:443"   # HTTPS
-    volumes:
-      - ./letsencrypt-frontend:/etc/letsencrypt  # Let's Encrypt certificates
-      - ./frontend-certs:/etc/nginx/ssl  # Certificate symlinks
     environment:
       - DUCKDNS_DOMAIN=${DUCKDNS_DOMAIN}
       - DUCKDNS_TOKEN=${DUCKDNS_TOKEN}
