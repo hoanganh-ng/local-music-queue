@@ -29,12 +29,16 @@
           </div>
 
           <button
-            v-if="canPrioritize(song)"
+            v-if="shouldShowPrioritizeButton(song)"
             class="prioritize-btn"
+            :class="{ 'loading': prioritizingIndex === index }"
+            :disabled="!canPrioritize(song) || prioritizingIndex === index"
+            :title="getPrioritizeTooltip(song)"
             @click="handlePrioritize(index)"
-            title="Use priority token to move to front"
           >
-            ⚡ Prioritize
+            <span v-if="prioritizingIndex === index">⏳</span>
+            <span v-else>⚡</span>
+            {{ prioritizingIndex === index ? 'Prioritizing...' : 'Prioritize' }}
           </button>
 
           <button v-if="canControl" class="remove-btn" @click="handleRemove(index)" title="Remove from queue">
@@ -51,7 +55,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { api } from '../../services/api'
 import { globalStore } from '../../store'
 
@@ -75,6 +79,12 @@ const props = defineProps({
 })
 
 const currentUser = computed(() => globalStore.currentUser)
+const prioritizingIndex = ref(null)
+
+function shouldShowPrioritizeButton(song) {
+  if (!currentUser.value) return false
+  return song.added_by_id === currentUser.value.id
+}
 
 function canPrioritize(song) {
   if (!currentUser.value) return false
@@ -91,6 +101,20 @@ function canPrioritize(song) {
   return ownsTheSong && hasPriority && notAlreadyPrioritized
 }
 
+function getPrioritizeTooltip(song) {
+  if (!currentUser.value) return 'Login required'
+  if (song.added_by_id !== currentUser.value.id) {
+    return 'You can only prioritize your own songs'
+  }
+  if (song.is_prioritized) {
+    return 'This song is already prioritized'
+  }
+  if (currentUser.value.priority_balance <= 0) {
+    return 'No priority tokens available (earn 1 per day)'
+  }
+  return 'Use 1 priority token to move this song to the front'
+}
+
 async function handlePrioritize(indexInQueue) {
   const fullIndex = props.currentIndex + 1 + indexInQueue
 
@@ -98,11 +122,25 @@ async function handlePrioritize(indexInQueue) {
     return
   }
 
+  prioritizingIndex.value = indexInQueue
+
   try {
     await api.prioritizeSong(currentUser.value.id, fullIndex)
   } catch (err) {
     console.error('Prioritize failed:', err)
-    alert('Failed to prioritize song: ' + err.message)
+
+    let message = 'Failed to prioritize song'
+    if (err.message.includes('insufficient')) {
+      message = 'You don\'t have enough priority tokens'
+    } else if (err.message.includes('ownership') || err.message.includes('own songs')) {
+      message = 'You can only prioritize your own songs'
+    } else if (err.message.includes('already')) {
+      message = 'This song is already prioritized'
+    }
+
+    alert(message)
+  } finally {
+    prioritizingIndex.value = null
   }
 }
 
@@ -266,22 +304,37 @@ async function handleClear() {
   cursor: pointer;
   transition: all 0.2s ease;
   margin-right: 0.5rem;
-  opacity: 0;
-}
-
-.queue-item:hover .prioritize-btn {
   opacity: 1;
 }
 
-.prioritize-btn:hover {
+/* Mobile: smaller sizing */
+@media (max-width: 768px) {
+  .prioritize-btn {
+    font-size: 0.7rem;
+    padding: 0.25rem 0.5rem;
+  }
+}
+
+.prioritize-btn:hover:not(:disabled) {
   background: rgba(243, 156, 18, 0.2);
   border-color: #f39c12;
   transform: scale(1.05);
 }
 
 .prioritize-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
+  background: rgba(243, 156, 18, 0.05);
+}
+
+.prioritize-btn:disabled:hover {
+  transform: none;
+  background: rgba(243, 156, 18, 0.05);
+}
+
+.prioritize-btn.loading {
+  opacity: 0.6;
+  cursor: wait;
 }
 
 .queue-item.prioritized {
