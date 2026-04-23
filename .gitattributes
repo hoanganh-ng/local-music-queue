@@ -1,5 +1,4 @@
 # Ensure shell scripts always use LF line endings (fixes Windows Docker issues)
-*.sh text eol=lf
-docker-entrypoint.sh text eol=lf
-generate-backend-cert.sh text eol=lf
-setup-certs.sh text eol=lf
+docker/setup-certs.sh text eol=lf
+frontend/docker-entrypoint.sh text eol=lf
+frontend/setup-certs.sh text eol=lf
