@@ -77,6 +77,13 @@ import { api } from '../../services/api'
 
 const emit = defineEmits(['submit'])
 
+const props = defineProps({
+  onSubmit: {
+    type: Function,
+    required: false
+  }
+})
+
 const inputValue = ref('')
 const isLoading = ref(false)
 const error = ref('')
@@ -217,7 +224,13 @@ const submit = async (metadata = null) => {
   showResults.value = false
 
   try {
-    emit('submit', pendingUrl.value, metadata)
+    // Call the onSubmit prop if provided (for direct async handling)
+    if (props.onSubmit) {
+      await props.onSubmit(pendingUrl.value, metadata)
+    } else {
+      // Fallback to emit for backward compatibility
+      emit('submit', pendingUrl.value, metadata)
+    }
 
     completionTimeout.value = setTimeout(() => {
       if (pendingUrl.value) {

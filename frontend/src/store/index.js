@@ -13,6 +13,15 @@ try {
   console.error('Failed to parse stored user session', e)
 }
 
+const md5 = (str) => {
+  // Simple MD5 hash function for generating keys (not cryptographically secure)
+  // Source: https://stackoverflow.com/a/16552171
+  return str.split('').reduce((hash, char) => {
+    hash = ((hash << 5) - hash) + char.charCodeAt(0)
+    return hash & hash
+  }, 0).toString()
+}
+
 export const globalStore = reactive({
   currentUser: initialUser,
   queueState: {
@@ -22,11 +31,11 @@ export const globalStore = reactive({
     history: []
   },
   voteSessions: {}, // key: session.id → session object
-  
+
   setUser(user) {
     this.currentUser = user
   },
-  
+
   clearUser() {
     this.currentUser = null
   },
@@ -41,7 +50,7 @@ export const globalStore = reactive({
 
     // Map backend 'idle' to 'stopped' for UI consistency
     this.queueState.status = newState.status === 'idle' ? 'stopped' : (newState.status || this.queueState.status)
-    this.queueState.history = newState.history || this.queueState.history
+    this.queueState.history = newState.history.map((s) => ({ ...s, key: md5(s.timestamp + s.type) })) || this.queueState.history
 
     if (currentIndex >= 0 && currentIndex < songs.length) {
       this.queueState.current_song = songs[currentIndex]
@@ -139,7 +148,7 @@ export const globalStore = reactive({
   // NEW: Add single activity to history
   addActivity(activity) {
     // Add to beginning (newest first)
-    this.queueState.history.unshift(activity)
+    this.queueState.history.unshift({ ...activity, key: md5(activity.timestamp + activity.type) })
 
     // Keep only last 50 activities
     if (this.queueState.history.length > 50) {
