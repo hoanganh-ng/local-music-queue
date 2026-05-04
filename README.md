@@ -15,6 +15,7 @@ A local-network music queue application powered by **YouTube**. Perfect for part
 - 📺 **Host Playback**: Centralized playback control on the host machine
 - 📝 **Activity Feed**: Track joins, song additions, skips, and priority changes
 - 💎 **Priority Queue System**: Daily token awards for song prioritization
+- 🗳️ **Community Voting**: Democratic skip and priority votes with strict majority
 - 🔒 **Role-Based Access**: Host (full control), Admin (remote control), Guest (add songs)
 - 🌐 **HTTPS Support**: Let's Encrypt integration with DuckDNS for production
 
@@ -175,6 +176,15 @@ Comprehensive documentation is available in the `documents/` folder:
 - Tokens can be spent to move own songs to front of queue
 - All transactions logged for audit trail
 - Balance displayed in UI with ⚡ icon
+
+### Community Voting
+
+- **Democratic Control**: Guests and Admins can vote to skip or prioritize songs
+- **Strict Majority**: Requires `(connectedUsers / 2) + 1` votes to pass (minimum 2)
+- **Time-Limited**: 30-second voting window with live countdown
+- **Real-time Updates**: Live vote counts broadcast to all connected clients
+- **In-Memory Sessions**: Vote sessions cleared on server restart
+- **Role Restriction**: Host excluded from voting (has direct controls)
 
 ### Real-time Updates
 
