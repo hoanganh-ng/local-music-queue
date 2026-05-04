@@ -214,6 +214,73 @@ func TestAddSong_LoadFails_CreatesNewQueue(t *testing.T) {
 	}
 }
 
+func TestAddSong_Duplicate(t *testing.T) {
+	// Setup: Create a queue with an existing song
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "vid1", Title: "Existing Song", URL: "https://youtube.com/watch?v=vid1"})
+
+	repo := &mockQueueRepo{queue: q}
+	yt := &mockYouTubeService{
+		song: &entity.Song{ID: "vid1", Title: "Duplicate Song", URL: "https://youtube.com/watch?v=vid1"},
+	}
+	interactor := NewInteractor(repo, yt)
+
+	// Attempt to add the same song again (same video ID)
+	_, err := interactor.AddSong(context.Background(), "https://youtube.com/watch?v=vid1", "Bob", 2, nil)
+
+	// Assert: Should return ErrSongAlreadyInQueue
+	if !errors.Is(err, entity.ErrSongAlreadyInQueue) {
+		t.Fatalf("expected ErrSongAlreadyInQueue, got %v", err)
+	}
+
+	// Assert: Queue length should be unchanged
+	if len(repo.queue.Songs) != 1 {
+		t.Errorf("expected queue to still have 1 song, got %d", len(repo.queue.Songs))
+	}
+
+	// Assert: Save should not be called for duplicate
+	if repo.saveCalled {
+		t.Error("expected Save NOT to be called for duplicate song")
+	}
+}
+
+func TestAddSong_Duplicate_WithMetadata(t *testing.T) {
+	// Setup: Create a queue with an existing song
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "vid2", Title: "Existing Song", URL: "https://youtube.com/watch?v=vid2"})
+
+	repo := &mockQueueRepo{queue: q}
+	yt := &mockYouTubeService{}
+	interactor := NewInteractor(repo, yt)
+
+	// Attempt to add the same song via metadata (fast path)
+	metadata := &entity.SearchResult{
+		ID:        "vid2",
+		Title:     "Duplicate via Metadata",
+		Artist:    "Artist",
+		Duration:  200,
+		Thumbnail: "thumb.jpg",
+		URL:       "https://youtube.com/watch?v=vid2",
+	}
+
+	_, err := interactor.AddSong(context.Background(), "https://youtube.com/watch?v=vid2", "Charlie", 3, metadata)
+
+	// Assert: Should return ErrSongAlreadyInQueue
+	if !errors.Is(err, entity.ErrSongAlreadyInQueue) {
+		t.Fatalf("expected ErrSongAlreadyInQueue, got %v", err)
+	}
+
+	// Assert: FetchMetadata should not be called (metadata provided)
+	if yt.fetchCalled {
+		t.Error("expected FetchMetadata NOT to be called when metadata is provided")
+	}
+
+	// Assert: Queue length should be unchanged
+	if len(repo.queue.Songs) != 1 {
+		t.Errorf("expected queue to still have 1 song, got %d", len(repo.queue.Songs))
+	}
+}
+
 // --- SkipSong Tests ---
 
 func TestSkipSong_Success(t *testing.T) {

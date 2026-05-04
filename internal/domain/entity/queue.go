@@ -75,6 +75,16 @@ func (q *Queue) Prev() error {
 	return nil
 }
 
+// ContainsSong checks if a song with the given video ID is already in the queue.
+func (q *Queue) ContainsSong(videoID string) bool {
+	for _, song := range q.Songs {
+		if song.ID == videoID {
+			return true
+		}
+	}
+	return false
+}
+
 // Add adds a song to the end of the queue.
 func (q *Queue) Add(song Song) {
 	q.Songs = append(q.Songs, song)

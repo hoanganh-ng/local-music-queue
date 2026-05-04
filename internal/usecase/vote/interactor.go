@@ -201,15 +201,17 @@ func (i *Interactor) GetActiveSessions() []*entity.VoteSession {
 	return sessions
 }
 
-// ExpireOldSessions removes expired sessions
-func (i *Interactor) ExpireOldSessions(ctx context.Context) {
+// ExpireOldSessions removes expired sessions and returns them so callers
+// can broadcast resolution events.
+func (i *Interactor) ExpireOldSessions(ctx context.Context) []entity.ExpiredSession {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.evictExpired(ctx)
+	return i.evictExpired(ctx)
 }
 
-// evictExpired removes expired sessions and logs activities
-func (i *Interactor) evictExpired(ctx context.Context) {
+// evictExpired removes expired sessions, logs activities, and returns them.
+func (i *Interactor) evictExpired(ctx context.Context) []entity.ExpiredSession {
+	var expired []entity.ExpiredSession
 	for sessionID, session := range i.sessions {
 		if session.IsExpired() {
 			activity := entity.NewActivity(
@@ -219,8 +221,13 @@ func (i *Interactor) evictExpired(ctx context.Context) {
 			)
 			i.queueRepo.AddActivity(ctx, activity)
 			delete(i.sessions, sessionID)
+			expired = append(expired, entity.ExpiredSession{
+				SessionID: sessionID,
+				Activity:  activity,
+			})
 		}
 	}
+	return expired
 }
 
 // resolveSongIndex finds the current index of a song by ID

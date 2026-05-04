@@ -1,5 +1,10 @@
 package entity
 
+import "errors"
+
+// ErrSongAlreadyInQueue is returned when attempting to add a song that already exists in the queue.
+var ErrSongAlreadyInQueue = errors.New("song already in queue")
+
 // Song represents a YouTube video in the queue.
 type Song struct {
 	ID            string `json:"id"`

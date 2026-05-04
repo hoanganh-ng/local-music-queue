@@ -35,6 +35,12 @@ type VoteSession struct {
 	ExpiresAt time.Time      `json:"expires_at"`
 }
 
+// ExpiredSession carries data about a session that was just evicted.
+type ExpiredSession struct {
+	SessionID string
+	Activity  Activity
+}
+
 // NewVoteSession creates a new vote session
 func NewVoteSession(voteType VoteType, song Song, songIndex, threshold int, expiry time.Duration) *VoteSession {
 	now := time.Now()

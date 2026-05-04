@@ -32,7 +32,7 @@
           />
         </div>
         <div class="input-wrapper">
-          <SubmitForm ref="submitFormRef" @submit="addSong" />
+          <SubmitForm ref="submitFormRef" :onSubmit="addSong" />
         </div>
       </section>
 

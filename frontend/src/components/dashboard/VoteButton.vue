@@ -84,7 +84,9 @@ export default {
       }
 
       if (session.value) {
-        countdown.value = session.value.remaining_seconds || 0
+        const expiresAt = new Date(session.value.expires_at).getTime()
+        const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000))
+        countdown.value = remaining
 
         countdownInterval = setInterval(() => {
           if (countdown.value > 0) {

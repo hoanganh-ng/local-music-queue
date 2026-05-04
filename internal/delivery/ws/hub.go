@@ -21,7 +21,7 @@ var upgrader = websocket.Upgrader{
 // VoteExpiryRunner is satisfied by vote.Interactor.
 // Defined here to avoid an import cycle.
 type VoteExpiryRunner interface {
-	ExpireOldSessions(ctx context.Context)
+	ExpireOldSessions(ctx context.Context) []entity.ExpiredSession
 	GetActiveSessions() []*entity.VoteSession
 }
 
@@ -108,7 +108,14 @@ func (h *Hub) Run() {
 
 		case <-ticker.C:
 			if h.voteInteractor != nil {
-				h.voteInteractor.ExpireOldSessions(context.Background())
+				expired := h.voteInteractor.ExpireOldSessions(context.Background())
+				for _, e := range expired {
+					h.Broadcast(EventVoteResolved, VoteResolvedData{
+						SessionID: e.SessionID,
+						Outcome:   "expired",
+						Activity:  e.Activity,
+					})
+				}
 			}
 		}
 	}

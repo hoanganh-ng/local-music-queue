@@ -6,7 +6,7 @@
         No recent activity.
       </div>
       <TransitionGroup v-else name="log" tag="div">
-        <div v-for="log in logs" :key="log.timestamp" class="log-entry">
+        <div v-for="log in logs" :key="log.key" class="log-entry">
           <div class="message-bubble">
             <span class="user-name">{{ log.user }}</span>
             <span class="description">{{ log.description }}</span>

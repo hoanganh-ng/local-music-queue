@@ -112,6 +112,10 @@ func (h *Handlers) HandleAddSong(w http.ResponseWriter, r *http.Request) {
 
 	song, err := h.queue.AddSong(r.Context(), req.URL, req.AddedBy, req.AddedByID, req.Metadata)
 	if err != nil {
+		if errors.Is(err, entity.ErrSongAlreadyInQueue) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

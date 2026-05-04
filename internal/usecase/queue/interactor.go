@@ -60,6 +60,11 @@ func (i *Interactor) AddSong(ctx context.Context, url string, addedBy string, ad
 		queue = entity.NewQueue()
 	}
 
+	// Check for duplicate
+	if queue.ContainsSong(song.ID) {
+		return nil, entity.ErrSongAlreadyInQueue
+	}
+
 	queue.Add(*song)
 
 	err = i.repo.Save(ctx, queue)
