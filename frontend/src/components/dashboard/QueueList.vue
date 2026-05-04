@@ -19,39 +19,47 @@
           class="queue-item"
           :class="{ 'prioritized': song.is_prioritized }"
         >
-          <div class="item-number">{{ index + 1 }}</div>
-          <div class="item-details">
+          <!-- Top Row: Number + Title + Remove -->
+          <div class="item-top-row">
+            <div class="item-number">{{ index + 1 }}</div>
             <div class="item-title">
               <span v-if="song.is_prioritized" class="priority-icon">⚡</span>
               {{ song.title || song.url }}
             </div>
+            <button v-if="canControl" class="remove-btn" @click="handleRemove(index)" title="Remove from queue">
+              &times;
+            </button>
+          </div>
+
+          <!-- Second Row: Metadata -->
+          <div class="item-meta-row">
             <div class="item-meta">Added by {{ song.added_by }}</div>
           </div>
 
-          <button
-            v-if="shouldShowPrioritizeButton(song)"
-            class="prioritize-btn"
-            :class="{ 'loading': prioritizingIndex === index }"
-            :disabled="!canPrioritize(song) || prioritizingIndex === index"
-            :title="getPrioritizeTooltip(song)"
-            @click="handlePrioritize(index)"
-          >
-            <span v-if="prioritizingIndex === index">⏳</span>
-            <span v-else>⚡</span>
-            {{ prioritizingIndex === index ? 'Prioritizing...' : 'Prioritize' }}
-          </button>
+          <!-- Third Row: Action Buttons -->
+          <div class="item-actions" v-if="shouldShowPrioritizeButton(song) || (currentUser && currentUser.role !== 'host')">
+            <button
+              v-if="shouldShowPrioritizeButton(song)"
+              class="prioritize-btn"
+              :class="{ 'loading': prioritizingIndex === index }"
+              :disabled="!canPrioritize(song) || prioritizingIndex === index"
+              :title="getPrioritizeTooltip(song)"
+              @click="handlePrioritize(index)"
+            >
+              <span v-if="prioritizingIndex === index">⏳</span>
+              <span v-else>⚡</span>
+              {{ prioritizingIndex === index ? 'Bumping...' : 'Bump' }}
+            </button>
 
-          <VoteButton
-            v-if="currentUser && currentUser.role !== 'host'"
-            voteType="prioritize"
-            :songID="song.id"
-            :songIndex="queueIndexFor(index)"
-            :disabled="currentUser.role === 'host'"
-          />
-
-          <button v-if="canControl" class="remove-btn" @click="handleRemove(index)" title="Remove from queue">
-            &times;
-          </button>
+            <VoteButton
+              v-if="currentUser && currentUser.role !== 'host'"
+              voteType="prioritize"
+              :songID="song.id"
+              :songIndex="queueIndexFor(index)"
+              :disabled="currentUser.role === 'host'"
+              compact
+            />
+          </div>
         </div>
       </TransitionGroup>
     </div>
@@ -257,8 +265,8 @@ function queueIndexFor(upNextIndex) {
 
 .queue-item {
   display: flex;
-  align-items: center;
-  gap: 1rem;
+  flex-direction: column;
+  gap: 0.375rem;
   padding: 0.75rem 1rem;
   background: rgba(255, 255, 255, 0.02);
   border: 1px solid transparent;
@@ -272,19 +280,24 @@ function queueIndexFor(upNextIndex) {
   transform: translateX(4px);
 }
 
+.item-top-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  width: 100%;
+}
+
 .item-number {
   font-weight: 700;
   color: var(--text-muted);
   width: 20px;
+  flex-shrink: 0;
   text-align: center;
 }
 
-.item-details {
+.item-title {
   flex-grow: 1;
   min-width: 0;
-}
-
-.item-title {
   font-weight: 600;
   color: var(--text-main);
   white-space: nowrap;
@@ -292,10 +305,21 @@ function queueIndexFor(upNextIndex) {
   text-overflow: ellipsis;
 }
 
+.item-meta-row {
+  padding-left: 36px;
+}
+
 .item-meta {
   font-size: 0.75rem;
   color: var(--text-muted);
-  margin-top: 0.25rem;
+}
+
+.item-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  padding-left: 36px;
 }
 
 .priority-badge {
@@ -312,20 +336,19 @@ function queueIndexFor(upNextIndex) {
   color: #f39c12;
   border: 1px solid rgba(243, 156, 18, 0.3);
   border-radius: var(--radius-sm);
-  padding: 0.3rem 0.7rem;
-  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.7rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
-  margin-right: 0.5rem;
   opacity: 1;
+  white-space: nowrap;
 }
 
-/* Mobile: smaller sizing */
 @media (max-width: 768px) {
   .prioritize-btn {
-    font-size: 0.7rem;
-    padding: 0.25rem 0.5rem;
+    font-size: 0.65rem;
+    padding: 0.2rem 0.4rem;
   }
 }
 
@@ -377,6 +400,7 @@ function queueIndexFor(upNextIndex) {
   border-radius: 4px;
   transition: all 0.2s ease;
   opacity: 0;
+  flex-shrink: 0;
 }
 
 .queue-item:hover .remove-btn {
@@ -418,68 +442,26 @@ function queueIndexFor(upNextIndex) {
   position: absolute;
 }
 
-.item-details {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+/* Mobile Responsiveness */
+@media (max-width: 768px) {
+  .queue-item {
+    padding: 0.625rem 0.75rem;
+    gap: 0.3rem;
+  }
+
+  .item-meta-row {
+    padding-left: 28px;
+  }
+
+  .item-actions {
+    padding-left: 28px;
+    gap: 0.25rem;
+  }
 }
 
-.item-title {
-  font-size: 1rem;
-  font-weight: 500;
-  color: var(--text-main);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.item-meta {
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  margin-top: 0.25rem;
-}
-
-.remove-btn {
-  margin-left: auto;
-  background: transparent;
-  color: var(--text-muted);
-  border: none;
-  font-size: 1.25rem;
-  padding: 0 0.5rem;
-  cursor: pointer;
-  opacity: 0;
-  transition: all 0.2s ease;
-}
-
-.queue-item:hover .remove-btn {
-  opacity: 1;
-}
-
-.remove-btn:hover {
-  color: #e74c3c;
-  transform: scale(1.2);
-}
-
-.empty-queue {
-  flex-grow: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-muted);
-  font-style: italic;
-}
-
-/* Vue Transitions */
-.list-enter-active,
-.list-leave-active {
-  transition: all 0.4s ease;
-}
-.list-enter-from {
-  opacity: 0;
-  transform: translateX(30px);
-}
-.list-leave-to {
-  opacity: 0;
-  transform: translateX(-30px);
+@media (max-width: 480px) {
+  .item-actions {
+    padding-left: 28px;
+  }
 }
 </style>

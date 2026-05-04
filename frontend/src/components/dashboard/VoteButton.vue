@@ -3,15 +3,30 @@
     :disabled="disabled || hasVoted"
     @click="handleVote"
     class="vote-btn"
-    :class="{ 'vote-btn--active': !!session, 'vote-btn--voted': hasVoted }"
+    :class="{
+      'vote-btn--active': !!session,
+      'vote-btn--voted': hasVoted,
+      'vote-btn--compact': compact
+    }"
   >
     <span v-if="!session">
-      {{ voteType === 'skip' ? 'Vote to Skip' : 'Vote to Prioritize' }}
+      <template v-if="compact">
+        {{ voteType === 'skip' ? 'Skip' : 'Vote' }}
+      </template>
+      <template v-else>
+        {{ voteType === 'skip' ? 'Vote to Skip' : 'Vote to Prioritize' }}
+      </template>
     </span>
     <span v-else>
-      {{ voteType === 'skip' ? 'Skip' : 'Bump' }}?
-      {{ session.voted_by ? Object.keys(session.voted_by).length : 0 }}/{{ session.threshold }}
-      <small>({{ countdown }}s)</small>
+      <template v-if="compact">
+        {{ session.voted_by ? Object.keys(session.voted_by).length : 0 }}/{{ session.threshold }}
+        <small>({{ countdown }}s)</small>
+      </template>
+      <template v-else>
+        {{ voteType === 'skip' ? 'Skip' : 'Bump' }}?
+        {{ session.voted_by ? Object.keys(session.voted_by).length : 0 }}/{{ session.threshold }}
+        <small>({{ countdown }}s)</small>
+      </template>
     </span>
   </button>
 </template>
@@ -38,6 +53,10 @@ export default {
       default: -1
     },
     disabled: {
+      type: Boolean,
+      default: false
+    },
+    compact: {
       type: Boolean,
       default: false
     }
@@ -135,39 +154,62 @@ export default {
 
 <style scoped>
 .vote-btn {
-  padding: 0.5rem 1rem;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  background: white;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(10px);
   cursor: pointer;
-  font-size: 0.875rem;
-  transition: all 0.2s;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.8);
+  transition: all 0.2s ease;
+  white-space: nowrap;
 }
 
 .vote-btn:hover:not(:disabled) {
-  background: #f0f0f0;
-  border-color: #999;
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.3);
+  color: rgba(255, 255, 255, 0.95);
+  transform: translateY(-1px);
 }
 
 .vote-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
 .vote-btn--active {
-  background: #e3f2fd;
-  border-color: #2196f3;
-  color: #1976d2;
+  background: rgba(33, 150, 243, 0.15);
+  border-color: rgba(33, 150, 243, 0.4);
+  color: #64b5f6;
+  box-shadow: 0 0 8px rgba(33, 150, 243, 0.3);
+}
+
+.vote-btn--active:hover:not(:disabled) {
+  background: rgba(33, 150, 243, 0.2);
+  border-color: rgba(33, 150, 243, 0.5);
 }
 
 .vote-btn--voted {
-  background: #c8e6c9;
-  border-color: #4caf50;
-  color: #2e7d32;
+  background: rgba(76, 175, 80, 0.15);
+  border-color: rgba(76, 175, 80, 0.4);
+  color: #81c784;
+  box-shadow: 0 0 8px rgba(76, 175, 80, 0.3);
 }
 
 .vote-btn small {
+  font-size: 0.7rem;
+  opacity: 0.9;
+  margin-left: 0.25rem;
+}
+
+.vote-btn--compact {
+  padding: 0.3rem 0.6rem;
   font-size: 0.75rem;
-  opacity: 0.8;
+}
+
+.vote-btn--compact small {
+  font-size: 0.65rem;
 }
 </style>
