@@ -148,6 +148,14 @@ class WebSocketClient {
           globalStore.updatePriorityBalance(message.data.balance)
         }
         break
+      case 'vote_updated':
+        globalStore.upsertVoteSession(message.data.session)
+        globalStore.addActivity(message.data.activity)
+        break
+      case 'vote_resolved':
+        globalStore.removeVoteSession(message.data.session_id)
+        globalStore.addActivity(message.data.activity)
+        break
       // Keep backward compatibility
       case 'queue_updated':
       case 'status_updated':

@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"local-music-queue/internal/delivery/ws"
 	"local-music-queue/internal/domain/entity"
@@ -9,6 +10,7 @@ import (
 	"local-music-queue/internal/usecase/auth"
 	"local-music-queue/internal/usecase/priority"
 	"local-music-queue/internal/usecase/queue"
+	"local-music-queue/internal/usecase/vote"
 	"net/http"
 )
 
@@ -17,15 +19,17 @@ type Handlers struct {
 	auth     *auth.Interactor
 	activity *activity.Interactor
 	priority *priority.Interactor
+	vote     *vote.Interactor
 	hub      *ws.Hub
 }
 
-func NewHandlers(q *queue.Interactor, a *auth.Interactor, act *activity.Interactor, p *priority.Interactor, hub *ws.Hub) *Handlers {
+func NewHandlers(q *queue.Interactor, a *auth.Interactor, act *activity.Interactor, p *priority.Interactor, v *vote.Interactor, hub *ws.Hub) *Handlers {
 	return &Handlers{
 		queue:    q,
 		auth:     a,
 		activity: act,
 		priority: p,
+		vote:     v,
 		hub:      hub,
 	}
 }
@@ -467,6 +471,163 @@ func (h *Handlers) HandleChangeVolume(w http.ResponseWriter, r *http.Request) {
 	h.hub.Broadcast(ws.EventVolumeChanged, ws.VolumeChangedData{
 		Direction: req.Direction,
 	})
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// canVote checks if a role is allowed to vote
+func canVote(role entity.Role) bool {
+	return role == entity.RoleGuest || role == entity.RoleAdmin
+}
+
+type VoteSkipRequest struct {
+	UserID   int    `json:"user_id"`
+	UserRole string `json:"user_role"`
+}
+
+func (h *Handlers) HandleVoteSkip(w http.ResponseWriter, r *http.Request) {
+	var req VoteSkipRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	role := entity.Role(req.UserRole)
+	if !canVote(role) {
+		http.Error(w, "only guests and admins can vote", http.StatusForbidden)
+		return
+	}
+
+	connectedUsers := h.hub.ConnectedCount()
+	outcome, err := h.vote.CastSkipVote(r.Context(), req.UserID, connectedUsers)
+	if err != nil {
+		if errors.Is(err, entity.ErrAlreadyVoted) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		if errors.Is(err, entity.ErrQueueEmpty) {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Get the latest activity from the outcome
+	activities, _ := h.activity.GetRecentActivities(r.Context(), 1)
+	var activity entity.Activity
+	if len(activities) > 0 {
+		activity = activities[0]
+	}
+
+	// Broadcast vote_updated event
+	h.hub.Broadcast(ws.EventVoteUpdated, ws.VoteUpdatedData{
+		Session:  outcome.Session,
+		Activity: activity,
+	})
+
+	if outcome.Passed {
+		// Load fresh queue state
+		state, _ := h.queue.GetState(r.Context())
+
+		var currentSong *entity.Song
+		if state.CurrentIndex >= 0 && state.CurrentIndex < len(state.Songs) {
+			currentSong = &state.Songs[state.CurrentIndex]
+		}
+
+		// Broadcast song_skipped event
+		h.hub.Broadcast(ws.EventSongSkipped, ws.SongSkippedData{
+			PreviousIndex: state.CurrentIndex - 1,
+			NewIndex:      state.CurrentIndex,
+			CurrentSong:   currentSong,
+			Status:        state.Status,
+			Elapsed:       state.Elapsed,
+			Activity:      activity,
+		})
+
+		// Broadcast vote_resolved event
+		h.hub.Broadcast(ws.EventVoteResolved, ws.VoteResolvedData{
+			SessionID: outcome.Session.ID,
+			Outcome:   "passed",
+			Activity:  activity,
+		})
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type VotePriorityRequest struct {
+	UserID    int    `json:"user_id"`
+	UserRole  string `json:"user_role"`
+	SongIndex int    `json:"song_index"`
+}
+
+func (h *Handlers) HandleVotePriority(w http.ResponseWriter, r *http.Request) {
+	var req VotePriorityRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	role := entity.Role(req.UserRole)
+	if !canVote(role) {
+		http.Error(w, "only guests and admins can vote", http.StatusForbidden)
+		return
+	}
+
+	connectedUsers := h.hub.ConnectedCount()
+	outcome, err := h.vote.CastPriorityVote(r.Context(), req.UserID, req.SongIndex, connectedUsers)
+	if err != nil {
+		if errors.Is(err, entity.ErrAlreadyVoted) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		if errors.Is(err, entity.ErrVoteOnCurrentSong) || errors.Is(err, entity.ErrSongNotFound) {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Get the latest activity
+	activities, _ := h.activity.GetRecentActivities(r.Context(), 1)
+	var activity entity.Activity
+	if len(activities) > 0 {
+		activity = activities[0]
+	}
+
+	// Broadcast vote_updated event
+	h.hub.Broadcast(ws.EventVoteUpdated, ws.VoteUpdatedData{
+		Session:  outcome.Session,
+		Activity: activity,
+	})
+
+	if outcome.Passed {
+		// Load fresh state
+		state, _ := h.queue.GetState(r.Context())
+
+		// Find the prioritized song (should be at currentIndex + 1)
+		targetIndex := state.CurrentIndex + 1
+		song := state.Songs[targetIndex]
+
+		// Broadcast song_prioritized event with UserID: 0 to signal vote-driven
+		h.hub.Broadcast(ws.EventSongPrioritized, ws.SongPrioritizedData{
+			FromIndex:   req.SongIndex,
+			ToIndex:     targetIndex,
+			Song:        song,
+			UserID:      0,
+			UserBalance: 0,
+			Activity:    activity,
+		})
+
+		// Broadcast vote_resolved event
+		h.hub.Broadcast(ws.EventVoteResolved, ws.VoteResolvedData{
+			SessionID: outcome.Session.ID,
+			Outcome:   "passed",
+			Activity:  activity,
+		})
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }

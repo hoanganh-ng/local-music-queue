@@ -41,6 +41,14 @@
             {{ prioritizingIndex === index ? 'Prioritizing...' : 'Prioritize' }}
           </button>
 
+          <VoteButton
+            v-if="currentUser && currentUser.role !== 'host'"
+            voteType="prioritize"
+            :songID="song.id"
+            :songIndex="queueIndexFor(index)"
+            :disabled="currentUser.role === 'host'"
+          />
+
           <button v-if="canControl" class="remove-btn" @click="handleRemove(index)" title="Remove from queue">
             &times;
           </button>
@@ -58,6 +66,7 @@
 import { computed, ref } from 'vue'
 import { api } from '../../services/api'
 import { globalStore } from '../../store'
+import VoteButton from './VoteButton.vue'
 
 const props = defineProps({
   queue: {
@@ -162,6 +171,11 @@ async function handleClear() {
       console.error('Clear queue failed:', err)
     }
   }
+}
+
+function queueIndexFor(upNextIndex) {
+  // Convert "Up Next" index to full songs array index
+  return props.currentIndex + 1 + upNextIndex
 }
 </script>
 

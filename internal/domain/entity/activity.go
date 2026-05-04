@@ -10,6 +10,9 @@ const (
 	ActivitySongSkipped ActivityType = "song_skipped"
 	ActivityPlayback    ActivityType = "playback_changed"
 	ActivityUserJoined  ActivityType = "user_joined"
+	ActivityVoteCast    ActivityType = "vote_cast"
+	ActivityVotePassed  ActivityType = "vote_passed"
+	ActivityVoteExpired ActivityType = "vote_expired"
 )
 
 // Activity represents a log entry in the activity feed.

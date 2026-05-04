@@ -15,6 +15,7 @@ import (
 	usecaseAuth "local-music-queue/internal/usecase/auth"
 	usecasePriority "local-music-queue/internal/usecase/priority"
 	usecaseQueue "local-music-queue/internal/usecase/queue"
+	usecaseVote "local-music-queue/internal/usecase/vote"
 )
 
 func main() {
@@ -101,12 +102,16 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	authInteractor := usecaseAuth.NewInteractor(userRepo, googleClientID, hostEmails, adminEmails)
 	actInteractor := usecaseActivity.NewInteractor(repo)
 	priorityInteractor := usecasePriority.NewInteractor(userRepo, repo)
+	voteInteractor := usecaseVote.NewInteractor(repo, userRepo, 0) // 0 = default 30s expiry
 
 	// 4. Initialize Delivery with queue state callback
 	hub := ws.NewHub(qInteractor.GetState)
 	go hub.Run() // Start WebSocket hub loop
 
-	handlers := delivery.NewHandlers(qInteractor, authInteractor, actInteractor, priorityInteractor, hub)
+	// Wire vote interactor into hub
+	hub.SetVoteInteractor(voteInteractor)
+
+	handlers := delivery.NewHandlers(qInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, hub)
 
 	// 5. Setup Routes
 	mux := http.NewServeMux()
@@ -127,6 +132,8 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	mux.HandleFunc("POST /api/queue/prioritize", handlers.HandlePrioritizeSong)
 	mux.HandleFunc("GET /api/user/priority-balance", handlers.HandleGetPriorityBalance)
 	mux.HandleFunc("GET /api/youtube/search", handlers.HandleSearchYouTube)
+	mux.HandleFunc("POST /api/vote/skip", handlers.HandleVoteSkip)
+	mux.HandleFunc("POST /api/vote/prioritize", handlers.HandleVotePriority)
 
 	// WebSocket
 	mux.HandleFunc("/ws", hub.RegisterHandler)

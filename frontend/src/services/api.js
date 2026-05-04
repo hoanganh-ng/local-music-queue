@@ -142,5 +142,20 @@ export const api = {
     return this.request(`/user/priority-balance?user_id=${userID}`, {
       method: 'GET'
     })
+  },
+
+  // Voting
+  async castSkipVote(userID, userRole) {
+    return this.request('/vote/skip', {
+      method: 'POST',
+      body: { user_id: userID, user_role: userRole }
+    })
+  },
+
+  async castPriorityVote(userID, userRole, songIndex) {
+    return this.request('/vote/prioritize', {
+      method: 'POST',
+      body: { user_id: userID, user_role: userRole, song_index: songIndex }
+    })
   }
 }
