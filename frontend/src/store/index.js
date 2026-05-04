@@ -21,6 +21,7 @@ export const globalStore = reactive({
     queue: [],
     history: []
   },
+  voteSessions: {}, // key: session.id → session object
   
   setUser(user) {
     this.currentUser = user
@@ -191,6 +192,25 @@ export const globalStore = reactive({
     if (this.currentUser) {
       this.currentUser.priority_balance = balance
     }
+  },
+
+  // Vote session management
+  upsertVoteSession(session) {
+    this.voteSessions[session.id] = session
+  },
+
+  removeVoteSession(sessionID) {
+    delete this.voteSessions[sessionID]
+  },
+
+  // Convenience: return skip session for a song ID, or null
+  skipSessionFor(songID) {
+    return this.voteSessions[`skip:${songID}`] || null
+  },
+
+  // Convenience: return priority session for a song ID, or null
+  prioritySessionFor(songID) {
+    return this.voteSessions[`prioritize:${songID}`] || null
   }
 })
 

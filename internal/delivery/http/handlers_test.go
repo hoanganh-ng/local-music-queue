@@ -11,6 +11,7 @@ import (
 	"local-music-queue/internal/usecase/auth"
 	"local-music-queue/internal/usecase/priority"
 	"local-music-queue/internal/usecase/queue"
+	"local-music-queue/internal/usecase/vote"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -51,10 +52,11 @@ EOF
 	authInteractor := auth.NewInteractor(userRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"})
 	actInteractor := activity.NewInteractor(repo)
 	priorityInteractor := priority.NewInteractor(userRepo, repo)
+	voteInteractor := vote.NewInteractor(repo, userRepo, 0)
 	hub := ws.NewHub(queueInteractor.GetState)
 	go hub.Run()
 
-	return NewHandlers(queueInteractor, authInteractor, actInteractor, priorityInteractor, hub)
+	return NewHandlers(queueInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, hub)
 }
 
 // --- Login Tests ---
@@ -273,10 +275,11 @@ EOF
 	authInteractor := auth.NewInteractor(userRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"})
 	actInteractor := activity.NewInteractor(repo)
 	priorityInteractor := priority.NewInteractor(userRepo, repo)
+	voteInteractor := vote.NewInteractor(repo, userRepo, 0)
 	hub := ws.NewHub(queueInteractor.GetState)
 	go hub.Run()
 
-	h := NewHandlers(queueInteractor, authInteractor, actInteractor, priorityInteractor, hub)
+	h := NewHandlers(queueInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, hub)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/youtube/search?q=test", nil)
 	rr := httptest.NewRecorder()

@@ -18,6 +18,8 @@ const (
 	EventVolumeChanged         = "volume_changed"
 	EventSongPrioritized       = "song_prioritized"
 	EventPriorityBalanceUpdated = "priority_balance_updated"
+	EventVoteUpdated           = "vote_updated"
+	EventVoteResolved          = "vote_resolved"
 )
 
 // UserJoinedData contains only the new user info
@@ -104,4 +106,18 @@ type SongPrioritizedData struct {
 type PriorityBalanceUpdatedData struct {
 	UserID  int `json:"user_id"`
 	Balance int `json:"balance"`
+}
+
+// VoteUpdatedData is broadcast after every vote cast so clients can
+// show live vote counts without polling.
+type VoteUpdatedData struct {
+	Session  *entity.VoteSession `json:"session"`
+	Activity entity.Activity     `json:"activity"`
+}
+
+// VoteResolvedData is broadcast when a session passes or expires.
+type VoteResolvedData struct {
+	SessionID string          `json:"session_id"`
+	Outcome   string          `json:"outcome"` // "passed" | "expired"
+	Activity  entity.Activity `json:"activity"`
 }

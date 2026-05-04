@@ -36,6 +36,15 @@
         <p class="song-meta">Added by: <strong>{{ currentSong.added_by }}</strong></p>
       </div>
 
+      <!-- Vote Button (Guest/Admin only) -->
+      <div v-if="currentSong && currentUser && currentUser.role !== 'host'" class="vote-section">
+        <VoteButton
+          voteType="skip"
+          :songID="currentSong.id"
+          :disabled="currentUser.role === 'host'"
+        />
+      </div>
+
       <!-- Controls (Host or Admin) -->
       <div v-if="canControl" class="host-controls">
         <BaseButton variant="secondary" @click="$emit('toggle-playback')">
@@ -64,6 +73,7 @@ import { computed, watch, onMounted, ref, onUnmounted } from 'vue'
 import { api } from '../../services/api'
 import { globalStore } from '../../store'
 import BaseButton from '../ui/BaseButton.vue'
+import VoteButton from './VoteButton.vue'
 
 const props = defineProps({
   currentSong: {
@@ -85,6 +95,8 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['toggle-playback', 'skip', 'song-end'])
+
+const currentUser = computed(() => globalStore.currentUser)
 
 // The iframe player instance
 let ytPlayer = null

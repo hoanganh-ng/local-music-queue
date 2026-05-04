@@ -18,6 +18,13 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+// VoteExpiryRunner is satisfied by vote.Interactor.
+// Defined here to avoid an import cycle.
+type VoteExpiryRunner interface {
+	ExpireOldSessions(ctx context.Context)
+	GetActiveSessions() []*entity.VoteSession
+}
+
 // ClientState tracks per-client connection info
 type ClientState struct {
 	conn        *websocket.Conn
@@ -34,13 +41,14 @@ type BroadcastMessage struct {
 
 // Hub manages WebSocket connections and broadcasts updates.
 type Hub struct {
-	clients       map[*websocket.Conn]*ClientState
-	broadcast     chan *BroadcastMessage
-	register      chan *websocket.Conn
-	unregister    chan *websocket.Conn
-	mu            sync.Mutex
-	seqNum        int64
-	getQueueState func(context.Context) (*entity.Queue, error)
+	clients        map[*websocket.Conn]*ClientState
+	broadcast      chan *BroadcastMessage
+	register       chan *websocket.Conn
+	unregister     chan *websocket.Conn
+	mu             sync.Mutex
+	seqNum         int64
+	getQueueState  func(context.Context) (*entity.Queue, error)
+	voteInteractor VoteExpiryRunner
 }
 
 // NewHub creates a new Hub.
@@ -56,6 +64,9 @@ func NewHub(getQueueState func(context.Context) (*entity.Queue, error)) *Hub {
 
 // Run starts the Hub main loop.
 func (h *Hub) Run() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case client := <-h.register:
@@ -94,6 +105,11 @@ func (h *Hub) Run() {
 				}
 			}
 			h.mu.Unlock()
+
+		case <-ticker.C:
+			if h.voteInteractor != nil {
+				h.voteInteractor.ExpireOldSessions(context.Background())
+			}
 		}
 	}
 }
@@ -111,6 +127,22 @@ func (h *Hub) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		state, err := h.getQueueState(r.Context())
 		if err == nil {
 			h.SendFullSync(conn, state)
+		}
+	}
+
+	// Send active vote sessions as individual vote_updated events
+	if h.voteInteractor != nil {
+		sessions := h.voteInteractor.GetActiveSessions()
+		for _, session := range sessions {
+			h.sendToClient(conn, EventVoteUpdated, VoteUpdatedData{
+				Session: session,
+				Activity: entity.Activity{
+					Timestamp:   session.CreatedAt,
+					Type:        entity.ActivityVoteCast,
+					User:        "System",
+					Description: "Active vote session",
+				},
+			})
 		}
 	}
 
@@ -148,4 +180,34 @@ func (h *Hub) SendFullSync(conn *websocket.Conn, state *entity.Queue) error {
 		return err
 	}
 	return conn.WriteMessage(websocket.TextMessage, data)
+}
+
+// sendToClient sends a message to a specific client.
+func (h *Hub) sendToClient(conn *websocket.Conn, msgType string, data interface{}) error {
+	h.mu.Lock()
+	msg := &BroadcastMessage{
+		Type:      msgType,
+		Data:      data,
+		SeqNum:    h.seqNum,
+		Timestamp: time.Now(),
+	}
+	h.mu.Unlock()
+
+	msgData, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	return conn.WriteMessage(websocket.TextMessage, msgData)
+}
+
+// ConnectedCount returns the number of connected clients.
+func (h *Hub) ConnectedCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.clients)
+}
+
+// SetVoteInteractor sets the vote interactor for expiry handling.
+func (h *Hub) SetVoteInteractor(v VoteExpiryRunner) {
+	h.voteInteractor = v
 }
