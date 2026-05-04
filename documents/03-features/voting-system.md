@@ -1,730 +1,332 @@
-# Community Voting Feature — Implementation Workflow
+# Community Voting System
 
 ## Overview
 
-Add community voting so any Guest or Admin can start a vote to skip the
-current song or prioritize a queued song. The Host is excluded from
-voting because they already have direct controls. Vote sessions are
-in-memory, time-limited (30 s), and require a strict majority of
-connected users to pass.
+The community voting system enables Guests and Admins to democratically control playback through two types of votes:
 
-Work through the tasks **in the order listed**. Each task states exactly
-which file to create or modify and what the result must look like. Do not
-skip ahead — later tasks depend on earlier ones compiling cleanly.
+- **Skip Vote**: Vote to skip the currently playing song
+- **Priority Vote**: Vote to move a queued song to the front
 
----
+Votes require a **strict majority** of connected users to pass and automatically expire after **30 seconds**. The Host is excluded from voting since they already have direct playback controls.
 
-## Task 1 — Domain entity: `internal/domain/entity/vote.go` (CREATE)
+## How It Works
 
-Create this file from scratch. It must contain:
+### Vote Requirements
 
-### 1a. Sentinel errors
+- **Eligible Voters**: Guest and Admin roles only (Host excluded)
+- **Threshold**: Strict majority = `(connectedUsers / 2) + 1` votes (minimum 2)
+- **Time Limit**: 30 seconds per vote session
+- **Persistence**: In-memory only (sessions cleared on server restart)
 
-```go
-var (
-    ErrAlreadyVoted       = errors.New("user has already voted in this session")
-    ErrVoteSessionExpired = errors.New("vote session has expired")
-    ErrVoteOnCurrentSong  = errors.New("cannot start a priority vote on the currently playing song")
-    ErrSongNotFound       = errors.New("song not found at the given index")
-)
+### Vote Types
+
+#### Skip Vote
+
+Allows users to collectively skip the currently playing song.
+
+**Behavior:**
+- Creates a vote session for the current song
+- When threshold is reached, advances to the next song
+- If the current song is the last in queue, sets status to `idle`
+- Logs activity: `"vote skipped \"<song title>\""`
+
+**Example:**
+- 5 users connected → requires 3 votes to pass
+- User A votes → "Skip? 1/3 (30s)"
+- User B votes → "Skip? 2/3 (28s)"
+- User C votes → Vote passes, song skipped
+
+#### Priority Vote
+
+Allows users to collectively move a queued song to the front.
+
+**Behavior:**
+- Creates a vote session for the target song
+- When threshold is reached, moves song to position `currentIndex + 1`
+- Uses the same prioritization logic as the token system
+- Cannot vote on the currently playing song
+- Logs activity: `"vote prioritized \"<song title>\""`
+
+**Example:**
+- Song at position 5 receives majority votes
+- Song moves to position 1 (right after current song)
+- Respects existing prioritized songs
+
+### Vote Session Lifecycle
+
+1. **Creation**: First vote creates a session with:
+   - Unique ID: `"<type>:<songID>"`
+   - Threshold calculated from current connected users
+   - 30-second expiration timer
+
+2. **Active**: Additional votes increment the count
+   - Real-time updates broadcast to all clients
+   - Users who already voted cannot vote again
+   - Countdown timer displayed in UI
+
+3. **Resolution**: Session ends when:
+   - **Passed**: Threshold reached → action executed, session deleted
+   - **Expired**: 30 seconds elapsed → session deleted, no action
+   - **Removed**: Song removed from queue → session deleted
+
+### Threshold Calculation
+
+The threshold is computed **once** when the session is created and remains fixed even if users join or leave during the vote. This prevents a "moving goalpost" problem.
+
+**Formula:**
+```
+threshold = (connectedUsers / 2) + 1
+minimum = 2
 ```
 
-### 1b. `VoteType` constants
+**Examples:**
+- 1 user → 2 votes required (prevents self-passing)
+- 2 users → 2 votes required
+- 3 users → 2 votes required
+- 4 users → 3 votes required
+- 5 users → 3 votes required
+- 10 users → 6 votes required
 
-```go
-type VoteType string
+## User Interface
 
-const (
-    VoteTypeSkip       VoteType = "skip"
-    VoteTypePrioritize VoteType = "prioritize"
-)
+### Vote Button States
+
+The `VoteButton` component displays different states:
+
+**Inactive (no active vote):**
+```
+[ Vote to Skip ]
+[ Vote to Prioritize ]
 ```
 
-### 1c. `VoteSession` struct
-
-Fields:
-- `ID string` — unique key, format `"<voteType>:<songID>"`
-- `Type VoteType`
-- `SongID string`
-- `SongTitle string`
-- `SongIndex int` — position snapshot when session was created
-- `VotedBy map[int]bool` — userID → true
-- `Threshold int` — votes needed to pass
-- `CreatedAt time.Time`
-- `ExpiresAt time.Time`
-
-All fields exported with `json` tags.
-
-### 1d. `NewVoteSession` constructor
-
-```go
-func NewVoteSession(voteType VoteType, song Song, songIndex, threshold int, expiry time.Duration) *VoteSession
+**Active (vote in progress):**
+```
+[ Skip? 2/3 (28s) ]
+[ Bump? 1/2 (15s) ]
 ```
 
-- Sets `ID` as `fmt.Sprintf("%s:%s", voteType, song.ID)`
-- Initialises `VotedBy` as an empty map
-- Sets `CreatedAt = time.Now()`, `ExpiresAt = now.Add(expiry)`
-
-### 1e. Methods on `*VoteSession`
-
+**Voted (user already voted):**
 ```
-Cast(userID int) error
-    — returns ErrVoteSessionExpired if IsExpired()
-    — returns ErrAlreadyVoted if VotedBy[userID] is true
-    — otherwise sets VotedBy[userID] = true
-
-HasVoted(userID int) bool
-
-VoteCount() int
-    — returns len(VotedBy)
-
-IsPassed() bool
-    — returns VoteCount() >= Threshold
-
-IsExpired() bool
-    — returns time.Now().After(ExpiresAt)
-
-RemainingSeconds() int
-    — returns max(0, int(time.Until(ExpiresAt).Seconds()))
+[ Skip? 2/3 (28s) ] ← disabled, green background
 ```
 
-### 1f. `MajorityThreshold` free function
+### Button Placement
 
-```go
-func MajorityThreshold(connectedUsers int) int
-```
+- **Skip Button**: Appears in the "Now Playing" section below the song title
+- **Priority Buttons**: Appear next to each song in the "Up Next" queue list
+- **Visibility**: Only shown to Guest and Admin users (hidden for Host)
 
-- Returns `connectedUsers/2 + 1`
-- Minimum return value is `2` (a single user must never self-pass a vote)
+### Real-time Updates
 
----
+All connected clients see:
+- Live vote counts as users vote
+- Countdown timer ticking down
+- Immediate feedback when vote passes or expires
+- Activity feed entries for all vote actions
 
-## Task 2 — Domain entity: patch `internal/domain/entity/activity.go` (MODIFY)
+## API Endpoints
 
-Add three new `ActivityType` constants to the existing `const` block:
+### Cast Skip Vote
 
-```go
-ActivityVoteCast    ActivityType = "vote_cast"    // a user cast a vote
-ActivityVotePassed  ActivityType = "vote_passed"  // threshold reached
-ActivityVoteExpired ActivityType = "vote_expired" // session timed out
-```
-
----
-
-## Task 3 — Usecase: `internal/usecase/vote/interactor.go` (CREATE)
-
-Create the package `vote`. It must import only
-`internal/domain/entity` and `internal/domain/repository`.
-Do **not** import other usecase packages.
-
-### 3a. `VoteOutcome` struct
-
-```go
-type VoteOutcome struct {
-    Session *entity.VoteSession
-    Passed  bool
-}
-```
-
-### 3b. `Interactor` struct
-
-```go
-type Interactor struct {
-    queueRepo repository.QueueRepository
-    userRepo  repository.UserRepository
-    mu        sync.Mutex
-    sessions  map[string]*entity.VoteSession   // key = VoteSession.ID
-    expiry    time.Duration
-}
-```
-
-### 3c. `NewInteractor`
-
-```go
-func NewInteractor(
-    queueRepo repository.QueueRepository,
-    userRepo  repository.UserRepository,
-    expiry    time.Duration,
-) *Interactor
-```
-
-Default `expiry` to `30 * time.Second` when passed as `0`.
-
-### 3d. `ConnectedCount() int` method on Hub (needed later — leave a TODO comment)
-
-The interactor needs the connected user count at call time.
-Receive it as a plain `int` parameter on each public method so the
-interactor stays decoupled from the Hub.
-
-### 3e. `CastSkipVote`
-
-```go
-func (i *Interactor) CastSkipVote(ctx context.Context, userID, connectedUsers int) (*VoteOutcome, error)
-```
-
-Steps (all under `i.mu.Lock()`):
-
-1. `i.queueRepo.Load(ctx)` → fail fast on error
-2. `queue.CurrentSong()` → fail fast; returns `ErrQueueEmpty` if nothing is playing
-3. Build `sessionID = "skip:<currentSong.ID>"`
-4. Call `i.castVote(...)` (internal, see 3g)
-5. If `outcome.Passed`:
-   - Call `queue.Next()` on the already-loaded queue
-   - Save with `i.queueRepo.Save(ctx, queue)`
-   - Log `ActivitySongSkipped` activity
-6. Return `outcome`
-
-Note: `queue.Next()` returns `ErrNoNextSong` when the current song is
-the last one. In that case the skip should still "pass" but leave the
-queue in its end state — do **not** propagate this as an HTTP error.
-Set `queue.Status = StatusIdle` instead and save.
-
-### 3f. `CastPriorityVote`
-
-```go
-func (i *Interactor) CastPriorityVote(ctx context.Context, userID, songIndex, connectedUsers int) (*VoteOutcome, error)
-```
-
-Steps (all under `i.mu.Lock()`):
-
-1. `i.queueRepo.Load(ctx)` → fail fast
-2. Validate `songIndex`: must be in range and **not** equal to `queue.CurrentIndex` (→ `ErrVoteOnCurrentSong`)
-3. `targetSong = queue.Songs[songIndex]`
-4. Build `sessionID = "prioritize:<targetSong.ID>"`
-5. Call `i.castVote(...)`
-6. If `outcome.Passed`:
-   - Re-load the queue (queue may have changed during the vote window)
-   - Call `i.resolveSongIndex(freshQueue, outcome.Session.SongID, outcome.Session.SongIndex)` to find current index
-   - If the song is no longer in the queue (resolve returns -1) → return `outcome` with no action
-   - Call `freshQueue.Prioritize(resolvedIndex)` — this is the same method used by the token system; vote-driven priority lands in the same slot (right after current song, after any already-prioritized songs)
-   - Save with `i.queueRepo.Save(ctx, freshQueue)`
-   - Log `ActivityPlayback` activity: `"vote prioritized \"<title>\""`
-7. Return `outcome`
-
-### 3g. `castVote` (private)
-
-```go
-func (i *Interactor) castVote(
-    ctx         context.Context,
-    sessionID   string,
-    voteType    entity.VoteType,
-    song        entity.Song,
-    songIndex   int,
-    userID      int,
-    connectedUsers int,
-) (*VoteOutcome, error)
-```
-
-Must be called with `i.mu` already held.
-
-Steps:
-1. Call `i.evictExpired(ctx)` first (lazy cleanup)
-2. Look up `i.sessions[sessionID]`; if not found, create with `entity.NewVoteSession(...)` using `entity.MajorityThreshold(connectedUsers)` as threshold
-3. Call `session.Cast(userID)` — propagate errors directly (`ErrAlreadyVoted`, `ErrVoteSessionExpired`)
-4. Fetch display name for activity log: `i.displayName(ctx, userID)` (fall back to `"Unknown"`)
-5. Log `ActivityVoteCast`: `"voted to <type> \"<title>\" (<count>/<threshold>)"`
-6. Check `session.IsPassed()`:
-   - If true: `delete(i.sessions, sessionID)`, log `ActivityVotePassed`
-7. Return `&VoteOutcome{Session: session, Passed: passed}`
-
-### 3h. `GetActiveSessions`
-
-```go
-func (i *Interactor) GetActiveSessions() []*entity.VoteSession
-```
-
-Lock, evict expired, return a slice of all remaining sessions.
-Used to send active votes to clients on initial WS connect.
-
-### 3i. `ExpireOldSessions`
-
-```go
-func (i *Interactor) ExpireOldSessions(ctx context.Context)
-```
-
-Lock, call `i.evictExpired(ctx)`.
-Called on a ticker from the WS hub every 5 seconds.
-
-### 3j. Private helpers
-
-```
-evictExpired(ctx context.Context)
-    Must be called with i.mu held.
-    For each expired session: log ActivityVoteExpired, delete from map.
-
-resolveSongIndex(queue *entity.Queue, songID string, snapshotIndex int) int
-    Fast path: if Songs[snapshotIndex].ID == songID, return snapshotIndex.
-    Slow path: linear scan by ID.
-    Return -1 if not found.
-
-displayName(ctx context.Context, userID int) string
-    Call i.userRepo.GetUserByID; return DisplayName or "Unknown" on error.
-```
-
----
-
-## Task 4 — Usecase tests: `internal/usecase/vote/interactor_test.go` (CREATE)
-
-Write table-driven tests covering the following cases.
-Follow the same mock pattern used in `internal/usecase/queue/interactor_test.go`
-(local `mockQueueRepo` and `mockUserRepo` structs that implement the repository interfaces).
-
-Required test cases:
-
-**CastSkipVote**
-- First vote creates a session, `Passed == false`
-- Second vote joins the existing session (vote count increments)
-- When threshold is reached, `Passed == true` and queue advances
-- Duplicate vote from same user returns `ErrAlreadyVoted`
-- Empty queue returns an error
-- Passed session is removed from active sessions
-
-**CastPriorityVote**
-- First vote creates a session, `Passed == false`
-- When threshold is reached, `Passed == true` and target song is at index `currentIndex+1`
-- `songIndex == currentIndex` returns `ErrVoteOnCurrentSong`
-- Out-of-range index returns `ErrSongNotFound`
-- Duplicate vote returns `ErrAlreadyVoted`
-- Skip and priority sessions for different songs coexist independently
-
-**ExpireOldSessions**
-- Sessions created with a negative expiry are removed on next call
-- Live sessions are kept
-- Expired sessions log an `ActivityVoteExpired` entry
-
-**Activity logging**
-- `CastSkipVote` always logs `ActivityVoteCast`
-- A passing vote additionally logs `ActivityVotePassed`
-
----
-
-## Task 5 — WebSocket events: patch `internal/delivery/ws/events.go` (MODIFY)
-
-### 5a. Add two new event type constants
-
-```go
-EventVoteUpdated = "vote_updated"   // a vote was cast; send session state
-EventVoteResolved = "vote_resolved" // a vote passed or expired; session closed
-```
-
-### 5b. Add two new data structs
-
-```go
-// VoteUpdatedData is broadcast after every vote cast so clients can
-// show live vote counts without polling.
-type VoteUpdatedData struct {
-    Session  *entity.VoteSession `json:"session"`
-    Activity entity.Activity     `json:"activity"`
-}
-
-// VoteResolvedData is broadcast when a session passes or expires.
-type VoteResolvedData struct {
-    SessionID string          `json:"session_id"`
-    Outcome   string          `json:"outcome"`   // "passed" | "expired"
-    Activity  entity.Activity `json:"activity"`
-}
-```
-
----
-
-## Task 6 — WebSocket hub: patch `internal/delivery/ws/hub.go` (MODIFY)
-
-### 6a. Add `ConnectedCount() int` method
-
-```go
-func (h *Hub) ConnectedCount() int {
-    h.mu.Lock()
-    defer h.mu.Unlock()
-    return len(h.clients)
-}
-```
-
-### 6b. Add vote expiry ticker to `Run()`
-
-Add a `time.NewTicker(5 * time.Second)` case inside the `Run()` select loop.
-The ticker needs a reference to the `vote.Interactor` — add it as a field
-on `Hub` called `voteInteractor` with type `VoteExpiryRunner` (see below).
-
-### 6c. Define `VoteExpiryRunner` interface in the ws package
-
-```go
-// VoteExpiryRunner is satisfied by vote.Interactor.
-// Defined here to avoid an import cycle.
-type VoteExpiryRunner interface {
-    ExpireOldSessions(ctx context.Context)
-}
-```
-
-### 6d. Add `SetVoteInteractor` method
-
-```go
-func (h *Hub) SetVoteInteractor(v VoteExpiryRunner) {
-    h.voteInteractor = v
-}
-```
-
-Call `h.SetVoteInteractor(voteInteractor)` in `main.go` after both are
-constructed (see Task 9).
-
-### 6e. Updated `Run()` ticker case
-
-```go
-case <-ticker.C:
-    if h.voteInteractor != nil {
-        h.voteInteractor.ExpireOldSessions(context.Background())
-    }
-```
-
-### 6f. Patch `RegisterHandler` to include active vote sessions in full sync
-
-After `h.SendFullSync(conn, state)`, also send any active vote sessions:
-
-```go
-if h.voteInteractor != nil {
-    // send active sessions as individual vote_updated events so the
-    // newly connected client sees any in-progress votes
-}
-```
-
-This requires passing the `voteInteractor` as a concrete `*vote.Interactor`
-(or adding `GetActiveSessions() []*entity.VoteSession` to the interface).
-Extend `VoteExpiryRunner` to include this method:
-
-```go
-type VoteExpiryRunner interface {
-    ExpireOldSessions(ctx context.Context)
-    GetActiveSessions() []*entity.VoteSession
-}
-```
-
----
-
-## Task 7 — HTTP handlers: patch `internal/delivery/http/handlers.go` (MODIFY)
-
-### 7a. Add `vote *vote.Interactor` field to `Handlers`
-
-```go
-type Handlers struct {
-    queue    *queue.Interactor
-    auth     *auth.Interactor
-    activity *activity.Interactor
-    priority *priority.Interactor
-    vote     *vote.Interactor          // NEW
-    hub      *ws.Hub
-}
-```
-
-Update `NewHandlers` signature to accept `*vote.Interactor`.
-
-### 7b. Role guard helper (add as private function in the file)
-
-```go
-func canVote(role entity.Role) bool {
-    return role == entity.RoleGuest || role == entity.RoleAdmin
-}
-```
-
-### 7c. `HandleVoteSkip`
-
-```
+```http
 POST /api/vote/skip
-Body: { "user_id": int, "user_role": string }
-```
+Content-Type: application/json
 
-Steps:
-1. Decode body; reject non-Guest/Admin roles with `403`
-2. `connectedUsers := h.hub.ConnectedCount()`
-3. `outcome, err := h.vote.CastSkipVote(ctx, req.UserID, connectedUsers)`
-4. Map errors:
-   - `ErrAlreadyVoted` → `409 Conflict`
-   - `ErrQueueEmpty` → `422 Unprocessable Entity`
-   - anything else → `500`
-5. Broadcast `EventVoteUpdated` with the session state
-6. If `outcome.Passed`:
-   - Load fresh queue state with `h.queue.GetState(ctx)`
-   - Broadcast `EventSongSkipped` (same shape as the direct-skip handler)
-   - Broadcast `EventVoteResolved` with `Outcome: "passed"`
-7. Return `204 No Content`
-
-### 7d. `HandleVotePriority`
-
-```
-POST /api/vote/prioritize
-Body: { "user_id": int, "user_role": string, "song_index": int }
-```
-
-Steps:
-1. Decode body; reject non-Guest/Admin roles with `403`
-2. `connectedUsers := h.hub.ConnectedCount()`
-3. `outcome, err := h.vote.CastPriorityVote(ctx, req.UserID, req.SongIndex, connectedUsers)`
-4. Map errors:
-   - `ErrAlreadyVoted` → `409`
-   - `ErrVoteOnCurrentSong` → `422`
-   - `ErrSongNotFound` → `422`
-   - anything else → `500`
-5. Broadcast `EventVoteUpdated`
-6. If `outcome.Passed`:
-   - Load fresh state
-   - Broadcast `EventSongPrioritized` (same shape as `HandlePrioritizeSong` but with `UserID: 0` to signal it was vote-driven)
-   - Broadcast `EventVoteResolved` with `Outcome: "passed"`
-7. Return `204 No Content`
-
----
-
-## Task 8 — Route registration: patch `cmd/server/main.go` (MODIFY)
-
-### 8a. Import the new usecase
-
-```go
-usecaseVote "local-music-queue/internal/usecase/vote"
-```
-
-### 8b. Construct the interactor
-
-After the `priorityInteractor` line:
-
-```go
-voteInteractor := usecaseVote.NewInteractor(repo, userRepo, 0) // 0 = default 30s expiry
-```
-
-### 8c. Wire into Hub and Handlers
-
-```go
-hub.SetVoteInteractor(voteInteractor)
-handlers := delivery.NewHandlers(qInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, hub)
-```
-
-### 8d. Register routes
-
-```go
-mux.HandleFunc("POST /api/vote/skip",       handlers.HandleVoteSkip)
-mux.HandleFunc("POST /api/vote/prioritize", handlers.HandleVotePriority)
-```
-
----
-
-## Task 9 — Frontend API client: patch `frontend/src/services/api.js` (MODIFY)
-
-Add two new methods to the `api` object:
-
-```js
-async castSkipVote(userID, userRole) {
-  return this.request('/vote/skip', {
-    method: 'POST',
-    body: { user_id: userID, user_role: userRole }
-  })
-},
-
-async castPriorityVote(userID, userRole, songIndex) {
-  return this.request('/vote/prioritize', {
-    method: 'POST',
-    body: { user_id: userID, user_role: userRole, song_index: songIndex }
-  })
-},
-```
-
----
-
-## Task 10 — Frontend store: patch `frontend/src/store/index.js` (MODIFY)
-
-### 10a. Add `voteSessionss` to the reactive state
-
-```js
-voteSessionss: {}   // key: session.id → session object
-```
-
-Note: `voteSessionss` (the store key) reflects that the backend
-`VoteSession.ID` format is `"<type>:<songID>"` — it is a map, not an array,
-so lookups are O(1).
-
-### 10b. Add store methods
-
-```js
-upsertVoteSession(session) {
-  this.voteSessions[session.id] = session
-},
-
-removeVoteSession(sessionID) {
-  delete this.voteSessions[sessionID]
-},
-
-// Convenience: return skip session for a song ID, or null
-skipSessionFor(songID) {
-  return this.voteSessions[`skip:${songID}`] || null
-},
-
-// Convenience: return priority session for a song ID, or null
-prioritySessionFor(songID) {
-  return this.voteSessions[`prioritize:${songID}`] || null
-},
-```
-
-Fix the typo: rename `voteSessionss` → `voteSessions` (double-s was a note above, use single `s`).
-
----
-
-## Task 11 — Frontend WebSocket handler: patch `frontend/src/services/websocket.js` (MODIFY)
-
-Add two new cases to the `handleMessage` switch:
-
-```js
-case 'vote_updated':
-  globalStore.upsertVoteSession(message.data.session)
-  globalStore.addActivity(message.data.activity)
-  break
-
-case 'vote_resolved':
-  globalStore.removeVoteSession(message.data.session_id)
-  globalStore.addActivity(message.data.activity)
-  break
-```
-
----
-
-## Task 12 — Frontend component: `frontend/src/components/dashboard/VoteButton.vue` (CREATE)
-
-A single reusable component used in both `NowPlaying.vue` and `QueueList.vue`.
-
-### Props
-
-```js
-props: {
-  voteType: String,       // 'skip' | 'prioritize'
-  songID:   String,       // used to look up active session
-  songIndex: Number,      // only used when voteType === 'prioritize'
-  disabled: Boolean       // true when user is Host
+{
+  "user_id": 123,
+  "user_role": "guest"
 }
 ```
 
-### Computed
+**Responses:**
+- `204 No Content` - Vote cast successfully
+- `403 Forbidden` - User role cannot vote (Host)
+- `409 Conflict` - User already voted in this session
+- `422 Unprocessable Entity` - Queue is empty
+- `500 Internal Server Error` - Server error
 
-```js
-session()    // globalStore.skipSessionFor(songID) or prioritySessionFor(songID)
-hasVoted()   // session && session.voted_by[currentUser.id] === true
-label()      // dynamic: "Vote to Skip", "Skip? 2/3", etc.
+### Cast Priority Vote
+
+```http
+POST /api/vote/prioritize
+Content-Type: application/json
+
+{
+  "user_id": 123,
+  "user_role": "guest",
+  "song_index": 5
+}
 ```
 
-### Template structure (simplified)
+**Responses:**
+- `204 No Content` - Vote cast successfully
+- `403 Forbidden` - User role cannot vote (Host)
+- `409 Conflict` - User already voted in this session
+- `422 Unprocessable Entity` - Invalid song index or voting on current song
+- `500 Internal Server Error` - Server error
 
-```html
-<button
-  :disabled="disabled || hasVoted"
-  @click="handleVote"
-  class="vote-btn"
-  :class="{ 'vote-btn--active': !!session, 'vote-btn--voted': hasVoted }"
->
-  <span v-if="!session">
-    {{ voteType === 'skip' ? 'Vote to Skip' : 'Vote to Prioritize' }}
-  </span>
-  <span v-else>
-    {{ voteType === 'skip' ? 'Skip' : 'Bump' }}?
-    {{ session.vote_count }}/{{ session.threshold }}
-    <small>({{ session.remaining_seconds }}s)</small>
-  </span>
-</button>
-```
+## WebSocket Events
 
-Note: `vote_count`, `threshold`, `remaining_seconds` are the JSON-serialised
-fields from `VoteSession` — verify the exact field names match the Go struct
-`json` tags when wiring.
+### vote_updated
 
-### `handleVote` method
+Broadcast after every vote cast to show live progress.
 
-```js
-async handleVote() {
-  const user = globalStore.currentUser
-  try {
-    if (this.voteType === 'skip') {
-      await api.castSkipVote(user.id, user.role)
-    } else {
-      await api.castPriorityVote(user.id, user.role, this.songIndex)
-    }
-  } catch (err) {
-    if (err.message.includes('409')) {
-      // already voted — UI should have prevented this but handle gracefully
-    } else {
-      console.error('Vote failed:', err)
+```json
+{
+  "type": "vote_updated",
+  "data": {
+    "session": {
+      "id": "skip:abc123",
+      "type": "skip",
+      "song_id": "abc123",
+      "song_title": "Example Song",
+      "song_index": 0,
+      "voted_by": {
+        "1": true,
+        "2": true
+      },
+      "threshold": 3,
+      "created_at": "2026-05-04T08:00:00Z",
+      "expires_at": "2026-05-04T08:00:30Z"
+    },
+    "activity": {
+      "timestamp": "2026-05-04T08:00:15Z",
+      "type": "vote_cast",
+      "user": "Alice",
+      "description": "voted to skip \"Example Song\" (2/3)"
     }
   }
 }
 ```
 
-### Countdown timer
+### vote_resolved
 
-Add a `setInterval` in `onMounted` that decrements a local `countdown`
-reactive value every second when `session` is active. Clear it in
-`onUnmounted` and whenever `session` becomes null (watch the computed).
-This avoids relying on the backend to push remaining-seconds updates
-on every tick.
+Broadcast when a vote passes or expires.
 
----
-
-## Task 13 — Wire `VoteButton` into existing components (MODIFY)
-
-### `frontend/src/components/dashboard/NowPlaying.vue`
-
-- Import `VoteButton`
-- Add `<VoteButton>` below the song title area:
-
-```html
-<VoteButton
-  voteType="skip"
-  :songID="currentSong.id"
-  :disabled="currentUser.role === 'host'"
-/>
+```json
+{
+  "type": "vote_resolved",
+  "data": {
+    "session_id": "skip:abc123",
+    "outcome": "passed",
+    "activity": {
+      "timestamp": "2026-05-04T08:00:20Z",
+      "type": "vote_passed",
+      "user": "System",
+      "description": "vote to skip \"Example Song\" passed"
+    }
+  }
+}
 ```
 
-Only render the button when `currentSong` exists.
+**Outcome values:**
+- `"passed"` - Threshold reached, action executed
+- `"expired"` - Time limit reached, no action
 
-### `frontend/src/components/dashboard/QueueList.vue`
+## Activity Feed
 
-- Import `VoteButton`
-- In the `v-for` song row template, add a `VoteButton` per song:
+Vote actions are logged to the activity feed:
 
-```html
-<VoteButton
-  voteType="prioritize"
-  :songID="song.id"
-  :songIndex="queueIndexFor(song)"
-  :disabled="currentUser.role === 'host'"
-/>
+- **vote_cast**: `"Alice voted to skip \"Song Title\" (2/3)"`
+- **vote_passed**: `"vote to skip \"Song Title\" passed"`
+- **vote_expired**: `"vote to skip \"Song Title\" expired"`
+
+## Edge Cases
+
+### Song Removed During Vote
+
+If the target song is removed from the queue while a vote is active:
+- Skip vote: Session becomes invalid, automatically cleaned up
+- Priority vote: When vote passes, checks if song still exists; if not, no action taken
+
+### Queue Changes During Vote
+
+Priority votes handle queue modifications:
+1. Vote session stores the original song index
+2. When vote passes, re-loads the queue
+3. Resolves the current index by song ID (fast path) or linear scan (slow path)
+4. If song not found, vote passes but no action taken
+
+### Last Song Skip
+
+When voting to skip the last song in the queue:
+- Vote passes normally
+- Queue status set to `idle`
+- No error returned to user
+
+### Concurrent Votes
+
+Multiple vote sessions can coexist:
+- One skip vote per song (keyed by `"skip:<songID>"`)
+- One priority vote per song (keyed by `"prioritize:<songID>"`)
+- Skip and priority votes for different songs are independent
+
+## Technical Details
+
+### Session Storage
+
+Vote sessions are stored in-memory in the `vote.Interactor`:
+```go
+sessions map[string]*entity.VoteSession
 ```
 
-`queueIndexFor(song)` must return the **full songs array index** (not the
-"Up Next" slice index) because the backend endpoint expects the absolute
-index in `queue.Songs`. Compute it as `store.queueState.current_index + 1 + upNextIndex`.
+**Key format:** `"<type>:<songID>"`
+- Example: `"skip:abc123"`, `"prioritize:xyz789"`
 
----
+### Expiry Mechanism
 
-## Task 14 — Verify everything compiles and tests pass
-
-```bash
-# Backend
-go build ./...
-go test ./internal/domain/entity/... ./internal/usecase/vote/... -v
-
-# Frontend
-cd frontend
-npm run build
-npm run test:unit
+A background ticker in the WebSocket hub runs every 5 seconds:
+```go
+case <-ticker.C:
+    voteInteractor.ExpireOldSessions(ctx)
 ```
 
-Fix any type errors or import issues before considering the feature complete.
+Expired sessions are:
+1. Removed from the sessions map
+2. Logged to the activity feed
+3. Broadcast as `vote_resolved` with outcome `"expired"`
 
----
+### Concurrency Safety
 
-## Constraints and rules to follow throughout
+All vote operations are protected by a mutex:
+```go
+i.mu.Lock()
+defer i.mu.Unlock()
+```
 
-1. **Do not modify `entity/queue.go` or `entity/song.go`** — the existing `Prioritize()` method is reused as-is. Vote-driven priority goes through the same code path as token priority.
+This ensures:
+- Thread-safe session creation and deletion
+- Atomic vote counting
+- Consistent threshold checks
 
-2. **Vote sessions are never persisted** — they live only in the `Interactor.sessions` map. A server restart wipes them. This is intentional.
+### Initial Sync
 
-3. **The `vote.Interactor` must not import other usecase packages** — use repository interfaces only to stay within Clean Architecture boundaries.
+When a client connects via WebSocket:
+1. Receives full queue state
+2. Receives all active vote sessions as individual `vote_updated` events
+3. Can immediately see and participate in ongoing votes
 
-4. **Threshold is computed once at session creation** using the connected-user count at that moment. Subsequent votes reuse the threshold even if users join or leave mid-vote. This avoids a moving-goalpost problem.
+## Constraints
 
-5. **The Host's direct skip and prioritize controls are untouched.** Do not add any role checks to the existing `HandleSkipSong` or `HandlePrioritizeSong` handlers.
+1. **No Persistence**: Vote sessions are never saved to the database. Server restart clears all active votes.
 
-6. **Error mapping in handlers must be explicit** — use `errors.Is()`, not string matching.
+2. **Fixed Threshold**: The vote threshold is calculated once at session creation and never changes, even if users join or leave.
 
-7. **All new Go code must have passing unit tests before moving to the next task.**
+3. **Role Restriction**: Only Guest and Admin roles can vote. Host role is excluded because they have direct controls.
+
+4. **One Vote Per User**: Each user can only vote once per session. Attempting to vote again returns `ErrAlreadyVoted`.
+
+5. **Time Limit**: All vote sessions expire after 30 seconds. This cannot be configured per-vote.
+
+6. **Minimum Threshold**: Even with 1 connected user, the minimum threshold is 2 votes (prevents self-passing).
+
+## Future Enhancements
+
+Potential improvements for future versions:
+
+- **Configurable Expiry**: Allow different time limits per vote type
+- **Vote Cancellation**: Allow users to retract their vote
+- **Vote History**: Persist vote outcomes for analytics
+- **Threshold Modes**: Support different voting thresholds (simple majority, supermajority, unanimous)
+- **Vote Notifications**: Push notifications when votes are close to passing
+- **Vote Cooldown**: Prevent spam by limiting vote frequency per user
