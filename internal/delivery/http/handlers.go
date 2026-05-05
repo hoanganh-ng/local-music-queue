@@ -517,17 +517,19 @@ func (h *Handlers) HandleVoteSkip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get the latest activity from the outcome
-	activities, _ := h.activity.GetRecentActivities(r.Context(), 1)
-	var activity entity.Activity
-	if len(activities) > 0 {
-		activity = activities[0]
+	// Broadcast any expired sessions that were cleaned up
+	for _, expired := range outcome.ExpiredSessions {
+		h.hub.Broadcast(ws.EventVoteResolved, ws.VoteResolvedData{
+			SessionID: expired.SessionID,
+			Outcome:   "expired",
+			Activity:  expired.Activity,
+		})
 	}
 
-	// Broadcast vote_updated event
+	// Broadcast vote_updated event with vote cast activity
 	h.hub.Broadcast(ws.EventVoteUpdated, ws.VoteUpdatedData{
 		Session:  outcome.Session,
-		Activity: activity,
+		Activity: *outcome.VoteCastActivity,
 	})
 
 	if outcome.Passed {
@@ -539,21 +541,21 @@ func (h *Handlers) HandleVoteSkip(w http.ResponseWriter, r *http.Request) {
 			currentSong = &state.Songs[state.CurrentIndex]
 		}
 
-		// Broadcast song_skipped event
+		// Broadcast song_skipped event with action activity
 		h.hub.Broadcast(ws.EventSongSkipped, ws.SongSkippedData{
 			PreviousIndex: state.CurrentIndex - 1,
 			NewIndex:      state.CurrentIndex,
 			CurrentSong:   currentSong,
 			Status:        state.Status,
 			Elapsed:       state.Elapsed,
-			Activity:      activity,
+			Activity:      *outcome.ActionActivity,
 		})
 
-		// Broadcast vote_resolved event
+		// Broadcast vote_resolved event with vote passed activity
 		h.hub.Broadcast(ws.EventVoteResolved, ws.VoteResolvedData{
 			SessionID: outcome.Session.ID,
 			Outcome:   "passed",
-			Activity:  activity,
+			Activity:  *outcome.VotePassedActivity,
 		})
 	}
 
@@ -594,17 +596,19 @@ func (h *Handlers) HandleVotePriority(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get the latest activity
-	activities, _ := h.activity.GetRecentActivities(r.Context(), 1)
-	var activity entity.Activity
-	if len(activities) > 0 {
-		activity = activities[0]
+	// Broadcast any expired sessions that were cleaned up
+	for _, expired := range outcome.ExpiredSessions {
+		h.hub.Broadcast(ws.EventVoteResolved, ws.VoteResolvedData{
+			SessionID: expired.SessionID,
+			Outcome:   "expired",
+			Activity:  expired.Activity,
+		})
 	}
 
-	// Broadcast vote_updated event
+	// Broadcast vote_updated event with vote cast activity
 	h.hub.Broadcast(ws.EventVoteUpdated, ws.VoteUpdatedData{
 		Session:  outcome.Session,
-		Activity: activity,
+		Activity: *outcome.VoteCastActivity,
 	})
 
 	if outcome.Passed {
@@ -622,14 +626,14 @@ func (h *Handlers) HandleVotePriority(w http.ResponseWriter, r *http.Request) {
 			Song:        song,
 			UserID:      0,
 			UserBalance: 0,
-			Activity:    activity,
+			Activity:    *outcome.ActionActivity,
 		})
 
-		// Broadcast vote_resolved event
+		// Broadcast vote_resolved event with vote passed activity
 		h.hub.Broadcast(ws.EventVoteResolved, ws.VoteResolvedData{
 			SessionID: outcome.Session.ID,
 			Outcome:   "passed",
-			Activity:  activity,
+			Activity:  *outcome.VotePassedActivity,
 		})
 	}
 

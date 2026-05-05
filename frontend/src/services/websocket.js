@@ -153,6 +153,7 @@ class WebSocketClient {
         globalStore.addActivity(message.data.activity)
         break
       case 'vote_resolved':
+        console.log(`Vote resolved (${message.data.outcome}):`, message.data.session_id)
         globalStore.removeVoteSession(message.data.session_id)
         globalStore.addActivity(message.data.activity)
         break

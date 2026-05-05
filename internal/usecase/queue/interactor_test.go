@@ -215,18 +215,20 @@ func TestAddSong_LoadFails_CreatesNewQueue(t *testing.T) {
 }
 
 func TestAddSong_Duplicate(t *testing.T) {
-	// Setup: Create a queue with an existing song
+	// Setup: Create a queue with an existing song in the upcoming queue
 	q := entity.NewQueue()
-	q.Add(entity.Song{ID: "vid1", Title: "Existing Song", URL: "https://youtube.com/watch?v=vid1"})
+	q.Add(entity.Song{ID: "vid1", Title: "Current Song", URL: "https://youtube.com/watch?v=vid1"})
+	q.Add(entity.Song{ID: "vid2", Title: "Upcoming Song", URL: "https://youtube.com/watch?v=vid2"})
+	// CurrentIndex is 0 (vid1 is playing), vid2 is upcoming
 
 	repo := &mockQueueRepo{queue: q}
 	yt := &mockYouTubeService{
-		song: &entity.Song{ID: "vid1", Title: "Duplicate Song", URL: "https://youtube.com/watch?v=vid1"},
+		song: &entity.Song{ID: "vid2", Title: "Duplicate Song", URL: "https://youtube.com/watch?v=vid2"},
 	}
 	interactor := NewInteractor(repo, yt)
 
-	// Attempt to add the same song again (same video ID)
-	_, err := interactor.AddSong(context.Background(), "https://youtube.com/watch?v=vid1", "Bob", 2, nil)
+	// Attempt to add vid2 again (it's in the upcoming queue)
+	_, err := interactor.AddSong(context.Background(), "https://youtube.com/watch?v=vid2", "Bob", 2, nil)
 
 	// Assert: Should return ErrSongAlreadyInQueue
 	if !errors.Is(err, entity.ErrSongAlreadyInQueue) {
@@ -234,8 +236,8 @@ func TestAddSong_Duplicate(t *testing.T) {
 	}
 
 	// Assert: Queue length should be unchanged
-	if len(repo.queue.Songs) != 1 {
-		t.Errorf("expected queue to still have 1 song, got %d", len(repo.queue.Songs))
+	if len(repo.queue.Songs) != 2 {
+		t.Errorf("expected queue to still have 2 songs, got %d", len(repo.queue.Songs))
 	}
 
 	// Assert: Save should not be called for duplicate
@@ -244,16 +246,54 @@ func TestAddSong_Duplicate(t *testing.T) {
 	}
 }
 
-func TestAddSong_Duplicate_WithMetadata(t *testing.T) {
-	// Setup: Create a queue with an existing song
+func TestAddSong_CurrentlyPlayingSong_CanBeAddedAgain(t *testing.T) {
+	// Setup: Create a queue with a currently playing song
 	q := entity.NewQueue()
-	q.Add(entity.Song{ID: "vid2", Title: "Existing Song", URL: "https://youtube.com/watch?v=vid2"})
+	q.Add(entity.Song{ID: "vid1", Title: "Current Song", URL: "https://youtube.com/watch?v=vid1"})
+	// CurrentIndex is 0 (vid1 is currently playing)
+
+	repo := &mockQueueRepo{queue: q}
+	yt := &mockYouTubeService{
+		song: &entity.Song{ID: "vid1", Title: "Same Song Again", URL: "https://youtube.com/watch?v=vid1"},
+	}
+	interactor := NewInteractor(repo, yt)
+
+	// Attempt to add vid1 again (it's currently playing, not in upcoming queue)
+	song, err := interactor.AddSong(context.Background(), "https://youtube.com/watch?v=vid1", "Charlie", 3, nil)
+
+	// Assert: Should succeed (currently playing song can be added again)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	// Assert: Song should be added
+	if song == nil {
+		t.Fatal("expected song to be returned")
+	}
+
+	// Assert: Queue should now have 2 songs
+	if len(repo.queue.Songs) != 2 {
+		t.Errorf("expected queue to have 2 songs, got %d", len(repo.queue.Songs))
+	}
+
+	// Assert: Save should be called
+	if !repo.saveCalled {
+		t.Error("expected Save to be called")
+	}
+}
+
+func TestAddSong_Duplicate_WithMetadata(t *testing.T) {
+	// Setup: Create a queue with an existing song in the upcoming queue
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "vid1", Title: "Current Song", URL: "https://youtube.com/watch?v=vid1"})
+	q.Add(entity.Song{ID: "vid2", Title: "Upcoming Song", URL: "https://youtube.com/watch?v=vid2"})
+	// CurrentIndex is 0 (vid1 is playing), vid2 is upcoming
 
 	repo := &mockQueueRepo{queue: q}
 	yt := &mockYouTubeService{}
 	interactor := NewInteractor(repo, yt)
 
-	// Attempt to add the same song via metadata (fast path)
+	// Attempt to add vid2 again via metadata (fast path)
 	metadata := &entity.SearchResult{
 		ID:        "vid2",
 		Title:     "Duplicate via Metadata",
@@ -276,8 +316,8 @@ func TestAddSong_Duplicate_WithMetadata(t *testing.T) {
 	}
 
 	// Assert: Queue length should be unchanged
-	if len(repo.queue.Songs) != 1 {
-		t.Errorf("expected queue to still have 1 song, got %d", len(repo.queue.Songs))
+	if len(repo.queue.Songs) != 2 {
+		t.Errorf("expected queue to still have 2 songs, got %d", len(repo.queue.Songs))
 	}
 }
 

@@ -75,10 +75,17 @@ func (q *Queue) Prev() error {
 	return nil
 }
 
-// ContainsSong checks if a song with the given video ID is already in the queue.
+// ContainsSong checks if a song with the given video ID is already in the upcoming queue.
+// It only checks songs that haven't been played yet (after CurrentIndex).
 func (q *Queue) ContainsSong(videoID string) bool {
-	for _, song := range q.Songs {
-		if song.ID == videoID {
+	// Start checking from the next song after current (CurrentIndex + 1)
+	startIndex := q.CurrentIndex + 1
+	if startIndex < 0 {
+		startIndex = 0
+	}
+
+	for i := startIndex; i < len(q.Songs); i++ {
+		if q.Songs[i].ID == videoID {
 			return true
 		}
 	}

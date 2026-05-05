@@ -65,7 +65,9 @@ func NewHub(getQueueState func(context.Context) (*entity.Queue, error)) *Hub {
 // Run starts the Hub main loop.
 func (h *Hub) Run() {
 	ticker := time.NewTicker(5 * time.Second)
+	pingTicker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
+	defer pingTicker.Stop()
 
 	for {
 		select {
@@ -110,13 +112,28 @@ func (h *Hub) Run() {
 			if h.voteInteractor != nil {
 				expired := h.voteInteractor.ExpireOldSessions(context.Background())
 				for _, e := range expired {
-					h.Broadcast(EventVoteResolved, VoteResolvedData{
-						SessionID: e.SessionID,
-						Outcome:   "expired",
-						Activity:  e.Activity,
-					})
+					// Run in a goroutine to prevent deadlocking the unbuffered broadcast channel
+					go func(exp entity.ExpiredSession) {
+						h.Broadcast(EventVoteResolved, VoteResolvedData{
+							SessionID: exp.SessionID,
+							Outcome:   "expired",
+							Activity:  exp.Activity,
+						})
+					}(e)
 				}
 			}
+
+		case <-pingTicker.C:
+			h.mu.Lock()
+			for client := range h.clients {
+				err := client.WriteMessage(websocket.PingMessage, nil)
+				if err != nil {
+					log.Printf("Error sending ping to client: %v", err)
+					client.Close()
+					delete(h.clients, client)
+				}
+			}
+			h.mu.Unlock()
 		}
 	}
 }
@@ -154,6 +171,32 @@ func (h *Hub) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.register <- conn
+
+	// Start read loop to detect disconnections
+	go h.readPump(conn)
+}
+
+// readPump reads messages from the client to detect disconnections.
+// It doesn't process messages, just detects when the connection closes.
+func (h *Hub) readPump(conn *websocket.Conn) {
+	defer func() {
+		h.unregister <- conn
+	}()
+
+	// Set read deadline for ping/pong
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
+	for {
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			// Connection closed or error occurred
+			break
+		}
+	}
 }
 
 // Broadcast sends a delta message to all connected clients with sequence number.
