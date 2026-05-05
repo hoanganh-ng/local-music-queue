@@ -111,6 +111,9 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	// Wire vote interactor into hub
 	hub.SetVoteInteractor(voteInteractor)
 
+	// Wire priority interactor into hub
+	hub.SetPriorityInteractor(priorityInteractor)
+
 	handlers := delivery.NewHandlers(qInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, hub)
 
 	// 5. Setup Routes

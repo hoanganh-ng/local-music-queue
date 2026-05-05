@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"local-music-queue/internal/domain/entity"
 	"log"
 	"net/http"
@@ -25,6 +26,13 @@ type VoteExpiryRunner interface {
 	GetActiveSessions() []*entity.VoteSession
 }
 
+// PriorityChecker is satisfied by priority.Interactor.
+// Defined here to avoid an import cycle.
+type PriorityChecker interface {
+	CheckAndAwardDailyPriority(ctx context.Context, userID int) error
+	GetUserPriorityBalance(ctx context.Context, userID int) (int, error)
+}
+
 // ClientState tracks per-client connection info
 type ClientState struct {
 	conn        *websocket.Conn
@@ -41,14 +49,15 @@ type BroadcastMessage struct {
 
 // Hub manages WebSocket connections and broadcasts updates.
 type Hub struct {
-	clients        map[*websocket.Conn]*ClientState
-	broadcast      chan *BroadcastMessage
-	register       chan *websocket.Conn
-	unregister     chan *websocket.Conn
-	mu             sync.Mutex
-	seqNum         int64
-	getQueueState  func(context.Context) (*entity.Queue, error)
-	voteInteractor VoteExpiryRunner
+	clients            map[*websocket.Conn]*ClientState
+	broadcast          chan *BroadcastMessage
+	register           chan *websocket.Conn
+	unregister         chan *websocket.Conn
+	mu                 sync.Mutex
+	seqNum             int64
+	getQueueState      func(context.Context) (*entity.Queue, error)
+	voteInteractor     VoteExpiryRunner
+	priorityInteractor PriorityChecker
 }
 
 // NewHub creates a new Hub.
@@ -146,6 +155,13 @@ func (h *Hub) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Extract user_id from query parameters
+	userIDStr := r.URL.Query().Get("user_id")
+	var userID int
+	if userIDStr != "" {
+		_, _ = fmt.Sscanf(userIDStr, "%d", &userID)
+	}
+
 	// Send full sync immediately before registering
 	if h.getQueueState != nil {
 		state, err := h.getQueueState(r.Context())
@@ -171,6 +187,26 @@ func (h *Hub) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.register <- conn
+
+	// Check and award daily priority if user_id provided
+	if userID > 0 && h.priorityInteractor != nil {
+		go func() {
+			ctx := context.Background()
+			err := h.priorityInteractor.CheckAndAwardDailyPriority(ctx, userID)
+			if err != nil {
+				log.Printf("Failed to check daily priority for user %d: %v", userID, err)
+			} else {
+				// Get updated balance and broadcast
+				balance, err := h.priorityInteractor.GetUserPriorityBalance(ctx, userID)
+				if err == nil {
+					h.Broadcast(EventPriorityBalanceUpdated, PriorityBalanceUpdatedData{
+						UserID:  userID,
+						Balance: balance,
+					})
+				}
+			}
+		}()
+	}
 
 	// Start read loop to detect disconnections
 	go h.readPump(conn)
@@ -260,4 +296,9 @@ func (h *Hub) ConnectedCount() int {
 // SetVoteInteractor sets the vote interactor for expiry handling.
 func (h *Hub) SetVoteInteractor(v VoteExpiryRunner) {
 	h.voteInteractor = v
+}
+
+// SetPriorityInteractor sets the priority interactor for daily token checks.
+func (h *Hub) SetPriorityInteractor(pi PriorityChecker) {
+	h.priorityInteractor = pi
 }

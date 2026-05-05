@@ -88,7 +88,8 @@ func (i *Interactor) CheckAndAwardDailyPriority(ctx context.Context, userID int)
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
-	today := time.Now().Truncate(24 * time.Hour)
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
 
 	// Check last session date
 	lastSession, err := i.userRepo.GetLastSessionDate(ctx, userID)
