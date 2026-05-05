@@ -205,11 +205,15 @@ export const globalStore = reactive({
 
   // Vote session management
   upsertVoteSession(session) {
-    this.voteSessions[session.id] = session
+    // Reassign the whole object to ensure reactivity triggers
+    this.voteSessions = { ...this.voteSessions, [session.id]: session }
   },
 
   removeVoteSession(sessionID) {
-    delete this.voteSessions[sessionID]
+    // Create a new object and reassign to ensure reactivity triggers
+    const newSessions = { ...this.voteSessions }
+    delete newSessions[sessionID]
+    this.voteSessions = newSessions
   },
 
   // Convenience: return skip session for a song ID, or null

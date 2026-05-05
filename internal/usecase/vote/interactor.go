@@ -11,8 +11,12 @@ import (
 
 // VoteOutcome represents the result of a vote cast
 type VoteOutcome struct {
-	Session *entity.VoteSession
-	Passed  bool
+	Session            *entity.VoteSession
+	Passed             bool
+	VoteCastActivity   *entity.Activity
+	VotePassedActivity *entity.Activity
+	ActionActivity     *entity.Activity
+	ExpiredSessions    []entity.ExpiredSession
 }
 
 // Interactor handles vote-related business logic
@@ -57,7 +61,15 @@ func (i *Interactor) CastSkipVote(ctx context.Context, userID, connectedUsers in
 	}
 
 	sessionID := fmt.Sprintf("skip:%s", currentSong.ID)
-	outcome, err := i.castVote(ctx, sessionID, entity.VoteTypeSkip, *currentSong, queue.CurrentIndex, userID, connectedUsers)
+	outcome, err := i.castVote(
+		ctx,
+		sessionID,
+		entity.VoteTypeSkip,
+		*currentSong,
+		queue.CurrentIndex,
+		userID,
+		connectedUsers,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -75,10 +87,11 @@ func (i *Interactor) CastSkipVote(ctx context.Context, userID, connectedUsers in
 		}
 
 		displayName := i.displayName(ctx, userID)
-		activity := entity.NewActivity(entity.ActivitySongSkipped, displayName, fmt.Sprintf("vote skipped \"%s\"", currentSong.Title))
-		if err := i.queueRepo.AddActivity(ctx, activity); err != nil {
+		actionActivity := entity.NewActivity(entity.ActivitySongSkipped, displayName, fmt.Sprintf("vote skipped \"%s\"", currentSong.Title))
+		if err := i.queueRepo.AddActivity(ctx, actionActivity); err != nil {
 			return nil, err
 		}
+		outcome.ActionActivity = &actionActivity
 	}
 
 	return outcome, nil
@@ -128,10 +141,11 @@ func (i *Interactor) CastPriorityVote(ctx context.Context, userID, songIndex, co
 		}
 
 		displayName := i.displayName(ctx, userID)
-		activity := entity.NewActivity(entity.ActivityPlayback, displayName, fmt.Sprintf("vote prioritized \"%s\"", targetSong.Title))
-		if err := i.queueRepo.AddActivity(ctx, activity); err != nil {
+		actionActivity := entity.NewActivity(entity.ActivityPlayback, displayName, fmt.Sprintf("vote prioritized \"%s\"", targetSong.Title))
+		if err := i.queueRepo.AddActivity(ctx, actionActivity); err != nil {
 			return nil, err
 		}
+		outcome.ActionActivity = &actionActivity
 	}
 
 	return outcome, nil
@@ -147,7 +161,7 @@ func (i *Interactor) castVote(
 	userID int,
 	connectedUsers int,
 ) (*VoteOutcome, error) {
-	i.evictExpired(ctx)
+	expired := i.evictExpired(ctx)
 
 	session, exists := i.sessions[sessionID]
 	if !exists {
@@ -162,29 +176,38 @@ func (i *Interactor) castVote(
 
 	displayName := i.displayName(ctx, userID)
 	voteTypeStr := string(voteType)
-	activity := entity.NewActivity(
+	voteCastActivity := entity.NewActivity(
 		entity.ActivityVoteCast,
 		displayName,
 		fmt.Sprintf("voted to %s \"%s\" (%d/%d)", voteTypeStr, song.Title, session.VoteCount(), session.Threshold),
 	)
-	if err := i.queueRepo.AddActivity(ctx, activity); err != nil {
+	if err := i.queueRepo.AddActivity(ctx, voteCastActivity); err != nil {
 		return nil, err
+	}
+
+	outcome := &VoteOutcome{
+		Session:          session,
+		Passed:           false,
+		VoteCastActivity: &voteCastActivity,
+		ExpiredSessions:  expired,
 	}
 
 	passed := session.IsPassed()
 	if passed {
 		delete(i.sessions, sessionID)
-		passedActivity := entity.NewActivity(
+		votePassedActivity := entity.NewActivity(
 			entity.ActivityVotePassed,
 			"System",
 			fmt.Sprintf("vote to %s \"%s\" passed", voteTypeStr, song.Title),
 		)
-		if err := i.queueRepo.AddActivity(ctx, passedActivity); err != nil {
+		if err := i.queueRepo.AddActivity(ctx, votePassedActivity); err != nil {
 			return nil, err
 		}
+		outcome.Passed = true
+		outcome.VotePassedActivity = &votePassedActivity
 	}
 
-	return &VoteOutcome{Session: session, Passed: passed}, nil
+	return outcome, nil
 }
 
 // GetActiveSessions returns all active vote sessions
