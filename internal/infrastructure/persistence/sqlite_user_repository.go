@@ -174,7 +174,11 @@ func (r *SQLiteUserRepository) GetLastSessionDate(ctx context.Context, userID in
 		return nil, fmt.Errorf("failed to get last session date: %w", err)
 	}
 
-	date, err := time.Parse("2006-01-02", dateStr)
+	if len(dateStr) >= 10 {
+		dateStr = dateStr[:10]
+	}
+
+	date, err := time.ParseInLocation("2006-01-02", dateStr, time.Local)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse session date: %w", err)
 	}

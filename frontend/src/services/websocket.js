@@ -28,7 +28,13 @@ class WebSocketClient {
 
     // Get backend URL from environment and convert to WebSocket URL
     const API_BASE = import.meta.env.VITE_API_BASE_URL || 'https://localhost:443'
-    const wsUrl = API_BASE.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws'
+    let wsUrl = API_BASE.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws'
+
+    // Add user_id parameter if user is logged in
+    const currentUser = globalStore.currentUser
+    if (currentUser?.id) {
+      wsUrl += `?user_id=${currentUser.id}`
+    }
 
     console.log(`Connecting to WebSocket at ${wsUrl}`)
     this.ws = new WebSocket(wsUrl)

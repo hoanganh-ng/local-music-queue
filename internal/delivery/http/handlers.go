@@ -52,7 +52,14 @@ func (h *Handlers) HandleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check and award daily priority
-	_ = h.priority.CheckAndAwardDailyPriority(r.Context(), user.ID)
+	err = h.priority.CheckAndAwardDailyPriority(r.Context(), user.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	} else {
+		//debug log for awarded priority
+		fmt.Printf("Awarded daily priority to user %d\n", user.ID)
+	}
 
 	// Reload user to get updated priority balance
 	user, _ = h.auth.LoginWithGoogle(r.Context(), req.IDToken)
