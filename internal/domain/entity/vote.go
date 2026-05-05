@@ -24,15 +24,15 @@ const (
 
 // VoteSession represents an active voting session
 type VoteSession struct {
-	ID        string         `json:"id"`
-	Type      VoteType       `json:"type"`
-	SongID    string         `json:"song_id"`
-	SongTitle string         `json:"song_title"`
-	SongIndex int            `json:"song_index"`
-	VotedBy   map[int]bool   `json:"voted_by"`
-	Threshold int            `json:"threshold"`
-	CreatedAt time.Time      `json:"created_at"`
-	ExpiresAt time.Time      `json:"expires_at"`
+	ID        string       `json:"id"`
+	Type      VoteType     `json:"type"`
+	SongID    string       `json:"song_id"`
+	SongTitle string       `json:"song_title"`
+	SongIndex int          `json:"song_index"`
+	VotedBy   map[int]bool `json:"voted_by"`
+	Threshold int          `json:"threshold"`
+	CreatedAt time.Time    `json:"created_at"`
+	ExpiresAt time.Time    `json:"expires_at"`
 }
 
 // ExpiredSession carries data about a session that was just evicted.
@@ -100,7 +100,7 @@ func (v *VoteSession) RemainingSeconds() int {
 
 // MajorityThreshold calculates the votes needed for a strict majority
 func MajorityThreshold(connectedUsers int) int {
-	threshold := connectedUsers/2 + 1
+	threshold := connectedUsers / 2
 	if threshold < 2 {
 		return 2
 	}
