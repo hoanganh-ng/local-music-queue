@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"local-music-queue/internal/domain/entity"
 	"local-music-queue/internal/domain/repository"
@@ -12,10 +13,10 @@ import (
 
 // Interactor handles queue-related business logic.
 type Interactor struct {
-	repo         repository.QueueRepository
-	youtube      service.YouTubeService
-	autoQueueUC  AutoQueueTrigger
-	mu           sync.RWMutex
+	repo        repository.QueueRepository
+	youtube     service.YouTubeService
+	autoQueueUC AutoQueueTrigger
+	mu          sync.RWMutex
 }
 
 // AutoQueueTrigger is the interface for triggering auto-queue checks.
@@ -88,6 +89,35 @@ func (i *Interactor) AddSong(ctx context.Context, url string, addedBy string, ad
 	_ = i.repo.AddActivity(ctx, activity)
 
 	return song, nil
+}
+
+// AddSongDirect adds a pre-built song to the queue without fetching metadata.
+// Used by auto-queue and other internal systems that already have full song data.
+func (i *Interactor) AddSongDirect(ctx context.Context, song *entity.Song) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	queue, err := i.repo.Load(ctx)
+	if err != nil {
+		queue = entity.NewQueue()
+	}
+
+	// Check for duplicate
+	if queue.ContainsSong(song.ID) {
+		return entity.ErrSongAlreadyInQueue
+	}
+
+	queue.Add(*song)
+
+	err = i.repo.Save(ctx, queue)
+	if err != nil {
+		return fmt.Errorf("failed to save queue: %w", err)
+	}
+
+	activity := entity.NewActivity(entity.ActivitySongAdded, song.AddedBy, fmt.Sprintf("added \"%s\"", song.Title))
+	_ = i.repo.AddActivity(ctx, activity)
+
+	return nil
 }
 
 // SkipSong moves to the next song in the queue.
@@ -200,6 +230,24 @@ func (i *Interactor) SongEnded(ctx context.Context) error {
 
 	err = queue.Next()
 	if err != nil {
+		if errors.Is(err, entity.ErrNoNextSong) {
+			queue.Status = entity.StatusPaused
+			if saveErr := i.repo.Save(ctx, queue); saveErr != nil {
+				return fmt.Errorf("failed to save queue after reaching end: %w", saveErr)
+			}
+
+			// Trigger auto-queue check — the queue is at its last song,
+			// so auto-queue should fire to add more songs for endless radio.
+			go func() {
+				if i.autoQueueUC != nil {
+					if err := i.autoQueueUC.CheckAndTrigger(context.Background()); err != nil {
+						log.Printf("auto-queue: %v", err)
+					}
+				}
+			}()
+
+			return nil
+		}
 		return err
 	}
 
@@ -326,4 +374,3 @@ func (i *Interactor) ChangeVolume(ctx context.Context, direction string) error {
 
 	return nil
 }
-

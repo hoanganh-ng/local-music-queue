@@ -12,11 +12,20 @@ import (
 	"time"
 )
 
+// BroadcastFunc is a callback for broadcasting events (e.g. WebSocket).
+// The usecase layer uses this abstraction to avoid importing the delivery layer.
+type BroadcastFunc func(eventType string, data interface{})
+
+// AddSongFunc is a callback for adding a song to the queue with proper locking.
+type AddSongFunc func(ctx context.Context, song *entity.Song) error
+
 // Interactor handles auto-queue business logic.
 type Interactor struct {
 	autoQueueRepo domain.AutoQueueRepository
 	queueRepo     repository.QueueRepository
 	fetcher       domain.RelatedSongFetcher
+	broadcaster   BroadcastFunc
+	addSongFunc   AddSongFunc
 	mu            sync.Mutex
 	triggering    bool
 }
@@ -32,6 +41,16 @@ func NewInteractor(
 		queueRepo:     queueRepo,
 		fetcher:       fetcher,
 	}
+}
+
+// SetBroadcaster sets the broadcast callback for emitting events.
+func (i *Interactor) SetBroadcaster(fn BroadcastFunc) {
+	i.broadcaster = fn
+}
+
+// SetAddSongFunc sets the callback for adding songs with proper locking.
+func (i *Interactor) SetAddSongFunc(fn AddSongFunc) {
+	i.addSongFunc = fn
 }
 
 // CheckAndTrigger checks if auto-queue should fire and adds a song if needed.
@@ -51,23 +70,35 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context) error {
 
 	cfg, err := i.autoQueueRepo.GetConfig(ctx)
 	if err != nil {
+		log.Printf("auto-queue: failed to get config: %v", err)
 		return fmt.Errorf("failed to get config: %w", err)
 	}
 
 	if !cfg.Enabled {
+		log.Printf("auto-queue: disabled, skipping trigger")
 		return nil
 	}
 
 	queue, err := i.queueRepo.Load(ctx)
 	if err != nil {
+		log.Printf("auto-queue: failed to load queue: %v", err)
 		return fmt.Errorf("failed to load queue: %w", err)
 	}
 
-	if len(queue.Songs) != 1 {
+	if len(queue.Songs) == 0 {
+		log.Printf("auto-queue: queue empty, skipping trigger")
+		return nil
+	}
+	if queue.CurrentIndex < 0 || queue.CurrentIndex >= len(queue.Songs) {
+		log.Printf("auto-queue: invalid current index %d for %d songs, skipping trigger", queue.CurrentIndex, len(queue.Songs))
+		return nil
+	}
+	if queue.CurrentIndex != len(queue.Songs)-1 {
+		log.Printf("auto-queue: current index %d is not last (%d), skipping trigger", queue.CurrentIndex, len(queue.Songs)-1)
 		return nil
 	}
 
-	lastSong := queue.Songs[0]
+	lastSong := queue.Songs[queue.CurrentIndex]
 
 	recentHistory, err := i.autoQueueRepo.GetRecentHistory(ctx, 20)
 	if err != nil {
@@ -105,9 +136,21 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context) error {
 		return nil
 	}
 
-	queue.Add(*song)
-	if err := i.queueRepo.Save(ctx, queue); err != nil {
-		return fmt.Errorf("failed to save queue: %w", err)
+	// Use the injected AddSongFunc if available (preferred for proper locking),
+	// otherwise fall back to direct repo access (legacy path).
+	if i.addSongFunc != nil {
+		if err := i.addSongFunc(ctx, song); err != nil {
+			return fmt.Errorf("failed to add song via callback: %w", err)
+		}
+	} else {
+		// Legacy path: direct repo access (has race condition risk)
+		queue.Add(*song)
+		if err := i.queueRepo.Save(ctx, queue); err != nil {
+			return fmt.Errorf("failed to save queue: %w", err)
+		}
+
+		activity := entity.NewActivity(entity.ActivitySongAdded, "Auto-Queue", fmt.Sprintf("added \"%s\"", song.Title))
+		_ = i.queueRepo.AddActivity(ctx, activity)
 	}
 
 	historyEntry := domain.PlayHistoryEntry{
@@ -119,8 +162,15 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context) error {
 		log.Printf("auto-queue: failed to append history: %v", err)
 	}
 
-	activity := entity.NewActivity(entity.ActivitySongAdded, "Auto-Queue", fmt.Sprintf("added \"%s\"", song.Title))
-	_ = i.queueRepo.AddActivity(ctx, activity)
+	// Broadcast auto-queue event to connected clients
+	if i.broadcaster != nil {
+		activity := entity.NewActivity(entity.ActivitySongAdded, "Auto-Queue", fmt.Sprintf("added \"%s\"", song.Title))
+		i.broadcaster("auto_queue_added", map[string]interface{}{
+			"song":              *song,
+			"source_song_title": lastSong.Title,
+			"activity":          activity,
+		})
+	}
 
 	return nil
 }
@@ -143,12 +193,14 @@ func (i *Interactor) fallbackFromHistory(ctx context.Context, queue *entity.Queu
 		return nil
 	}
 
-	rand.Seed(time.Now().UnixNano())
 	chosen := candidates[rand.Intn(len(candidates))]
 
 	return &entity.Song{
 		ID:        chosen.VideoID,
 		Title:     chosen.Title,
+		Artist:    "",
+		Duration:  0,
+		Thumbnail: fmt.Sprintf("https://i.ytimg.com/vi/%s/mqdefault.jpg", chosen.VideoID),
 		AddedBy:   entity.SystemUserID,
 		AddedByID: 0,
 		URL:       fmt.Sprintf("https://www.youtube.com/watch?v=%s", chosen.VideoID),

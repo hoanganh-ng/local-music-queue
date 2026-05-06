@@ -163,6 +163,28 @@ class WebSocketClient {
         globalStore.removeVoteSession(message.data.session_id)
         globalStore.addActivity(message.data.activity)
         break
+      case 'auto_queue_added':
+        if (message.data.song && message.data.song.id) {
+          const position = globalStore.queueState.songs ? globalStore.queueState.songs.length : 0
+          globalStore.addSong(message.data.song, position)
+          globalStore.addActivity(message.data.activity)
+
+          // If the queue was paused at the last song, auto-start playback
+          if (globalStore.queueState.status === 'paused') {
+            globalStore.updatePlaybackStatus('playing')
+            globalStore.updateCurrentIndex(
+              globalStore.queueState.songs.length - 1,
+              message.data.song
+            )
+          }
+        }
+        break
+      case 'auto_queue_config_changed':
+        // Update auto-queue config state for all connected clients
+        if (message.data.enabled !== undefined) {
+          globalStore.updateAutoQueueConfig(message.data.enabled, message.data.strategy)
+        }
+        break
       // Keep backward compatibility
       case 'queue_updated':
       case 'status_updated':

@@ -281,14 +281,22 @@ func (h *Handlers) HandleSongEnded(w http.ResponseWriter, r *http.Request) {
 
 	activity := entity.NewActivity(entity.ActivityPlayback, "System", "song finished playing")
 
-	h.hub.Broadcast(ws.EventSongSkipped, ws.SongSkippedData{
-		PreviousIndex: previousIndex,
-		NewIndex:      stateAfter.CurrentIndex,
-		CurrentSong:   currentSong,
-		Status:        stateAfter.Status,
-		Elapsed:       stateAfter.Elapsed,
-		Activity:      activity,
-	})
+	// If we reached the end of the queue, broadcast status change instead of song skipped
+	if stateAfter.Status == entity.StatusPaused && previousIndex == stateAfter.CurrentIndex {
+		h.hub.Broadcast(ws.EventStatusChanged, ws.StatusChangedData{
+			Status:  stateAfter.Status,
+			Elapsed: stateAfter.Elapsed,
+		})
+	} else {
+		h.hub.Broadcast(ws.EventSongSkipped, ws.SongSkippedData{
+			PreviousIndex: previousIndex,
+			NewIndex:      stateAfter.CurrentIndex,
+			CurrentSong:   currentSong,
+			Status:        stateAfter.Status,
+			Elapsed:       stateAfter.Elapsed,
+			Activity:      activity,
+		})
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }

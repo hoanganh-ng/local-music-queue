@@ -7,15 +7,22 @@ import (
 	"testing"
 )
 
+func TestNewYtDlpRelatedFetcher_DefaultBinaryPath(t *testing.T) {
+	fetcher := NewYtDlpRelatedFetcher("", 10)
+	if fetcher.binaryPath != "yt-dlp" {
+		t.Fatalf("expected default binaryPath=yt-dlp, got %s", fetcher.binaryPath)
+	}
+}
+
 func TestYtDlpRelatedFetcher_FetchRelated(t *testing.T) {
 	t.Run("returns first non-excluded entry", func(t *testing.T) {
-		fetcher := NewYtDlpRelatedFetcher(10)
+		fetcher := NewYtDlpRelatedFetcher("", 10)
 
 		mockJSON := `{
 			"entries": [
-				{"id": "video1", "title": "Song 1", "uploader": "Artist 1", "duration": 180, "webpage_url": "https://youtube.com/watch?v=video1"},
-				{"id": "video2", "title": "Song 2", "uploader": "Artist 2", "duration": 200, "webpage_url": "https://youtube.com/watch?v=video2"},
-				{"id": "video3", "title": "Song 3", "uploader": "Artist 3", "duration": 220, "webpage_url": "https://youtube.com/watch?v=video3"}
+				{"id": "dQw4w9WgXcQ", "title": "Song 1", "uploader": "Artist 1", "duration": 180, "webpage_url": "https://youtube.com/watch?v=dQw4w9WgXcQ"},
+				{"id": "9bZkp7q19f0", "title": "Song 2", "uploader": "Artist 2", "duration": 200, "webpage_url": "https://youtube.com/watch?v=9bZkp7q19f0"},
+				{"id": "kJQP7kiw5Fk", "title": "Song 3", "uploader": "Artist 3", "duration": 220, "webpage_url": "https://youtube.com/watch?v=kJQP7kiw5Fk"}
 			]
 		}`
 
@@ -37,12 +44,12 @@ func TestYtDlpRelatedFetcher_FetchRelated(t *testing.T) {
 	})
 
 	t.Run("returns ErrAllCandidatesExcluded when all excluded", func(t *testing.T) {
-		fetcher := NewYtDlpRelatedFetcher(10)
+		fetcher := NewYtDlpRelatedFetcher("", 10)
 
 		mockJSON := `{
 			"entries": [
-				{"id": "video1", "title": "Song 1", "uploader": "Artist 1", "duration": 180, "webpage_url": "https://youtube.com/watch?v=video1"},
-				{"id": "video2", "title": "Song 2", "uploader": "Artist 2", "duration": 200, "webpage_url": "https://youtube.com/watch?v=video2"}
+				{"id": "dQw4w9WgXcQ", "title": "Song 1", "uploader": "Artist 1", "duration": 180, "webpage_url": "https://youtube.com/watch?v=dQw4w9WgXcQ"},
+				{"id": "9bZkp7q19f0", "title": "Song 2", "uploader": "Artist 2", "duration": 200, "webpage_url": "https://youtube.com/watch?v=9bZkp7q19f0"}
 			]
 		}`
 
@@ -51,7 +58,7 @@ func TestYtDlpRelatedFetcher_FetchRelated(t *testing.T) {
 			return cmd
 		}
 
-		exclude := []string{"video1", "video2"}
+		exclude := []string{"dQw4w9WgXcQ", "9bZkp7q19f0"}
 		_, err := fetcher.FetchRelated(context.Background(), "test_video", exclude)
 		if err != ErrAllCandidatesExcluded {
 			t.Errorf("expected ErrAllCandidatesExcluded, got %v", err)
@@ -59,7 +66,7 @@ func TestYtDlpRelatedFetcher_FetchRelated(t *testing.T) {
 	})
 
 	t.Run("returns ErrFetchFailed on command error", func(t *testing.T) {
-		fetcher := NewYtDlpRelatedFetcher(10)
+		fetcher := NewYtDlpRelatedFetcher("", 10)
 
 		fetcher.commandRunner = func(name string, args ...string) *exec.Cmd {
 			cmd := exec.Command("false")
@@ -73,11 +80,11 @@ func TestYtDlpRelatedFetcher_FetchRelated(t *testing.T) {
 	})
 
 	t.Run("sets AddedBy to SystemUserID", func(t *testing.T) {
-		fetcher := NewYtDlpRelatedFetcher(10)
+		fetcher := NewYtDlpRelatedFetcher("", 10)
 
 		mockJSON := `{
 			"entries": [
-				{"id": "video1", "title": "Song 1", "uploader": "Artist 1", "duration": 180, "webpage_url": "https://youtube.com/watch?v=video1"}
+				{"id": "dQw4w9WgXcQ", "title": "Song 1", "uploader": "Artist 1", "duration": 180, "webpage_url": "https://youtube.com/watch?v=dQw4w9WgXcQ"}
 			]
 		}`
 

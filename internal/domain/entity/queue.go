@@ -53,6 +53,7 @@ func (q *Queue) Next() error {
 		return ErrQueueEmpty
 	}
 	if q.CurrentIndex >= len(q.Songs)-1 {
+		q.Status = StatusPaused
 		return ErrNoNextSong
 	}
 	q.CurrentIndex++
@@ -94,10 +95,21 @@ func (q *Queue) ContainsSong(videoID string) bool {
 
 // Add adds a song to the end of the queue.
 func (q *Queue) Add(song Song) {
+	oldLength := len(q.Songs)
 	q.Songs = append(q.Songs, song)
+
+	// Auto-start playback if:
+	// 1. Queue was completely empty (CurrentIndex == -1), OR
+	// 2. Queue was at the last song and is now paused (finished playing)
 	if q.CurrentIndex == -1 {
 		q.CurrentIndex = 0
 		q.Status = StatusPlaying
+		q.Elapsed = 0
+	} else if q.CurrentIndex == oldLength-1 && q.Status == StatusPaused {
+		// If we were at the last song and paused (song ended), move to the new song
+		q.CurrentIndex = oldLength
+		q.Status = StatusPlaying
+		q.Elapsed = 0
 	}
 }
 

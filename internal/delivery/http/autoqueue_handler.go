@@ -48,6 +48,12 @@ func (h *AutoQueueHandlers) HandleToggleAutoQueue(w http.ResponseWriter, r *http
 		return
 	}
 
+	// Broadcast config change to all connected clients
+	h.hub.Broadcast(ws.EventAutoQueueConfigChanged, ws.AutoQueueConfigChangedData{
+		Enabled:  cfg.Enabled,
+		Strategy: string(cfg.Strategy),
+	})
+
 	json.NewEncoder(w).Encode(AutoQueueStatusResponse{
 		Enabled:  cfg.Enabled,
 		Strategy: string(cfg.Strategy),
