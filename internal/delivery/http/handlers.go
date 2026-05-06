@@ -284,8 +284,9 @@ func (h *Handlers) HandleSongEnded(w http.ResponseWriter, r *http.Request) {
 	// If we reached the end of the queue, broadcast status change instead of song skipped
 	if stateAfter.Status == entity.StatusPaused && previousIndex == stateAfter.CurrentIndex {
 		h.hub.Broadcast(ws.EventStatusChanged, ws.StatusChangedData{
-			Status:  stateAfter.Status,
-			Elapsed: stateAfter.Elapsed,
+			Status:   stateAfter.Status,
+			Elapsed:  stateAfter.Elapsed,
+			Activity: activity,
 		})
 	} else {
 		h.hub.Broadcast(ws.EventSongSkipped, ws.SongSkippedData{

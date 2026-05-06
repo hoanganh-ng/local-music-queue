@@ -236,6 +236,10 @@ func (i *Interactor) SongEnded(ctx context.Context) error {
 				return fmt.Errorf("failed to save queue after reaching end: %w", saveErr)
 			}
 
+			// Log activity for queue ending
+			activity := entity.NewActivity(entity.ActivityPlayback, "System", "queue finished playing")
+			_ = i.repo.AddActivity(ctx, activity)
+
 			// Trigger auto-queue check — the queue is at its last song,
 			// so auto-queue should fire to add more songs for endless radio.
 			go func() {
