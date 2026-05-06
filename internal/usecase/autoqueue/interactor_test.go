@@ -91,7 +91,7 @@ func TestCheckAndTrigger_DisabledConfig(t *testing.T) {
 	}
 }
 
-func TestCheckAndTrigger_QueueNotOne(t *testing.T) {
+func TestCheckAndTrigger_NotLastSong_Skips(t *testing.T) {
 	autoQueueRepo := &mockAutoQueueRepo{
 		config: &domain.AutoQueueConfig{Enabled: true, Strategy: domain.StrategyRelated},
 	}
@@ -99,6 +99,7 @@ func TestCheckAndTrigger_QueueNotOne(t *testing.T) {
 	queue.Add(entity.Song{ID: "song1", Title: "Song 1"})
 	queue.Add(entity.Song{ID: "song2", Title: "Song 2"})
 	queue.Add(entity.Song{ID: "song3", Title: "Song 3"})
+	queue.CurrentIndex = 1
 	queueRepo := &mockQueueRepo{queue: queue}
 	fetcher := &mockFetcher{}
 
@@ -111,6 +112,41 @@ func TestCheckAndTrigger_QueueNotOne(t *testing.T) {
 
 	if len(queueRepo.queue.Songs) != 3 {
 		t.Errorf("expected 3 songs (no add), got %d", len(queueRepo.queue.Songs))
+	}
+}
+
+func TestCheckAndTrigger_LastSong_Triggers(t *testing.T) {
+	autoQueueRepo := &mockAutoQueueRepo{
+		config:  &domain.AutoQueueConfig{Enabled: true, Strategy: domain.StrategyRelated},
+		history: []domain.PlayHistoryEntry{},
+	}
+	queue := entity.NewQueue()
+	queue.Add(entity.Song{ID: "song1", Title: "Song 1"})
+	queue.Add(entity.Song{ID: "song2", Title: "Song 2"})
+	queue.Add(entity.Song{ID: "song3", Title: "Song 3"})
+	queue.CurrentIndex = 2
+	queueRepo := &mockQueueRepo{queue: queue}
+	fetcher := &mockFetcher{
+		song: &entity.Song{
+			ID:        "fetched_song",
+			Title:     "Fetched Song",
+			AddedBy:   entity.SystemUserID,
+			AddedByID: 0,
+		},
+	}
+
+	interactor := NewInteractor(autoQueueRepo, queueRepo, fetcher)
+
+	err := interactor.CheckAndTrigger(context.Background())
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if len(queueRepo.queue.Songs) != 4 {
+		t.Fatalf("expected 4 songs after add, got %d", len(queueRepo.queue.Songs))
+	}
+	if queueRepo.queue.Songs[3].ID != "fetched_song" {
+		t.Errorf("expected fetched_song, got %s", queueRepo.queue.Songs[3].ID)
 	}
 }
 

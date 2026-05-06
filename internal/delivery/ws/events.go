@@ -21,6 +21,7 @@ const (
 	EventVoteUpdated           = "vote_updated"
 	EventVoteResolved          = "vote_resolved"
 	EventAutoQueueAdded        = "auto_queue_added"
+	EventAutoQueueConfigChanged = "auto_queue_config_changed"
 )
 
 // UserJoinedData contains only the new user info
@@ -128,4 +129,10 @@ type AutoQueueAddedData struct {
 	Song            entity.Song     `json:"song"`
 	SourceSongTitle string          `json:"source_song_title"`
 	Activity        entity.Activity `json:"activity"`
+}
+
+// AutoQueueConfigChangedData contains the updated auto-queue configuration.
+type AutoQueueConfigChangedData struct {
+	Enabled  bool   `json:"enabled"`
+	Strategy string `json:"strategy"`
 }

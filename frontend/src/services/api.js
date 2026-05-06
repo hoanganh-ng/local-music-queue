@@ -157,5 +157,19 @@ export const api = {
       method: 'POST',
       body: { user_id: userID, user_role: userRole, song_index: songIndex }
     })
+  },
+
+  // Auto-queue
+  async getAutoQueueStatus() {
+    return this.request('/autoqueue/status', {
+      method: 'GET'
+    })
+  },
+
+  async setAutoQueueEnabled(enabled) {
+    return this.request('/autoqueue/toggle', {
+      method: 'POST',
+      body: { enabled }
+    })
   }
 }

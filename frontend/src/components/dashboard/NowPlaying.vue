@@ -177,7 +177,12 @@ function onPlayerStateChange(event) {
   } else if (state === window.YT.PlayerState.PAUSED) {
     newStatus = 'paused'
   } else if (state === window.YT.PlayerState.ENDED) {
-    api.songEnded().catch(err => console.error('Song ended call failed:', err))
+    api.songEnded()
+      .then(() => {
+        // Backend will broadcast status change via WebSocket
+        // The prop watcher will update the player state
+      })
+      .catch(err => console.error('Song ended call failed:', err))
     return
   }
 

@@ -10,12 +10,16 @@
         </span>
         <button
           v-if="canControl"
-          class="radio-mode-btn"
+          class="radio-mode-toggle"
           :class="{ active: autoQueueEnabled }"
           @click="toggleAutoQueue"
           :title="autoQueueEnabled ? 'Radio Mode: ON' : 'Radio Mode: OFF'"
         >
-          📻 Radio
+          <span class="toggle-icon">📻</span>
+          <span class="toggle-label">{{ autoQueueEnabled ? 'Radio: ON' : 'Radio: OFF' }}</span>
+          <span class="toggle-switch">
+            <span class="toggle-slider"></span>
+          </span>
         </button>
         <span class="user-name">{{ currentUser?.display_name }}</span>
         <button class="logout-btn" @click="handleLogout">Exit</button>
@@ -59,7 +63,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { globalStore } from '../store'
 import { api } from '../services/api'
@@ -120,6 +124,13 @@ onMounted(async () => {
     } catch (e) {
       console.error("Failed to fetch auto-queue status:", e)
     }
+  }
+})
+
+// Watch for auto-queue config changes from WebSocket (other clients toggling)
+watch(() => globalStore.autoQueueConfig.enabled, (newEnabled) => {
+  if (canControl.value) {
+    autoQueueEnabled.value = newEnabled
   }
 })
 
@@ -243,36 +254,77 @@ const toggleAutoQueue = async () => {
   color: var(--danger);
 }
 
-.radio-mode-btn {
-  background: rgba(52, 152, 219, 0.1);
-  color: #3498db;
-  border: 1px solid rgba(52, 152, 219, 0.3);
+.radio-mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(149, 165, 166, 0.1);
+  color: #95a5a6;
+  border: 1px solid rgba(149, 165, 166, 0.3);
   border-radius: var(--radius-sm);
-  padding: 0.25rem 0.75rem;
+  padding: 0.35rem 0.75rem;
   font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.3s ease;
 }
 
-.radio-mode-btn:hover {
-  background: rgba(52, 152, 219, 0.2);
-  border-color: #3498db;
+.radio-mode-toggle:hover {
+  background: rgba(149, 165, 166, 0.15);
+  border-color: #95a5a6;
 }
 
-.radio-mode-btn.active {
-  background: rgba(52, 152, 219, 0.3);
-  border-color: #3498db;
-  animation: pulse 2s infinite;
+.radio-mode-toggle.active {
+  background: rgba(46, 204, 113, 0.15);
+  color: #2ecc71;
+  border-color: rgba(46, 204, 113, 0.4);
 }
 
-@keyframes pulse {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.7;
-  }
+.radio-mode-toggle.active:hover {
+  background: rgba(46, 204, 113, 0.2);
+  border-color: #2ecc71;
+}
+
+.toggle-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.toggle-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.toggle-switch {
+  position: relative;
+  width: 32px;
+  height: 16px;
+  background: rgba(149, 165, 166, 0.3);
+  border-radius: 8px;
+  transition: background 0.3s ease;
+}
+
+.radio-mode-toggle.active .toggle-switch {
+  background: rgba(46, 204, 113, 0.5);
+}
+
+.toggle-slider {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  background: #95a5a6;
+  border-radius: 50%;
+  transition: all 0.3s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.radio-mode-toggle.active .toggle-slider {
+  transform: translateX(16px);
+  background: #2ecc71;
 }
 
 .dashboard-content {

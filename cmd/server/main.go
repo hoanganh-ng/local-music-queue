@@ -107,15 +107,21 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 
 	// Initialize auto-queue components
 	autoQueueRepo := persistence.NewSQLiteAutoQueueRepository(repo.DB())
-	ytRelatedFetcher := youtube.NewYtDlpRelatedFetcher(10)
+	ytRelatedFetcher := youtube.NewYtDlpRelatedFetcher(cfg.YTDLPPath, 10)
 	autoQueueInteractor := usecaseAutoQueue.NewInteractor(autoQueueRepo, repo, ytRelatedFetcher)
 
 	// Wire auto-queue into queue interactor
 	qInteractor.SetAutoQueueTrigger(autoQueueInteractor)
 
+	// Wire auto-queue callbacks to avoid race conditions
+	autoQueueInteractor.SetAddSongFunc(qInteractor.AddSongDirect)
+
 	// 4. Initialize Delivery with queue state callback
 	hub := ws.NewHub(qInteractor.GetState)
 	go hub.Run() // Start WebSocket hub loop
+
+	// Wire auto-queue broadcaster to WS hub
+	autoQueueInteractor.SetBroadcaster(hub.Broadcast)
 
 	// Wire vote interactor into hub
 	hub.SetVoteInteractor(voteInteractor)

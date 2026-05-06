@@ -31,6 +31,7 @@ export const globalStore = reactive({
     history: []
   },
   voteSessions: {}, // key: session.id → session object
+  autoQueueConfig: { enabled: false, strategy: 'related' }, // auto-queue config state
 
   setUser(user) {
     this.currentUser = user
@@ -214,6 +215,12 @@ export const globalStore = reactive({
     const newSessions = { ...this.voteSessions }
     delete newSessions[sessionID]
     this.voteSessions = newSessions
+  },
+
+  // Auto-queue config management
+  updateAutoQueueConfig(enabled, strategy) {
+    // Store config for reactive updates across components
+    this.autoQueueConfig = { enabled, strategy }
   },
 
   // Convenience: return skip session for a song ID, or null
