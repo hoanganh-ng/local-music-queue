@@ -6,14 +6,21 @@ import (
 	"local-music-queue/internal/domain/entity"
 	"local-music-queue/internal/domain/repository"
 	"local-music-queue/internal/domain/service"
+	"log"
 	"sync"
 )
 
 // Interactor handles queue-related business logic.
 type Interactor struct {
-	repo    repository.QueueRepository
-	youtube service.YouTubeService
-	mu      sync.RWMutex
+	repo         repository.QueueRepository
+	youtube      service.YouTubeService
+	autoQueueUC  AutoQueueTrigger
+	mu           sync.RWMutex
+}
+
+// AutoQueueTrigger is the interface for triggering auto-queue checks.
+type AutoQueueTrigger interface {
+	CheckAndTrigger(ctx context.Context) error
 }
 
 // NewInteractor creates a new Queue Interactor.
@@ -22,6 +29,11 @@ func NewInteractor(repo repository.QueueRepository, youtube service.YouTubeServi
 		repo:    repo,
 		youtube: youtube,
 	}
+}
+
+// SetAutoQueueTrigger sets the auto-queue trigger (called after DI setup to avoid circular dependency).
+func (i *Interactor) SetAutoQueueTrigger(trigger AutoQueueTrigger) {
+	i.autoQueueUC = trigger
 }
 
 // AddSong adds a song to the queue. If metadata is provided (e.g. from a prior
@@ -100,6 +112,15 @@ func (i *Interactor) SkipSong(ctx context.Context, requestedBy string) error {
 
 	activity := entity.NewActivity(entity.ActivitySongSkipped, requestedBy, "skipped the current song")
 	_ = i.repo.AddActivity(ctx, activity)
+
+	// Trigger auto-queue check
+	go func() {
+		if i.autoQueueUC != nil {
+			if err := i.autoQueueUC.CheckAndTrigger(context.Background()); err != nil {
+				log.Printf("auto-queue: %v", err)
+			}
+		}
+	}()
 
 	return nil
 }
@@ -189,6 +210,15 @@ func (i *Interactor) SongEnded(ctx context.Context) error {
 
 	activity := entity.NewActivity(entity.ActivityPlayback, "System", "song finished playing")
 	_ = i.repo.AddActivity(ctx, activity)
+
+	// Trigger auto-queue check
+	go func() {
+		if i.autoQueueUC != nil {
+			if err := i.autoQueueUC.CheckAndTrigger(context.Background()); err != nil {
+				log.Printf("auto-queue: %v", err)
+			}
+		}
+	}()
 
 	return nil
 }

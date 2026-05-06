@@ -84,6 +84,30 @@ func (r *SQLiteRepository) init() error {
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (user_id) REFERENCES users(id)
 	);
+
+	CREATE TABLE IF NOT EXISTS auto_queue_config (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		enabled INTEGER NOT NULL DEFAULT 0,
+		strategy TEXT NOT NULL DEFAULT 'related'
+	);
+	INSERT OR IGNORE INTO auto_queue_config (id, enabled, strategy) VALUES (1, 0, 'related');
+
+	CREATE TABLE IF NOT EXISTS play_history (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		video_id TEXT NOT NULL,
+		title TEXT NOT NULL,
+		played_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at DESC);
+
+	CREATE TRIGGER IF NOT EXISTS trg_play_history_cap
+	AFTER INSERT ON play_history
+	BEGIN
+		DELETE FROM play_history
+		WHERE id NOT IN (
+			SELECT id FROM play_history ORDER BY played_at DESC LIMIT 50
+		);
+	END;
 	`
 	_, err := r.db.Exec(query)
 	return err

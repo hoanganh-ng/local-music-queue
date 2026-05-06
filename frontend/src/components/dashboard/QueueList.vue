@@ -24,6 +24,7 @@
             <div class="item-number">{{ index + 1 }}</div>
             <div class="item-title">
               <span v-if="song.is_prioritized" class="priority-icon">⚡</span>
+              <span v-if="song.added_by === 'system:autoqueue'" class="auto-badge">⚡ auto</span>
               {{ song.title || song.url }}
             </div>
             <button v-if="canControl" class="remove-btn" @click="handleRemove(index)" title="Remove from queue">
@@ -343,6 +344,17 @@ function queueIndexFor(upNextIndex) {
   transition: all 0.2s ease;
   opacity: 1;
   white-space: nowrap;
+}
+
+.auto-badge {
+  background: rgba(52, 152, 219, 0.2);
+  color: #3498db;
+  padding: 0.125rem 0.375rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.625rem;
+  font-weight: 600;
+  margin-right: 0.5rem;
+  border: 1px solid rgba(52, 152, 219, 0.3);
 }
 
 @media (max-width: 768px) {

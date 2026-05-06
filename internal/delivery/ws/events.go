@@ -20,6 +20,7 @@ const (
 	EventPriorityBalanceUpdated = "priority_balance_updated"
 	EventVoteUpdated           = "vote_updated"
 	EventVoteResolved          = "vote_resolved"
+	EventAutoQueueAdded        = "auto_queue_added"
 )
 
 // UserJoinedData contains only the new user info
@@ -120,4 +121,11 @@ type VoteResolvedData struct {
 	SessionID string          `json:"session_id"`
 	Outcome   string          `json:"outcome"` // "passed" | "expired"
 	Activity  entity.Activity `json:"activity"`
+}
+
+// AutoQueueAddedData contains info about auto-added song.
+type AutoQueueAddedData struct {
+	Song            entity.Song     `json:"song"`
+	SourceSongTitle string          `json:"source_song_title"`
+	Activity        entity.Activity `json:"activity"`
 }

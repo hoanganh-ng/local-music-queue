@@ -13,6 +13,7 @@ import (
 	"local-music-queue/internal/infrastructure/youtube"
 	usecaseActivity "local-music-queue/internal/usecase/activity"
 	usecaseAuth "local-music-queue/internal/usecase/auth"
+	usecaseAutoQueue "local-music-queue/internal/usecase/autoqueue"
 	usecasePriority "local-music-queue/internal/usecase/priority"
 	usecaseQueue "local-music-queue/internal/usecase/queue"
 	usecaseVote "local-music-queue/internal/usecase/vote"
@@ -104,6 +105,14 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	priorityInteractor := usecasePriority.NewInteractor(userRepo, repo)
 	voteInteractor := usecaseVote.NewInteractor(repo, userRepo, 0) // 0 = default 30s expiry
 
+	// Initialize auto-queue components
+	autoQueueRepo := persistence.NewSQLiteAutoQueueRepository(repo.DB())
+	ytRelatedFetcher := youtube.NewYtDlpRelatedFetcher(10)
+	autoQueueInteractor := usecaseAutoQueue.NewInteractor(autoQueueRepo, repo, ytRelatedFetcher)
+
+	// Wire auto-queue into queue interactor
+	qInteractor.SetAutoQueueTrigger(autoQueueInteractor)
+
 	// 4. Initialize Delivery with queue state callback
 	hub := ws.NewHub(qInteractor.GetState)
 	go hub.Run() // Start WebSocket hub loop
@@ -115,6 +124,7 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	hub.SetPriorityInteractor(priorityInteractor)
 
 	handlers := delivery.NewHandlers(qInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, hub)
+	autoQueueHandlers := delivery.NewAutoQueueHandlers(autoQueueInteractor, hub)
 
 	// 5. Setup Routes
 	mux := http.NewServeMux()
@@ -137,6 +147,10 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	mux.HandleFunc("GET /api/youtube/search", handlers.HandleSearchYouTube)
 	mux.HandleFunc("POST /api/vote/skip", handlers.HandleVoteSkip)
 	mux.HandleFunc("POST /api/vote/prioritize", handlers.HandleVotePriority)
+
+	// Auto-queue API
+	mux.HandleFunc("POST /api/autoqueue/toggle", autoQueueHandlers.HandleToggleAutoQueue)
+	mux.HandleFunc("GET /api/autoqueue/status", autoQueueHandlers.HandleGetAutoQueueStatus)
 
 	// WebSocket
 	mux.HandleFunc("/ws", hub.RegisterHandler)
