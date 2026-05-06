@@ -1,0 +1,176 @@
+package autoqueue
+
+import (
+	"context"
+	"fmt"
+	"local-music-queue/internal/domain"
+	"local-music-queue/internal/domain/entity"
+	"local-music-queue/internal/domain/repository"
+	"log"
+	"math/rand"
+	"sync"
+	"time"
+)
+
+// Interactor handles auto-queue business logic.
+type Interactor struct {
+	autoQueueRepo domain.AutoQueueRepository
+	queueRepo     repository.QueueRepository
+	fetcher       domain.RelatedSongFetcher
+	mu            sync.Mutex
+	triggering    bool
+}
+
+// NewInteractor creates a new AutoQueue Interactor.
+func NewInteractor(
+	autoQueueRepo domain.AutoQueueRepository,
+	queueRepo repository.QueueRepository,
+	fetcher domain.RelatedSongFetcher,
+) *Interactor {
+	return &Interactor{
+		autoQueueRepo: autoQueueRepo,
+		queueRepo:     queueRepo,
+		fetcher:       fetcher,
+	}
+}
+
+// CheckAndTrigger checks if auto-queue should fire and adds a song if needed.
+func (i *Interactor) CheckAndTrigger(ctx context.Context) error {
+	i.mu.Lock()
+	if i.triggering {
+		i.mu.Unlock()
+		return nil
+	}
+	i.triggering = true
+	defer func() {
+		i.mu.Lock()
+		i.triggering = false
+		i.mu.Unlock()
+	}()
+	i.mu.Unlock()
+
+	cfg, err := i.autoQueueRepo.GetConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get config: %w", err)
+	}
+
+	if !cfg.Enabled {
+		return nil
+	}
+
+	queue, err := i.queueRepo.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load queue: %w", err)
+	}
+
+	if len(queue.Songs) != 1 {
+		return nil
+	}
+
+	lastSong := queue.Songs[0]
+
+	recentHistory, err := i.autoQueueRepo.GetRecentHistory(ctx, 20)
+	if err != nil {
+		log.Printf("auto-queue: failed to get recent history: %v", err)
+		recentHistory = []domain.PlayHistoryEntry{}
+	}
+
+	// Build exclude list for fetcher (recent history + current queue)
+	excludeMap := make(map[string]bool)
+	for _, entry := range recentHistory {
+		excludeMap[entry.VideoID] = true
+	}
+	for _, song := range queue.Songs {
+		excludeMap[song.ID] = true
+	}
+
+	var exclude []string
+	for id := range excludeMap {
+		exclude = append(exclude, id)
+	}
+
+	song, err := i.fetcher.FetchRelated(ctx, lastSong.ID, exclude)
+	if err != nil {
+		log.Printf("auto-queue: fetcher failed: %v, trying fallback", err)
+		// For fallback, only exclude songs currently in queue (not history)
+		queueOnlyExclude := make(map[string]bool)
+		for _, s := range queue.Songs {
+			queueOnlyExclude[s.ID] = true
+		}
+		song = i.fallbackFromHistory(ctx, queue, queueOnlyExclude)
+	}
+
+	if song == nil {
+		log.Printf("auto-queue: no song available (fetcher and fallback both failed)")
+		return nil
+	}
+
+	queue.Add(*song)
+	if err := i.queueRepo.Save(ctx, queue); err != nil {
+		return fmt.Errorf("failed to save queue: %w", err)
+	}
+
+	historyEntry := domain.PlayHistoryEntry{
+		VideoID:  lastSong.ID,
+		Title:    lastSong.Title,
+		PlayedAt: time.Now(),
+	}
+	if err := i.autoQueueRepo.AppendHistory(ctx, historyEntry); err != nil {
+		log.Printf("auto-queue: failed to append history: %v", err)
+	}
+
+	activity := entity.NewActivity(entity.ActivitySongAdded, "Auto-Queue", fmt.Sprintf("added \"%s\"", song.Title))
+	_ = i.queueRepo.AddActivity(ctx, activity)
+
+	return nil
+}
+
+// fallbackFromHistory picks a random song from history that's not in excludeMap.
+func (i *Interactor) fallbackFromHistory(ctx context.Context, queue *entity.Queue, excludeMap map[string]bool) *entity.Song {
+	history, err := i.autoQueueRepo.GetRecentHistory(ctx, 50)
+	if err != nil || len(history) == 0 {
+		return nil
+	}
+
+	var candidates []domain.PlayHistoryEntry
+	for _, entry := range history {
+		if !excludeMap[entry.VideoID] {
+			candidates = append(candidates, entry)
+		}
+	}
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	rand.Seed(time.Now().UnixNano())
+	chosen := candidates[rand.Intn(len(candidates))]
+
+	return &entity.Song{
+		ID:        chosen.VideoID,
+		Title:     chosen.Title,
+		AddedBy:   entity.SystemUserID,
+		AddedByID: 0,
+		URL:       fmt.Sprintf("https://www.youtube.com/watch?v=%s", chosen.VideoID),
+	}
+}
+
+// GetConfig returns the current auto-queue configuration.
+func (i *Interactor) GetConfig(ctx context.Context) (*domain.AutoQueueConfig, error) {
+	return i.autoQueueRepo.GetConfig(ctx)
+}
+
+// SetEnabled updates the enabled flag for auto-queue.
+func (i *Interactor) SetEnabled(ctx context.Context, enabled bool) error {
+	cfg, err := i.autoQueueRepo.GetConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get config: %w", err)
+	}
+
+	cfg.Enabled = enabled
+	if err := i.autoQueueRepo.SaveConfig(ctx, *cfg); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	return nil
+}

@@ -8,6 +8,15 @@
         <span class="user-role" :class="roleBadgeClass">
           {{ roleBadgeLabel }}
         </span>
+        <button
+          v-if="canControl"
+          class="radio-mode-btn"
+          :class="{ active: autoQueueEnabled }"
+          @click="toggleAutoQueue"
+          :title="autoQueueEnabled ? 'Radio Mode: ON' : 'Radio Mode: OFF'"
+        >
+          📻 Radio
+        </button>
         <span class="user-name">{{ currentUser?.display_name }}</span>
         <button class="logout-btn" @click="handleLogout">Exit</button>
       </div>
@@ -82,6 +91,7 @@ const roleBadgeLabel = computed(() => {
 })
 
 const submitFormRef = ref(null)
+const autoQueueEnabled = ref(false)
 let unsubscribeSongAdded = null
 
 onMounted(async () => {
@@ -100,6 +110,16 @@ onMounted(async () => {
     globalStore.updateQueueState(state)
   } catch (e) {
     console.error("Failed to fetch initial queue:", e)
+  }
+
+  // Fetch auto-queue status
+  if (canControl.value) {
+    try {
+      const status = await api.getAutoQueueStatus()
+      autoQueueEnabled.value = status.enabled
+    } catch (e) {
+      console.error("Failed to fetch auto-queue status:", e)
+    }
   }
 })
 
@@ -135,6 +155,16 @@ const skipSong = async () => {
     await api.skipSong(currentUser.value.display_name)
   } catch (e) {
     console.error("Failed to skip song:", e)
+  }
+}
+
+const toggleAutoQueue = async () => {
+  try {
+    const newEnabled = !autoQueueEnabled.value
+    await api.setAutoQueueEnabled(newEnabled)
+    autoQueueEnabled.value = newEnabled
+  } catch (e) {
+    console.error("Failed to toggle auto-queue:", e)
   }
 }
 </script>
@@ -211,6 +241,38 @@ const skipSong = async () => {
 
 .logout-btn:hover {
   color: var(--danger);
+}
+
+.radio-mode-btn {
+  background: rgba(52, 152, 219, 0.1);
+  color: #3498db;
+  border: 1px solid rgba(52, 152, 219, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 0.25rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.radio-mode-btn:hover {
+  background: rgba(52, 152, 219, 0.2);
+  border-color: #3498db;
+}
+
+.radio-mode-btn.active {
+  background: rgba(52, 152, 219, 0.3);
+  border-color: #3498db;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
 }
 
 .dashboard-content {
