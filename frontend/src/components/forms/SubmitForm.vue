@@ -1,5 +1,5 @@
 <template>
-  <div class="submit-form glass-panel">
+  <div ref="formRef" class="submit-form glass-panel">
     <div class="input-group">
       <div class="input-wrapper">
         <BaseInput
@@ -7,13 +7,23 @@
           placeholder="Search or paste YouTube URL..."
           @input="handleInput"
           @enter="handleEnter"
+          role="combobox"
+          aria-autocomplete="list"
+          :aria-expanded="showResults"
+          aria-controls="search-results-list"
+          :aria-activedescendant="activeDescendant"
           @keydown="handleKeydown"
         />
 
-        <!-- Search Results Dropdown -->
-        <div v-if="showResults" class="search-results">
-          <div v-if="isSearching" class="search-loading">
-            <div class="spinner"></div>
+        <div
+          v-if="showResults"
+          id="search-results-list"
+          class="search-results"
+          role="listbox"
+          aria-label="YouTube search results"
+        >
+          <div v-if="isSearching" class="search-loading" role="status">
+            <LoadingSpinner size="sm" />
             <span>Searching...</span>
           </div>
 
@@ -24,18 +34,23 @@
           <div
             v-else
             v-for="(result, index) in searchResults"
+            :id="resultOptionId(index)"
             :key="result.id"
             class="result-card"
             :class="{ selected: index === selectedIndex }"
+            role="option"
+            :aria-selected="index === selectedIndex"
+            tabindex="-1"
+            @click="selectResult(result)"
             @mouseenter="selectedIndex = index"
           >
             <img
               :src="result.thumbnail || `https://i.ytimg.com/vi/${result.id}/mqdefault.jpg`"
               :alt="result.title"
               class="result-thumbnail"
-              @error="e => e.target.src = `https://i.ytimg.com/vi/${result.id}/mqdefault.jpg`"
+              @error="handleThumbnailError($event, result.id)"
             />
-            <div class="result-info" @click="selectResult(result)">
+            <div class="result-info">
               <div class="result-title">{{ result.title }}</div>
               <div class="result-meta">
                 <span class="result-artist">{{ result.artist }}</span>
@@ -47,6 +62,7 @@
               @click.stop="addResultDirectly(result)"
               :disabled="isLoading"
               title="Add to queue"
+              :aria-label="`Add ${result.title} to queue`"
             >
               +
             </button>
@@ -70,12 +86,15 @@
 </template>
 
 <script setup>
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import BaseInput from '../ui/BaseInput.vue'
 import BaseButton from '../ui/BaseButton.vue'
+import LoadingSpinner from '../ui/LoadingSpinner.vue'
 import { api } from '../../services/api'
+import { useToast } from '../../composables/useToast'
 
 const emit = defineEmits(['submit'])
+const toast = useToast()
 
 const props = defineProps({
   onSubmit: {
@@ -84,6 +103,7 @@ const props = defineProps({
   }
 })
 
+const formRef = ref(null)
 const inputValue = ref('')
 const isLoading = ref(false)
 const error = ref('')
@@ -102,6 +122,23 @@ const ytRegex = /^(https?\:\/\/)?(www\.youtube\.com|youtu\.?be)\/.+$/
 const isYouTubeUrl = computed(() => {
   return ytRegex.test(inputValue.value.trim())
 })
+
+const activeDescendant = computed(() => {
+  return selectedIndex.value >= 0 ? resultOptionId(selectedIndex.value) : undefined
+})
+
+const resultOptionId = (index) => `search-result-${index}`
+
+const closeResults = () => {
+  showResults.value = false
+  selectedIndex.value = -1
+}
+
+const handleClickOutside = (event) => {
+  if (formRef.value && !formRef.value.contains(event.target)) {
+    closeResults()
+  }
+}
 
 const handleInput = () => {
   clearTimeout(searchDebounceTimer.value)
@@ -137,6 +174,7 @@ const performSearch = async (query) => {
   } catch (e) {
     console.error('Search failed:', e)
     searchResults.value = []
+    toast.error('Search failed. Try again.')
   } finally {
     isSearching.value = false
   }
@@ -144,18 +182,14 @@ const performSearch = async (query) => {
 
 const selectResult = (result) => {
   inputValue.value = result.url
-  showResults.value = false
-  searchResults.value = []
-  selectedIndex.value = -1
+  closeResults()
 }
 
 const addResultDirectly = async (result) => {
   if (isLoading.value) return
 
   inputValue.value = result.url
-  showResults.value = false
-  searchResults.value = []
-  selectedIndex.value = -1
+  closeResults()
 
   await submit(result)
 }
@@ -165,13 +199,12 @@ const handleKeydown = (event) => {
 
   if (event.key === 'ArrowDown') {
     event.preventDefault()
-    selectedIndex.value = Math.min(selectedIndex.value + 1, searchResults.value.length - 1)
+    selectedIndex.value = (selectedIndex.value + 1) % searchResults.value.length
   } else if (event.key === 'ArrowUp') {
     event.preventDefault()
-    selectedIndex.value = Math.max(selectedIndex.value - 1, -1)
+    selectedIndex.value = selectedIndex.value <= 0 ? searchResults.value.length - 1 : selectedIndex.value - 1
   } else if (event.key === 'Escape') {
-    showResults.value = false
-    selectedIndex.value = -1
+    closeResults()
   }
 }
 
@@ -187,6 +220,11 @@ const formatDuration = (seconds) => {
   const mins = Math.floor(seconds / 60)
   const secs = seconds % 60
   return `${mins}:${secs.toString().padStart(2, '0')}`
+}
+
+const handleThumbnailError = (event, id) => {
+  event.target.src = `https://i.ytimg.com/vi/${id}/mqdefault.jpg`
+  event.target.alt = 'Thumbnail unavailable'
 }
 
 const handleSongAdded = (song) => {
@@ -247,7 +285,12 @@ const submit = async (metadata = null) => {
   }
 }
 
+onMounted(() => {
+  document.addEventListener('click', handleClickOutside)
+})
+
 onUnmounted(() => {
+  document.removeEventListener('click', handleClickOutside)
   if (completionTimeout.value) {
     clearTimeout(completionTimeout.value)
   }
@@ -282,7 +325,7 @@ defineExpose({
 
 .search-results {
   position: absolute;
-  bottom: calc(100% + 0.5rem);
+  top: calc(100% + 0.5rem);
   left: 0;
   right: 0;
   background: rgba(20, 25, 45, 0.98);
@@ -292,7 +335,7 @@ defineExpose({
   max-height: 350px;
   overflow-y: auto;
   z-index: 100;
-  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
 }
 
 .search-results::-webkit-scrollbar {
@@ -318,26 +361,14 @@ defineExpose({
   justify-content: center;
   gap: 0.75rem;
   padding: 2rem;
-  color: var(--text-secondary);
+  color: var(--text-muted);
 }
 
-.spinner {
-  width: 20px;
-  height: 20px;
-  border: 2px solid rgba(100, 150, 255, 0.3);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
 
 .no-results {
   padding: 2rem;
   text-align: center;
-  color: var(--text-secondary);
+  color: var(--text-muted);
 }
 
 .result-card {
@@ -378,7 +409,7 @@ defineExpose({
 
 .result-title {
   font-weight: 500;
-  color: var(--text-primary);
+  color: var(--text-main);
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
@@ -390,7 +421,7 @@ defineExpose({
   display: flex;
   gap: 1rem;
   font-size: 0.875rem;
-  color: var(--text-secondary);
+  color: var(--text-muted);
 }
 
 .result-artist {
@@ -443,6 +474,14 @@ defineExpose({
 }
 
 @media (max-width: 768px) {
+  .input-group {
+    flex-direction: column;
+  }
+
+  .result-card {
+    gap: 0.75rem;
+  }
+
   .result-thumbnail {
     width: 80px;
     height: 60px;

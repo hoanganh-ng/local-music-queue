@@ -3,8 +3,8 @@
     <div class="queue-header">
       <h3>Up Next</h3>
       <div class="header-controls">
-        <span v-if="currentUser" class="priority-badge">
-          ⚡ {{ currentUser.priority_balance }}
+        <span v-if="currentUser" class="priority-badge" :aria-label="`${currentUser.priority_balance} priority tokens`">
+          <span aria-hidden="true">⚡</span> {{ currentUser.priority_balance }}
         </span>
         <button v-if="canControl && queue.length > 0" class="clear-btn" @click="handleClear">Clear</button>
         <span class="queue-count">{{ queue.length }} songs</span>
@@ -23,8 +23,8 @@
           <div class="item-top-row">
             <div class="item-number">{{ index + 1 }}</div>
             <div class="item-title">
-              <span v-if="song.is_prioritized" class="priority-icon">⚡</span>
-              <span v-if="song.added_by === 'system:autoqueue'" class="auto-badge">⚡ auto</span>
+              <span v-if="song.is_prioritized" class="priority-icon" aria-label="Prioritized">⚡</span>
+              <span v-if="song.added_by === 'system:autoqueue'" class="auto-badge" aria-label="Added by radio mode">📻 auto</span>
               {{ song.title || song.url }}
             </div>
             <button v-if="canControl" class="remove-btn" @click="handleRemove(index)" title="Remove from queue">
@@ -76,6 +76,8 @@ import { computed, ref } from 'vue'
 import { api } from '../../services/api'
 import { globalStore } from '../../store'
 import VoteButton from './VoteButton.vue'
+import { useToast } from '../../composables/useToast'
+import { useConfirm } from '../../composables/useConfirm'
 
 const props = defineProps({
   queue: {
@@ -98,6 +100,8 @@ const props = defineProps({
 
 const currentUser = computed(() => globalStore.currentUser)
 const prioritizingIndex = ref(null)
+const toast = useToast()
+const { confirm } = useConfirm()
 
 function shouldShowPrioritizeButton(song) {
   if (!currentUser.value) return false
@@ -136,9 +140,13 @@ function getPrioritizeTooltip(song) {
 async function handlePrioritize(indexInQueue) {
   const fullIndex = props.currentIndex + 1 + indexInQueue
 
-  if (!confirm('Use 1 priority token to move this song to the front?')) {
-    return
-  }
+  const accepted = await confirm({
+    title: 'Bump this song?',
+    message: 'Use 1 priority token to move this song to the front of the queue.',
+    confirmLabel: 'Use token'
+  })
+
+  if (!accepted) return
 
   prioritizingIndex.value = indexInQueue
 
@@ -156,7 +164,7 @@ async function handlePrioritize(indexInQueue) {
       message = 'This song is already prioritized'
     }
 
-    alert(message)
+    toast.error(message)
   } finally {
     prioritizingIndex.value = null
   }
@@ -169,16 +177,25 @@ async function handleRemove(indexInQueue) {
     await api.removeSong(fullIndex, globalStore.currentUser.display_name)
   } catch (err) {
     console.error('Remove song failed:', err)
+    toast.error('Could not remove song.')
   }
 }
 
 async function handleClear() {
-  if (confirm('Are you sure you want to clear all upcoming songs?')) {
-    try {
-      await api.clearQueue(globalStore.currentUser.display_name)
-    } catch (err) {
-      console.error('Clear queue failed:', err)
-    }
+  const accepted = await confirm({
+    title: 'Clear queue?',
+    message: 'Remove all upcoming songs from the queue.',
+    confirmLabel: 'Clear queue',
+    danger: true
+  })
+
+  if (!accepted) return
+
+  try {
+    await api.clearQueue(globalStore.currentUser.display_name)
+  } catch (err) {
+    console.error('Clear queue failed:', err)
+    toast.error('Could not clear queue.')
   }
 }
 
@@ -411,11 +428,12 @@ function queueIndexFor(upNextIndex) {
   justify-content: center;
   border-radius: 4px;
   transition: all 0.2s ease;
-  opacity: 0;
+  opacity: 0.65;
   flex-shrink: 0;
 }
 
-.queue-item:hover .remove-btn {
+.queue-item:hover .remove-btn,
+.remove-btn:focus-visible {
   opacity: 1;
 }
 

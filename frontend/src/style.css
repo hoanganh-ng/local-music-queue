@@ -9,6 +9,22 @@
   --accent: #4361ee;
   --accent-hover: #4cc9f0;
   --danger: #ef233c;
+  --success: #2ecc71;
+  --warning: #f39c12;
+  --info: #4cc9f0;
+
+  /* Spacing */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  /* Surfaces */
+  --surface-inset: rgba(10, 14, 23, 0.5);
+  --surface-hover: rgba(255, 255, 255, 0.08);
+  --focus-ring: 0 0 0 3px rgba(76, 201, 240, 0.35);
 
   /* Glassmorphism Tokens */
   --glass-bg: var(--navy-panel);
@@ -69,6 +85,14 @@ button {
   font-family: inherit;
 }
 
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 a {
   color: var(--accent);
   text-decoration: none;
@@ -87,4 +111,15 @@ a:hover {
 
 .animate-fade-in {
   animation: fadeIn 0.4s ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
 }

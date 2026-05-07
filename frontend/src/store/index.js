@@ -32,6 +32,11 @@ export const globalStore = reactive({
   },
   voteSessions: {}, // key: session.id → session object
   autoQueueConfig: { enabled: false, strategy: 'related' }, // auto-queue config state
+  connectionStatus: 'disconnected',
+
+  setConnectionStatus(status) {
+    this.connectionStatus = status
+  },
 
   setUser(user) {
     this.currentUser = user
@@ -46,12 +51,12 @@ export const globalStore = reactive({
 
     // Map backend 'songs' to our 'queue' (Up Next)
     // and derive 'current_song' from 'current_index'
-    const songs = newState.songs || []
-    const currentIndex = newState.current_index !== undefined ? newState.current_index : -1
+    const songs = newState.songs || (newState.current_song ? [newState.current_song, ...(newState.queue || [])] : (newState.queue || []))
+    const currentIndex = newState.current_index !== undefined ? newState.current_index : (newState.current_song ? 0 : -1)
 
     // Map backend 'idle' to 'stopped' for UI consistency
     this.queueState.status = newState.status === 'idle' ? 'stopped' : (newState.status || this.queueState.status)
-    this.queueState.history = newState.history.map((s) => ({ ...s, key: md5(s.timestamp + s.type) })) || this.queueState.history
+    this.queueState.history = (newState.history || this.queueState.history || []).map((s) => ({ ...s, key: md5(s.timestamp + s.type) }))
 
     if (currentIndex >= 0 && currentIndex < songs.length) {
       this.queueState.current_song = songs[currentIndex]
@@ -167,10 +172,6 @@ export const globalStore = reactive({
     } else {
       this.queueState.queue = songs
     }
-  },
-
-  updatePlaybackStatus(status) {
-    this.queueState.status = status === 'idle' ? 'stopped' : status
   },
 
   // NEW: Handle volume change event

@@ -7,13 +7,26 @@
       :type="type"
       :placeholder="placeholder"
       :value="modelValue"
-      @input="$emit('update:modelValue', $event.target.value)"
-      @keyup.enter="$emit('enter')"
+      :role="role"
+      :aria-expanded="ariaExpanded"
+      :aria-controls="ariaControls"
+      :aria-activedescendant="ariaActivedescendant"
+      :aria-autocomplete="ariaAutocomplete"
+      @input="handleInput"
+      @keydown="$emit('keydown', $event)"
+      @keyup.enter="$emit('enter', $event)"
     />
   </div>
 </template>
 
 <script setup>
+const emit = defineEmits(['update:modelValue', 'input', 'enter', 'keydown'])
+
+function handleInput(event) {
+  emit('update:modelValue', event.target.value)
+  emit('input', event)
+}
+
 defineProps({
   modelValue: {
     type: [String, Number],
@@ -34,10 +47,29 @@ defineProps({
   placeholder: {
     type: String,
     default: ''
+  },
+  role: {
+    type: String,
+    default: undefined
+  },
+  ariaExpanded: {
+    type: [String, Boolean],
+    default: undefined
+  },
+  ariaControls: {
+    type: String,
+    default: undefined
+  },
+  ariaActivedescendant: {
+    type: String,
+    default: undefined
+  },
+  ariaAutocomplete: {
+    type: String,
+    default: undefined
   }
 })
 
-defineEmits(['update:modelValue', 'enter'])
 </script>
 
 <style scoped>

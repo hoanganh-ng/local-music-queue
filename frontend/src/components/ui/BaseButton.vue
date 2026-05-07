@@ -4,8 +4,12 @@
     :class="{
       'variant-primary': variant === 'primary',
       'variant-secondary': variant === 'secondary',
-      'variant-danger': variant === 'danger'
+      'variant-danger': variant === 'danger',
+      'is-loading': loading
     }"
+    :type="type"
+    :disabled="disabled || loading"
+    :aria-busy="loading ? 'true' : undefined"
     @click="$emit('click', $event)"
   >
     <slot></slot>
@@ -16,7 +20,19 @@
 defineProps({
   variant: {
     type: String,
-    default: 'primary' // 'primary', 'secondary', 'danger'
+    default: 'primary'
+  },
+  type: {
+    type: String,
+    default: 'button'
+  },
+  disabled: {
+    type: Boolean,
+    default: false
+  },
+  loading: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -89,6 +105,11 @@ defineEmits(['click'])
 .base-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+  transform: none;
+}
+
+.base-button.is-loading {
+  cursor: wait;
   transform: none;
 }
 </style>

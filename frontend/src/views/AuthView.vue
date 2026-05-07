@@ -21,7 +21,11 @@
            data-logo_alignment="left">
       </div>
 
-      <div v-if="error" class="error-message">
+      <div v-if="isLoading" class="loading-message" role="status">
+        Signing in...
+      </div>
+
+      <div v-if="error" class="error-message" role="alert">
         {{ error }}
       </div>
     </div>
@@ -36,16 +40,21 @@ import { api } from '../services/api'
 
 const router = useRouter()
 const error = ref('')
+const isLoading = ref(false)
 const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID
 
 onMounted(() => {
   window.handleGoogleCallback = async (response) => {
+    error.value = ''
+    isLoading.value = true
     try {
       const user = await api.loginWithGoogle(response.credential)
       globalStore.setUser(user)
       router.push({ name: 'Dashboard' })
     } catch (err) {
       error.value = err.message || "Failed to authenticate"
+    } finally {
+      isLoading.value = false
     }
   }
 })
@@ -83,6 +92,15 @@ onMounted(() => {
 .auth-header p {
   color: var(--text-muted);
   font-size: 0.875rem;
+}
+
+.loading-message {
+  color: var(--accent-hover);
+  font-size: 0.875rem;
+  text-align: center;
+  padding: 0.5rem;
+  background: rgba(76, 201, 240, 0.1);
+  border-radius: var(--radius-sm);
 }
 
 .error-message {

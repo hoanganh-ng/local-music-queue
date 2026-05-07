@@ -5,6 +5,9 @@
         <h2>Local Music Queue</h2>
       </div>
       <div class="user-info">
+        <span class="connection-badge" :class="connectionBadgeClass">
+          <span aria-live="polite">{{ connectionLabel }}</span>
+        </span>
         <span class="user-role" :class="roleBadgeClass">
           {{ roleBadgeLabel }}
         </span>
@@ -59,6 +62,8 @@
         />
       </aside>
     </main>
+    <ToastContainer />
+    <ConfirmDialog />
   </div>
 </template>
 
@@ -73,8 +78,12 @@ import ActivityLog from '../components/dashboard/ActivityLog.vue'
 import NowPlaying from '../components/dashboard/NowPlaying.vue'
 import QueueList from '../components/dashboard/QueueList.vue'
 import SubmitForm from '../components/forms/SubmitForm.vue'
+import ToastContainer from '../components/ui/ToastContainer.vue'
+import ConfirmDialog from '../components/ui/ConfirmDialog.vue'
+import { useToast } from '../composables/useToast'
 
 const router = useRouter()
+const toast = useToast()
 
 const currentUser = computed(() => globalStore.currentUser)
 const isHost = computed(() => currentUser.value?.role === 'host')
@@ -93,6 +102,16 @@ const roleBadgeLabel = computed(() => {
   if (role === 'admin') return 'Admin'
   return 'Guest'
 })
+
+const connectionLabel = computed(() => {
+  const status = globalStore.connectionStatus
+  if (status === 'connected') return 'Connected'
+  if (status === 'connecting') return 'Connecting'
+  if (status === 'reconnecting') return 'Reconnecting'
+  return 'Offline'
+})
+
+const connectionBadgeClass = computed(() => `connection-${globalStore.connectionStatus}`)
 
 const submitFormRef = ref(null)
 const autoQueueEnabled = ref(false)
@@ -114,6 +133,7 @@ onMounted(async () => {
     globalStore.updateQueueState(state)
   } catch (e) {
     console.error("Failed to fetch initial queue:", e)
+    toast.error('Could not load queue. Check backend connection.')
   }
 
   // Fetch auto-queue status
@@ -176,6 +196,7 @@ const toggleAutoQueue = async () => {
     autoQueueEnabled.value = newEnabled
   } catch (e) {
     console.error("Failed to toggle auto-queue:", e)
+    toast.error('Could not update radio mode.')
   }
 }
 </script>
@@ -210,12 +231,32 @@ const toggleAutoQueue = async () => {
   gap: 1rem;
 }
 
+.connection-badge,
 .user-role {
   font-size: 0.75rem;
   padding: 0.2rem 0.6rem;
   border-radius: var(--radius-sm);
   font-weight: 700;
   text-transform: uppercase;
+}
+
+.connection-connected {
+  background: rgba(46, 204, 113, 0.18);
+  color: var(--success);
+  border: 1px solid rgba(46, 204, 113, 0.4);
+}
+
+.connection-connecting,
+.connection-reconnecting {
+  background: rgba(243, 156, 18, 0.18);
+  color: var(--warning);
+  border: 1px solid rgba(243, 156, 18, 0.4);
+}
+
+.connection-disconnected {
+  background: rgba(239, 35, 60, 0.16);
+  color: var(--danger);
+  border: 1px solid rgba(239, 35, 60, 0.4);
 }
 
 .role-host {
@@ -369,14 +410,43 @@ const toggleAutoQueue = async () => {
     overflow-y: auto;
   }
   
+  .top-nav {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .user-info {
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    width: 100%;
+  }
+
   .col-left, .col-right, .col-center {
     max-width: 100%;
     min-width: auto;
   }
-  
-  /* Give fixed heights to side columns on mobile so they don't grow infinitely */
-  .col-left { order: 3; height: 300px; flex: none; }
-  .col-center { order: 1; min-height: 500px; }
-  .col-right { order: 2; height: 300px; flex: none; }
+
+  .col-center { order: 1; }
+  .col-right { order: 2; min-height: min(70vh, 520px); }
+  .col-left { order: 3; min-height: 260px; }
+}
+
+@media (max-width: 600px) {
+  .dashboard-view {
+    padding: 0.75rem;
+  }
+
+  .top-nav {
+    padding: 1rem;
+  }
+
+  .toggle-label,
+  .user-name {
+    max-width: 9rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 </style>

@@ -25,6 +25,7 @@ class WebSocketClient {
     if (this.ws || this.isConnecting) return
 
     this.isConnecting = true
+    globalStore.setConnectionStatus('connecting')
 
     // Get backend URL from environment and convert to WebSocket URL
     const API_BASE = import.meta.env.VITE_API_BASE_URL || 'https://localhost:443'
@@ -42,6 +43,7 @@ class WebSocketClient {
     this.ws.onopen = () => {
       console.log('WebSocket connected')
       this.isConnecting = false
+      globalStore.setConnectionStatus('connected')
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer)
         this.reconnectTimer = null
@@ -61,11 +63,13 @@ class WebSocketClient {
       console.log('WebSocket disconnected. Attempting to reconnect in 3 seconds...')
       this.ws = null
       this.isConnecting = false
+      globalStore.setConnectionStatus('reconnecting')
       this.scheduleReconnect()
     }
 
     this.ws.onerror = (error) => {
       console.error('WebSocket error:', error)
+      globalStore.setConnectionStatus('disconnected')
       this.ws.close()
     }
   }
@@ -212,7 +216,11 @@ class WebSocketClient {
     }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
     }
+    this.ws = null
+    this.isConnecting = false
+    globalStore.setConnectionStatus('disconnected')
   }
 }
 

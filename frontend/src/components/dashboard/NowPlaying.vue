@@ -22,17 +22,17 @@
 
         <!-- Volume Controls next to artwork -->
         <div v-if="canControl" class="volume-controls">
-          <BaseButton variant="secondary" @click="handleVolumeDown" title="Volume Down">
+          <BaseButton variant="secondary" @click="handleVolumeDown" title="Volume Down" aria-label="Volume down">
             Vol -
           </BaseButton>
-          <BaseButton variant="secondary" @click="handleVolumeUp" title="Volume Up">
+          <BaseButton variant="secondary" @click="handleVolumeUp" title="Volume Up" aria-label="Volume up">
             Vol +
           </BaseButton>
         </div>
       </div>
 
       <div class="song-info">
-        <h3 class="song-title">{{ currentSong.title }}</h3>
+        <h3 class="song-title" :title="currentSong.title">{{ currentSong.title }}</h3>
         <p class="song-meta">Added by: <strong>{{ currentSong.added_by }}</strong></p>
       </div>
 
@@ -47,14 +47,14 @@
 
       <!-- Controls (Host or Admin) -->
       <div v-if="canControl" class="host-controls">
-        <BaseButton variant="secondary" @click="$emit('toggle-playback')">
+        <BaseButton variant="secondary" :aria-label="status === 'playing' ? 'Pause playback' : 'Start playback'" @click="$emit('toggle-playback')">
           <span v-if="status === 'playing'">Pause</span>
           <span v-else>Play</span>
         </BaseButton>
-        <BaseButton variant="primary" @click="handlePrev">
+        <BaseButton variant="primary" aria-label="Play previous song" @click="handlePrev">
           Previous
         </BaseButton>
-        <BaseButton variant="primary" @click="$emit('skip')">
+        <BaseButton variant="primary" aria-label="Skip current song" @click="$emit('skip')">
           Skip
         </BaseButton>
       </div>

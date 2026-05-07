@@ -1,6 +1,7 @@
 <template>
   <button
     :disabled="disabled || hasVoted"
+    :aria-label="buttonLabel"
     @click="handleVote"
     class="vote-btn"
     :class="{
@@ -78,6 +79,16 @@ export default {
       return session.value.voted_by && session.value.voted_by[globalStore.currentUser.id] === true
     })
 
+    const buttonLabel = computed(() => {
+      const action = props.voteType === 'skip' ? 'skip this song' : 'prioritize this song'
+      if (hasVoted.value) return `Voted to ${action}`
+      if (session.value) {
+        const votes = session.value.voted_by ? Object.keys(session.value.voted_by).length : 0
+        return `Vote to ${action}. ${votes} of ${session.value.threshold} votes, ${countdown.value} seconds left`
+      }
+      return `Vote to ${action}`
+    })
+
     const startCountdown = () => {
       if (countdownInterval) {
         clearInterval(countdownInterval)
@@ -147,6 +158,7 @@ export default {
     return {
       session,
       hasVoted,
+      buttonLabel,
       countdown,
       handleVote
     }
@@ -201,7 +213,7 @@ export default {
 }
 
 .vote-btn small {
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   opacity: 0.9;
   margin-left: 0.25rem;
 }
