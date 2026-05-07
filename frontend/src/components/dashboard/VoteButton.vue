@@ -169,16 +169,17 @@ export default {
 <style scoped>
 .vote-btn {
   padding: 0.4rem 0.75rem;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(0, 212, 255, 0.38);
+  border-radius: 0;
+  background: rgba(0, 212, 255, 0.06);
   backdrop-filter: blur(10px);
   cursor: pointer;
   font-size: 0.8rem;
-  font-weight: 500;
-  color: rgba(255, 255, 255, 0.8);
+  font-weight: 800;
+  color: var(--accent-hover);
   transition: all 0.2s ease;
   white-space: nowrap;
+  clip-path: var(--cyber-chamfer);
 }
 
 .vote-btn:hover:not(:disabled) {
@@ -194,10 +195,10 @@ export default {
 }
 
 .vote-btn--active {
-  background: rgba(33, 150, 243, 0.15);
-  border-color: rgba(33, 150, 243, 0.4);
-  color: #64b5f6;
-  box-shadow: 0 0 8px rgba(33, 150, 243, 0.3);
+  background: rgba(255, 0, 255, 0.14);
+  border-color: rgba(255, 0, 255, 0.52);
+  color: var(--cyber-magenta);
+  box-shadow: var(--glow-magenta);
 }
 
 .vote-btn--active:hover:not(:disabled) {
@@ -206,10 +207,10 @@ export default {
 }
 
 .vote-btn--voted {
-  background: rgba(76, 175, 80, 0.15);
-  border-color: rgba(76, 175, 80, 0.4);
-  color: #81c784;
-  box-shadow: 0 0 8px rgba(76, 175, 80, 0.3);
+  background: rgba(0, 255, 136, 0.14);
+  border-color: rgba(0, 255, 136, 0.52);
+  color: var(--accent);
+  box-shadow: var(--glow);
 }
 
 .vote-btn small {

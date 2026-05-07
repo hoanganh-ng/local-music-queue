@@ -2,7 +2,7 @@
   <div class="dashboard-view app-container">
     <header class="top-nav glass-panel">
       <div class="brand">
-        <h2>Local Music Queue</h2>
+        <h2 class="cyber-glitch">Local Music Queue</h2>
       </div>
       <div class="user-info">
         <span class="connection-badge" :class="connectionBadgeClass">
@@ -30,10 +30,17 @@
     </header>
 
     <main class="dashboard-content">
-      <!-- Left Column: Activity Log -->
-      <aside class="col-left">
-        <ActivityLog :logs="globalStore.queueState.history || []" />
+
+      <!--Left Column: Queue List -->
+      <aside class="col-right">
+        <QueueList
+          :queue="globalStore.queueState.queue || []"
+          :isHost="isHost"
+          :canControl="canControl"
+          :currentIndex="globalStore.queueState.current_index"
+        />
       </aside>
+      
 
       <!-- Center Column: Player and Input -->
       <section class="col-center">
@@ -52,14 +59,9 @@
         </div>
       </section>
 
-      <!-- Right Column: Queue List -->
-      <aside class="col-right">
-        <QueueList
-          :queue="globalStore.queueState.queue || []"
-          :isHost="isHost"
-          :canControl="canControl"
-          :currentIndex="globalStore.queueState.current_index"
-        />
+      <!-- Right Column: Activity Log -->
+      <aside class="col-left">
+        <ActivityLog :logs="globalStore.queueState.history || []" :currentUserName="currentUser?.display_name" />
       </aside>
     </main>
     <ToastContainer />
@@ -214,15 +216,12 @@ const toggleAutoQueue = async () => {
   padding: 1rem 2rem;
   border-radius: var(--radius-md);
   margin-bottom: 0.5rem;
+  border-color: rgba(0, 212, 255, 0.34);
 }
 
 .brand h2 {
   font-size: 1.25rem;
   margin: 0;
-  color: var(--text-main);
-  background: linear-gradient(90deg, var(--accent) 0%, var(--accent-hover) 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
 }
 
 .user-info {
@@ -299,9 +298,9 @@ const toggleAutoQueue = async () => {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  background: rgba(149, 165, 166, 0.1);
-  color: #95a5a6;
-  border: 1px solid rgba(149, 165, 166, 0.3);
+  background: rgba(0, 212, 255, 0.08);
+  color: var(--accent-hover);
+  border: 1px solid rgba(0, 212, 255, 0.35);
   border-radius: var(--radius-sm);
   padding: 0.35rem 0.75rem;
   font-size: 0.75rem;
@@ -316,9 +315,9 @@ const toggleAutoQueue = async () => {
 }
 
 .radio-mode-toggle.active {
-  background: rgba(46, 204, 113, 0.15);
-  color: #2ecc71;
-  border-color: rgba(46, 204, 113, 0.4);
+  background: rgba(0, 255, 136, 0.14);
+  color: var(--accent);
+  border-color: rgba(0, 255, 136, 0.55);
 }
 
 .radio-mode-toggle.active:hover {
@@ -342,7 +341,7 @@ const toggleAutoQueue = async () => {
   position: relative;
   width: 32px;
   height: 16px;
-  background: rgba(149, 165, 166, 0.3);
+  background: rgba(0, 212, 255, 0.3);
   border-radius: 8px;
   transition: background 0.3s ease;
 }
@@ -357,7 +356,7 @@ const toggleAutoQueue = async () => {
   left: 2px;
   width: 12px;
   height: 12px;
-  background: #95a5a6;
+  background: var(--accent-hover);
   border-radius: 50%;
   transition: all 0.3s ease;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
@@ -365,32 +364,29 @@ const toggleAutoQueue = async () => {
 
 .radio-mode-toggle.active .toggle-slider {
   transform: translateX(16px);
-  background: #2ecc71;
+  background: var(--accent);
 }
 
 .dashboard-content {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(260px, 0.85fr) minmax(420px, 1.7fr) minmax(280px, 1fr);
   flex-grow: 1;
-  gap: 1.5rem;
-  overflow: hidden; /* prevents stretching */
+  min-height: 0;
+  gap: 1.25rem;
+  overflow: hidden;
 }
 
-/* 3-Column Layout */
 .col-left,
-.col-right {
-  flex: 1;
-  min-width: 250px;
-  max-width: 350px;
+.col-right,
+.col-center {
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
 .col-center {
-  flex: 2;
-  display: flex;
-  flex-direction: column;
   gap: 1rem;
-  min-width: 400px;
 }
 
 .player-wrapper {
@@ -400,12 +396,15 @@ const toggleAutoQueue = async () => {
 }
 
 .input-wrapper {
+  position: relative;
+  z-index: 20;
   flex-shrink: 0;
 }
 
 /* Responsive adjustments */
 @media (max-width: 1024px) {
   .dashboard-content {
+    display: flex;
     flex-direction: column;
     overflow-y: auto;
   }

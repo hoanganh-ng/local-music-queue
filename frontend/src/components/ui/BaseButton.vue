@@ -46,65 +46,74 @@ defineEmits(['click'])
   justify-content: center;
   padding: 0.75rem 1.5rem;
   border-radius: var(--radius-sm);
-  font-weight: 600;
-  font-size: 1rem;
-  transition: all 0.2s ease;
+  font-weight: 800;
+  font-size: 0.9rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition: all 0.16s ease;
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
   outline: none;
+  clip-path: var(--cyber-chamfer);
 }
 
 .variant-primary {
-  background: rgba(67, 97, 238, 0.2);
-  border: 1px solid rgba(67, 97, 238, 0.4);
-  color: var(--accent-hover);
-  box-shadow: 0 4px 15px rgba(67, 97, 238, 0.15);
+  background: rgba(0, 255, 136, 0.08);
+  border: 1px solid rgba(0, 255, 136, 0.68);
+  color: var(--accent);
+  box-shadow: var(--glow-sm);
+  text-shadow: 0 0 10px rgba(0, 255, 136, 0.65);
 }
 
-.variant-primary:hover {
-  background: rgba(67, 97, 238, 0.4);
-  border-color: rgba(67, 97, 238, 0.6);
+.variant-primary:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--navy-bg);
   transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(67, 97, 238, 0.25);
+  box-shadow: var(--glow);
+  text-shadow: none;
 }
 
-.variant-primary:active {
+.variant-primary:active:not(:disabled) {
   transform: translateY(0);
 }
 
 .variant-secondary {
-  background: var(--glass-bg);
-  border: var(--glass-border);
-  color: var(--text-main);
+  background: rgba(0, 212, 255, 0.06);
+  border: 1px solid rgba(0, 212, 255, 0.45);
+  color: var(--accent-hover);
+  box-shadow: var(--glow-cyan);
 }
 
-.variant-secondary:hover {
-  background: var(--navy-panel-hover);
+.variant-secondary:hover:not(:disabled) {
+  background: rgba(0, 212, 255, 0.16);
   transform: translateY(-2px);
 }
 
-.variant-secondary:active {
+.variant-secondary:active:not(:disabled) {
   transform: translateY(0);
 }
 
 .variant-danger {
-  background: rgba(239, 35, 60, 0.2);
-  border: 1px solid rgba(239, 35, 60, 0.4);
-  color: #ff4d6d;
+  background: rgba(255, 51, 102, 0.08);
+  border: 1px solid rgba(255, 51, 102, 0.62);
+  color: var(--danger);
+  box-shadow: 0 0 10px rgba(255, 51, 102, 0.35);
 }
 
-.variant-danger:hover {
-  background: rgba(239, 35, 60, 0.4);
+.variant-danger:hover:not(:disabled) {
+  background: var(--danger);
+  color: var(--navy-bg);
   transform: translateY(-2px);
 }
 
-.variant-danger:active {
+.variant-danger:active:not(:disabled) {
   transform: translateY(0);
 }
 
 .base-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+  filter: grayscale(0.8);
   transform: none;
 }
 

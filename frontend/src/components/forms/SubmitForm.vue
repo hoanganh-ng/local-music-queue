@@ -19,6 +19,7 @@
           v-if="showResults"
           id="search-results-list"
           class="search-results"
+          :class="{ 'search-results--above': resultsAbove }"
           role="listbox"
           aria-label="YouTube search results"
         >
@@ -86,7 +87,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import BaseInput from '../ui/BaseInput.vue'
 import BaseButton from '../ui/BaseButton.vue'
 import LoadingSpinner from '../ui/LoadingSpinner.vue'
@@ -116,6 +117,7 @@ const isSearching = ref(false)
 const showResults = ref(false)
 const selectedIndex = ref(-1)
 const searchDebounceTimer = ref(null)
+const resultsAbove = ref(false)
 
 const ytRegex = /^(https?\:\/\/)?(www\.youtube\.com|youtu\.?be)\/.+$/
 
@@ -134,10 +136,25 @@ const closeResults = () => {
   selectedIndex.value = -1
 }
 
+const updateResultsPlacement = async () => {
+  await nextTick()
+  const input = formRef.value?.querySelector('input')
+  if (!input) return
+
+  const rect = input.getBoundingClientRect()
+  const spaceBelow = window.innerHeight - rect.bottom
+  const spaceAbove = rect.top
+  resultsAbove.value = spaceBelow < 360 && spaceAbove > spaceBelow
+}
+
 const handleClickOutside = (event) => {
   if (formRef.value && !formRef.value.contains(event.target)) {
     closeResults()
   }
+}
+
+const handleViewportChange = () => {
+  if (showResults.value) updateResultsPlacement()
 }
 
 const handleInput = () => {
@@ -167,6 +184,7 @@ const performSearch = async (query) => {
   isSearching.value = true
   showResults.value = true
   selectedIndex.value = -1
+  updateResultsPlacement()
 
   try {
     const results = await api.searchYouTube(query)
@@ -287,10 +305,14 @@ const submit = async (metadata = null) => {
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
+  window.addEventListener('resize', handleViewportChange)
+  window.addEventListener('scroll', handleViewportChange, true)
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
+  window.removeEventListener('resize', handleViewportChange)
+  window.removeEventListener('scroll', handleViewportChange, true)
   if (completionTimeout.value) {
     clearTimeout(completionTimeout.value)
   }
@@ -310,6 +332,9 @@ defineExpose({
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+  overflow: visible;
+  clip-path: none;
+  z-index: 20;
 }
 
 .input-group {
@@ -328,14 +353,20 @@ defineExpose({
   top: calc(100% + 0.5rem);
   left: 0;
   right: 0;
-  background: rgba(20, 25, 45, 0.98);
+  background: rgba(7, 7, 13, 0.98);
   backdrop-filter: blur(20px);
-  border: 1px solid rgba(100, 150, 255, 0.3);
-  border-radius: 0.5rem;
+  border: 1px solid rgba(0, 255, 136, 0.38);
+  border-radius: 0;
+  clip-path: var(--cyber-chamfer);
   max-height: 350px;
   overflow-y: auto;
   z-index: 100;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+}
+
+.search-results--above {
+  top: auto;
+  bottom: calc(100% + 0.5rem);
 }
 
 .search-results::-webkit-scrollbar {
@@ -377,7 +408,7 @@ defineExpose({
   padding: 0.75rem;
   cursor: pointer;
   transition: background 0.2s ease;
-  border-bottom: 1px solid rgba(100, 150, 255, 0.1);
+  border-bottom: 1px solid rgba(0, 255, 136, 0.12);
   align-items: center;
 }
 
@@ -387,7 +418,8 @@ defineExpose({
 
 .result-card:hover,
 .result-card.selected {
-  background: rgba(100, 150, 255, 0.1);
+  background: rgba(0, 255, 136, 0.1);
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .result-thumbnail {

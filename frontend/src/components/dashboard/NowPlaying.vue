@@ -1,7 +1,7 @@
 <template>
   <div class="now-playing glass-panel">
     <div class="player-header">
-      <h2>Now Playing</h2>
+      <h2 class="cyber-glitch">Now Playing</h2>
       <div v-if="currentSong" class="status-badge" :class="status">
         {{ status.toUpperCase() }}
       </div>
@@ -22,11 +22,11 @@
 
         <!-- Volume Controls next to artwork -->
         <div v-if="canControl" class="volume-controls">
-          <BaseButton variant="secondary" @click="handleVolumeDown" title="Volume Down" aria-label="Volume down">
-            Vol -
-          </BaseButton>
           <BaseButton variant="secondary" @click="handleVolumeUp" title="Volume Up" aria-label="Volume up">
             Vol +
+          </BaseButton>
+          <BaseButton variant="secondary" @click="handleVolumeDown" title="Volume Down" aria-label="Volume down">
+            Vol -
           </BaseButton>
         </div>
       </div>
@@ -305,9 +305,8 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
 
 .player-header h2 {
   font-size: 1.5rem;
-  font-weight: 700;
+  font-weight: 900;
   margin: 0;
-  color: var(--accent);
 }
 
 .status-badge {
@@ -357,9 +356,11 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
   aspect-ratio: 16 / 9;
   border-radius: var(--radius-md);
   overflow: hidden;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--glow-cyan), 0 18px 40px rgba(0, 0, 0, 0.72);
   background: #000;
   position: relative;
+  clip-path: var(--cyber-chamfer);
+  border: 1px solid rgba(0, 212, 255, 0.35);
 }
 
 .artwork-img {
@@ -371,6 +372,14 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
 
 .artwork-container:hover .artwork-img {
   transform: scale(1.05);
+}
+
+.artwork-container::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.05) 0 1px, transparent 1px 5px);
 }
 
 .youtube-wrapper {
@@ -389,8 +398,9 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
 .song-title {
   font-size: 1.5rem;
   font-weight: 700;
-  color: var(--text-main);
+  color: var(--accent);
   margin-bottom: 0.5rem;
+  text-shadow: var(--glow-sm);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

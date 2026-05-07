@@ -1,6 +1,7 @@
 <template>
   <div class="input-wrapper">
     <label v-if="label" :for="id" class="input-label">{{ label }}</label>
+    <span class="terminal-prefix" aria-hidden="true">&gt;</span>
     <input
       :id="id"
       class="base-input glass-panel"
@@ -74,37 +75,51 @@ defineProps({
 
 <style scoped>
 .input-wrapper {
+  position: relative;
   display: flex;
   flex-direction: column;
   width: 100%;
 }
 
 .input-label {
-  font-size: 0.875rem;
-  color: var(--text-muted);
+  font-size: 0.78rem;
+  color: var(--accent-hover);
   margin-bottom: 0.5rem;
-  font-weight: 500;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.terminal-prefix {
+  position: absolute;
+  left: 0.95rem;
+  bottom: 0.72rem;
+  z-index: 1;
+  color: var(--accent);
+  font-weight: 900;
+  text-shadow: var(--glow-sm);
 }
 
 .base-input {
   width: 100%;
-  padding: 0.75rem 1rem;
+  padding: 0.75rem 1rem 0.75rem 2rem;
   font-size: 1rem;
   color: var(--text-main);
-  background: rgba(10, 14, 23, 0.4); /* Darker inset look */
-  border: 1px solid var(--navy-border);
+  background: var(--surface-inset);
+  border: 1px solid rgba(0, 255, 136, 0.35);
   border-radius: var(--radius-sm);
-  transition: all 0.2s ease;
+  transition: all 0.18s ease;
   outline: none;
+  clip-path: var(--cyber-chamfer);
 }
 
 .base-input::placeholder {
-  color: rgba(138, 155, 179, 0.5);
+  color: rgba(138, 166, 154, 0.65);
 }
 
 .base-input:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(67, 97, 238, 0.2);
-  background: rgba(10, 14, 23, 0.6);
+  box-shadow: var(--focus-ring);
+  background: rgba(7, 7, 13, 0.9);
 }
 </style>

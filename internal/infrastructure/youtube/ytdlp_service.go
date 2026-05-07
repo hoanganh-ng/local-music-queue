@@ -18,10 +18,10 @@ type cacheEntry struct {
 
 // YTDLPService implements the YouTubeService interface using yt-dlp.
 type YTDLPService struct {
-	binaryPath  string
-	cache       map[string]cacheEntry
-	cacheMu     sync.RWMutex
-	cacheTTL    time.Duration
+	binaryPath string
+	cache      map[string]cacheEntry
+	cacheMu    sync.RWMutex
+	cacheTTL   time.Duration
 }
 
 // NewYTDLPService creates a new yt-dlp service.
@@ -38,18 +38,19 @@ func NewYTDLPService(binaryPath string) *YTDLPService {
 
 // YTDLPOutput represents the relevant parts of yt-dlp's JSON output.
 type YTDLPOutput struct {
-	ID        string  `json:"id"`
-	Title     string  `json:"title"`
-	Uploader  string  `json:"uploader"`
-	Duration  float64 `json:"duration"`
-	Thumbnail string  `json:"thumbnail"`
-	WebpageURL string `json:"webpage_url"`
+	ID         string  `json:"id"`
+	Title      string  `json:"title"`
+	Uploader   string  `json:"uploader"`
+	Duration   float64 `json:"duration"`
+	Thumbnail  string  `json:"thumbnail"`
+	WebpageURL string  `json:"webpage_url"`
 }
 
 // FetchMetadata uses yt-dlp to get song information.
 func (s *YTDLPService) FetchMetadata(ctx context.Context, url string) (*entity.Song, error) {
 	cmd := exec.CommandContext(ctx, s.binaryPath,
-		"--print-json",
+		"--print",
+		"%(.{id,title,uploader,duration,thumbnail,webpage_url})#j",
 		"--skip-download",
 		url,
 	)
@@ -96,7 +97,8 @@ func (s *YTDLPService) SearchYouTube(ctx context.Context, query string, maxResul
 
 	cmd := exec.CommandContext(ctx, s.binaryPath,
 		"--flat-playlist",
-		"--print-json",
+		"--print",
+		"%(.{id,title,uploader,duration,thumbnail,webpage_url})#j",
 		"--skip-download",
 		searchQuery,
 	)

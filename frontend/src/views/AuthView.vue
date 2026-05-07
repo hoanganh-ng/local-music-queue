@@ -2,8 +2,8 @@
   <div class="auth-container">
     <div class="auth-card glass-panel">
       <div class="auth-header">
-        <h1>Local Music Queue</h1>
-        <p>Sign in with your Google account</p>
+        <h1 class="cyber-glitch">Access Terminal</h1>
+        <p>Authenticate to enter Local Music Queue</p>
       </div>
 
       <div id="g_id_onload"
@@ -84,8 +84,7 @@ onMounted(() => {
 }
 
 .auth-header h1 {
-  font-size: 1.75rem;
-  color: var(--accent);
+  font-size: 1.9rem;
   margin-bottom: 0.5rem;
 }
 

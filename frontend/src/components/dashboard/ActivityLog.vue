@@ -1,12 +1,17 @@
 <template>
   <div class="activity-log glass-panel">
-    <h3 class="header">Activity Log</h3>
+    <h3 class="header cyber-glitch">Activity Log</h3>
     <div class="log-container" ref="logContainer">
       <div v-if="logs.length === 0" class="empty-state">
         No recent activity.
       </div>
       <TransitionGroup v-else name="log" tag="div">
-        <div v-for="log in logs" :key="log.key" class="log-entry">
+        <div
+          v-for="log in logs"
+          :key="log.key"
+          class="log-entry"
+          :class="{ 'log-entry--mine': isCurrentUserLog(log) }"
+        >
           <div class="message-bubble">
             <span class="user-name">{{ log.user }}</span>
             <span class="description">{{ log.description }}</span>
@@ -24,10 +29,18 @@ const props = defineProps({
   logs: {
     type: Array,
     default: () => []
+  },
+  currentUserName: {
+    type: String,
+    default: ''
   }
 })
 
 const logContainer = ref(null)
+
+const isCurrentUserLog = (log) => {
+  return props.currentUserName && log.user === props.currentUserName
+}
 
 // Auto-scroll to top when new logs arrive
 watch(() => props.logs, async () => {
@@ -46,6 +59,7 @@ watch(() => props.logs, async () => {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
   padding: 1.5rem;
   overflow: hidden;
 }
@@ -58,7 +72,8 @@ watch(() => props.logs, async () => {
 }
 
 .log-container {
-  flex-grow: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   padding-right: 0.5rem;
   display: flex;
@@ -99,19 +114,35 @@ watch(() => props.logs, async () => {
   margin-bottom: 0.5rem;
 }
 
+.log-entry--mine {
+  align-items: flex-end;
+}
+
+.log-entry--mine .message-bubble {
+  border-color: rgba(0, 255, 136, 0.34);
+  box-shadow: var(--glow-sm);
+  text-align: right;
+}
+
+.log-entry--mine .user-name {
+  color: var(--accent);
+}
+
 .message-bubble {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(0, 212, 255, 0.06);
   padding: 0.75rem 1rem;
-  border-radius: 12px;
-  border-bottom-left-radius: 4px;
+  border: 1px solid rgba(0, 212, 255, 0.22);
+  border-radius: 0;
   max-width: 90%;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-  transition: transform 0.2s ease;
+  transition: transform 0.2s ease, border-color 0.2s ease;
+  clip-path: var(--cyber-chamfer);
 }
 
 .message-bubble:hover {
   transform: translateY(-2px);
-  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(0, 212, 255, 0.55);
+  box-shadow: var(--glow-cyan);
 }
 
 .user-name {

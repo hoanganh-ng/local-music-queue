@@ -1,17 +1,20 @@
 :root {
-  /* Color Palette - Dark Navy Theme */
-  --navy-bg: #0a0e17;
-  --navy-panel: rgba(22, 33, 62, 0.65);
-  --navy-panel-hover: rgba(22, 33, 62, 0.85);
-  --navy-border: rgba(67, 85, 133, 0.3);
-  --text-main: #ffffff;
-  --text-muted: #8a9bb3;
-  --accent: #4361ee;
-  --accent-hover: #4cc9f0;
-  --danger: #ef233c;
-  --success: #2ecc71;
-  --warning: #f39c12;
-  --info: #4cc9f0;
+  /* Cyberpunk Palette */
+  --navy-bg: #07070d;
+  --navy-panel: rgba(18, 18, 26, 0.82);
+  --navy-panel-hover: rgba(28, 28, 46, 0.95);
+  --navy-border: rgba(0, 255, 136, 0.28);
+  --text-main: #f2fff8;
+  --text-muted: #8aa69a;
+  --accent: #00ff88;
+  --accent-hover: #00d4ff;
+  --danger: #ff3366;
+  --success: #00ff88;
+  --warning: #ffd166;
+  --info: #00d4ff;
+  --cyber-magenta: #ff00ff;
+  --cyber-card: #12121a;
+  --cyber-muted: #1c1c2e;
 
   /* Spacing */
   --space-1: 0.25rem;
@@ -22,23 +25,29 @@
   --space-6: 2rem;
 
   /* Surfaces */
-  --surface-inset: rgba(10, 14, 23, 0.5);
-  --surface-hover: rgba(255, 255, 255, 0.08);
-  --focus-ring: 0 0 0 3px rgba(76, 201, 240, 0.35);
+  --surface-inset: rgba(7, 7, 13, 0.72);
+  --surface-hover: rgba(0, 255, 136, 0.08);
+  --focus-ring: 0 0 0 2px rgba(0, 255, 136, 0.85), 0 0 16px rgba(0, 255, 136, 0.5);
 
-  /* Glassmorphism Tokens */
-  --glass-bg: var(--navy-panel);
+  /* Cyber Glass Tokens */
+  --glass-bg: linear-gradient(135deg, rgba(18, 18, 26, 0.92), rgba(10, 10, 15, 0.78));
   --glass-border: 1px solid var(--navy-border);
-  --glass-blur: blur(16px);
-  --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+  --glass-blur: blur(10px);
+  --glass-shadow: 0 0 0 1px rgba(0, 255, 136, 0.06), 0 16px 40px rgba(0, 0, 0, 0.55);
+  --glow-sm: 0 0 8px rgba(0, 255, 136, 0.35);
+  --glow: 0 0 10px rgba(0, 255, 136, 0.55), 0 0 28px rgba(0, 255, 136, 0.18);
+  --glow-magenta: 0 0 10px rgba(255, 0, 255, 0.55), 0 0 28px rgba(255, 0, 255, 0.18);
+  --glow-cyan: 0 0 10px rgba(0, 212, 255, 0.55), 0 0 28px rgba(0, 212, 255, 0.18);
+  --cyber-chamfer: polygon(0 10px, 10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%);
 
   /* Typography */
-  --font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  --font-family: 'JetBrains Mono', 'Fira Code', 'Share Tech Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-display: 'Orbitron', 'Share Tech Mono', var(--font-family);
 
   /* Border Radius */
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 24px;
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
   --radius-full: 9999px;
 }
 
@@ -53,22 +62,56 @@ body {
   background-color: var(--navy-bg);
   color: var(--text-main);
   min-height: 100vh;
-  /* subtle radial gradient for depth */
-  background-image: radial-gradient(circle at top right, rgba(67, 97, 238, 0.15) 0%, transparent 40%),
-                    radial-gradient(circle at bottom left, rgba(76, 201, 240, 0.1) 0%, transparent 40%);
+  background-image:
+    linear-gradient(rgba(0, 255, 136, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 212, 255, 0.028) 1px, transparent 1px),
+    radial-gradient(circle at top right, rgba(255, 0, 255, 0.18) 0%, transparent 36%),
+    radial-gradient(circle at bottom left, rgba(0, 255, 136, 0.12) 0%, transparent 42%);
+  background-size: 48px 48px, 48px 48px, auto, auto;
   overflow-x: hidden;
+  letter-spacing: 0.02em;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 4px);
+  mix-blend-mode: overlay;
+  opacity: 0.28;
+}
+
 /* Base Glassmorphism Utility */
 .glass-panel {
+  position: relative;
   background: var(--glass-bg);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
   border: var(--glass-border);
   box-shadow: var(--glass-shadow);
   border-radius: var(--radius-lg);
+  clip-path: var(--cyber-chamfer);
+}
+
+.glass-panel::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-top: 1px solid rgba(0, 255, 136, 0.45);
+  opacity: 0.6;
+}
+
+.cyber-glitch {
+  color: var(--text-main);
+  font-family: var(--font-display);
+  letter-spacing: 0.08em;
+  text-shadow: -1px 0 var(--cyber-magenta), 1px 0 var(--accent-hover), 0 0 18px rgba(0, 255, 136, 0.35);
+  text-transform: uppercase;
 }
 
 /* Layout Utilities */

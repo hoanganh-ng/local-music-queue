@@ -1,7 +1,7 @@
 <template>
   <div class="queue-list glass-panel">
     <div class="queue-header">
-      <h3>Up Next</h3>
+      <h3 class="cyber-glitch">Up Next</h3>
       <div class="header-controls">
         <span v-if="currentUser" class="priority-badge" :aria-label="`${currentUser.priority_balance} priority tokens`">
           <span aria-hidden="true">⚡</span> {{ currentUser.priority_balance }}
@@ -224,7 +224,6 @@ function queueIndexFor(upNextIndex) {
 
 .queue-header h3 {
   font-size: 1.25rem;
-  color: var(--text-main);
   margin: 0;
 }
 
@@ -286,15 +285,17 @@ function queueIndexFor(upNextIndex) {
   flex-direction: column;
   gap: 0.375rem;
   padding: 0.75rem 1rem;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid transparent;
+  background: rgba(7, 7, 13, 0.58);
+  border: 1px solid rgba(0, 255, 136, 0.16);
   border-radius: var(--radius-sm);
+  clip-path: var(--cyber-chamfer);
   transition: all 0.2s ease;
 }
 
 .queue-item:hover {
-  background: rgba(255, 255, 255, 0.05);
-  border-color: var(--navy-border);
+  background: rgba(0, 255, 136, 0.07);
+  border-color: rgba(0, 255, 136, 0.48);
+  box-shadow: var(--glow-sm);
   transform: translateX(4px);
 }
 

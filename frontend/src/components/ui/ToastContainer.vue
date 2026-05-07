@@ -48,23 +48,27 @@ const { toasts, removeToast } = useToast()
   gap: 1rem;
   padding: 0.875rem 1rem;
   color: var(--text-main);
-  background: rgba(16, 24, 45, 0.96);
+  background: rgba(7, 7, 13, 0.96);
   border: 1px solid var(--navy-border);
   border-radius: var(--radius-md);
   box-shadow: var(--glass-shadow);
   pointer-events: auto;
+  clip-path: var(--cyber-chamfer);
 }
 
 .toast--success {
-  border-color: rgba(46, 204, 113, 0.45);
+  border-color: rgba(0, 255, 136, 0.55);
+  box-shadow: var(--glow-sm);
 }
 
 .toast--error {
-  border-color: rgba(239, 35, 60, 0.5);
+  border-color: rgba(255, 51, 102, 0.58);
+  box-shadow: 0 0 14px rgba(255, 51, 102, 0.22);
 }
 
 .toast--info {
-  border-color: rgba(76, 201, 240, 0.45);
+  border-color: rgba(0, 212, 255, 0.55);
+  box-shadow: var(--glow-cyan);
 }
 
 .toast-close {

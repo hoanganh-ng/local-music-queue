@@ -61,7 +61,7 @@ function cancel() {
   display: grid;
   place-items: center;
   padding: 1rem;
-  background: rgba(0, 0, 0, 0.58);
+  background: rgba(0, 0, 0, 0.72);
 }
 
 .confirm-dialog {
@@ -71,8 +71,9 @@ function cancel() {
 
 .confirm-dialog h2 {
   margin: 0 0 0.75rem;
-  color: var(--text-main);
+  color: var(--accent);
   font-size: 1.25rem;
+  text-shadow: var(--glow-sm);
 }
 
 .confirm-dialog p {
