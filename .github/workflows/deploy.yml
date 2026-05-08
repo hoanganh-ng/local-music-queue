@@ -1,0 +1,30 @@
+# .github/workflows/deploy.yml
+name: Deploy on Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  deploy:
+    runs-on: my-testing-pc
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy
+        env:
+          FRONTEND_HTTP_PORT: ${{ vars.GOOGLE_CLIENT_ID }}
+          FRONTEND_HTTPS_PORT: ${{ vars.DUCKDNS_DOMAIN }}
+          BACKEND_PORT: ${{ vars.GOOGLE_CLIENT_ID }}
+          HOST_EMAILS: ${{ vars.GOOGLE_CLIENT_ID }}
+          ADMIN_EMAILS: ${{ vars.ADMIN_EMAILS }}
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          DUCKDNS_DOMAIN: ${{ secrets.DUCKDNS_DOMAIN }}
+          DUCKDNS_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
+          LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
+          VITE_GOOGLE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
+        run: docker compose up -d --build
+        shell: pwsh
