@@ -27,4 +27,4 @@ jobs:
           LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
           VITE_GOOGLE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
         run: docker compose up -d --build
-        shell: pwsh
+        shell: powershell
