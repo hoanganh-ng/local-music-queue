@@ -8,13 +8,13 @@ on:
 jobs:
   deploy:
     runs-on: self-hosted
+    environment: local-server
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Deploy
-        environment: local-server
         env:
           FRONTEND_HTTP_PORT: ${{ vars.GOOGLE_CLIENT_ID }}
           FRONTEND_HTTPS_PORT: ${{ vars.DUCKDNS_DOMAIN }}
