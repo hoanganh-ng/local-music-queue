@@ -16,10 +16,10 @@ jobs:
 
       - name: Deploy
         env:
-          FRONTEND_HTTP_PORT: ${{ vars.GOOGLE_CLIENT_ID }}
-          FRONTEND_HTTPS_PORT: ${{ vars.DUCKDNS_DOMAIN }}
-          BACKEND_PORT: ${{ vars.GOOGLE_CLIENT_ID }}
-          HOST_EMAILS: ${{ vars.GOOGLE_CLIENT_ID }}
+          FRONTEND_HTTP_PORT: ${{ vars.FRONTEND_HTTP_PORT }}
+          FRONTEND_HTTPS_PORT: ${{ vars.FRONTEND_HTTPS_PORT }}
+          BACKEND_PORT: ${{ vars.BACKEND_PORT }}
+          HOST_EMAILS: ${{ vars.HOST_EMAILS }}
           ADMIN_EMAILS: ${{ vars.ADMIN_EMAILS }}
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
