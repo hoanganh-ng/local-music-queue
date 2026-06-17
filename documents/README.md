@@ -30,8 +30,8 @@ documents/
 │   ├── activity-tracking.md        # [Planned] Activity log
 │   ├── playback-control.md         # [Planned] YouTube player, sync
 │   ├── permissions.md              # [Planned] Host/Admin/Guest capabilities
-│   ├── auto-queue.md               # Auto-queue configuration
-│   └── voting.md                   # Community voting mechanics
+│   ├── auto-queue-feature.md       # Auto-queue configuration
+│   └── voting-system.md            # Community voting mechanics
 │
 ├── 04-api-reference/               # API documentation
 │   ├── rest-endpoints.md           # [Planned] All HTTP endpoints

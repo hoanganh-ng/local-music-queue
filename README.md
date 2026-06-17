@@ -92,22 +92,7 @@ The project follows **Clean Architecture** principles with four distinct layers:
 docker-compose up --build
 ```
 
-#### Backend Only
 
-```bash
-docker build -t local-music-queue-backend .
-docker run -p 1111:1111 \
-  -v $(pwd)/.localdb:/app/data \
-  local-music-queue-backend
-```
-
-#### Frontend Only
-
-```bash
-cd frontend
-docker build -t local-music-queue-frontend .
-docker run -p 80:80 local-music-queue-frontend
-```
 
 ## ⚙️ Configuration
 
@@ -192,7 +177,6 @@ Comprehensive documentation is available in the `documents/` folder:
 
 ### Real-time Updates
 
-- WebSocket delta broadcasting reduces bandwidth by ~90%
 - WebSocket delta broadcasting with 16 event types wrapped in a standard sequence envelope
 - Auto-reconnect on disconnect (3-second retry)
 

@@ -4,7 +4,7 @@
 This directory contains project management documentation, establishing the authoritative baseline state, architectural direction, and the active/historical sprint plans. It governs the workflow and ensures alignment between planned work and actual codebase state.
 
 ## Source Priority
-The `PROJECT_STATE.md` document is the single authoritative source for current implementation facts. If other documentation contradicts it, `PROJECT_STATE.md` takes precedence.
+The `PROJECT_STATE.md` document is the authoritative documentation snapshot for the inspected commit. If other documentation contradicts it, `PROJECT_STATE.md` takes precedence. However, if conflicts are discovered between `PROJECT_STATE.md` and the actual implementation/tests, the implementation/tests themselves remain the ultimate source of truth.
 
 ## Current-State vs Desired-State
 - **Current-State:** Documented precisely in `PROJECT_STATE.md`. It reflects reality, including technical debt, security flaws, and failing tests.
