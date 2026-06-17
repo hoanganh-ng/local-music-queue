@@ -3,7 +3,7 @@
 This document provides an overview of the new documentation structure created on 2026-04-23.
 
 ## Source of Truth
-**Note:** `00-project-management/PROJECT_STATE.md` is the authoritative source for current implementation facts.
+**Note:** `00-project-management/PROJECT_STATE.md` is the authoritative documentation snapshot for its inspected commit. If later conflicts are found, the implementation and tests prevail.
 
 ## Structure
 

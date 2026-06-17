@@ -11,8 +11,8 @@ This `PROJECT_STATE.md` document is the authoritative documentation snapshot for
 The project follows a Clean Architecture pattern in Go (Domain, Usecase, Infrastructure, Delivery) for the backend, paired with a Vue 3 frontend using Vite. Real-time updates are handled via WebSocket delta broadcasting. 
 
 ## Deployment Topology
-Current deployment topology consists of a two-service direct-HTTPS deployment (`music-queue-backend` and `music-queue-frontend`) orchestrating via Docker Compose.
-- **Port Defaults & Collisions:** The `.env.example` defines fallback application ports (e.g., 8011, 8012, 1111). However, the `docker-compose.yml` defaults to mapping the host's `443` port for both frontend and backend unless `FRONTEND_HTTPS_PORT` and `BACKEND_PORT` are explicitly overridden, which causes a default host-port 443 collision.
+Current deployment topology consists of a two-service direct-HTTPS deployment orchestrating via Docker Compose. The Compose service names are `backend` and `frontend`, and their configured container names are `music-queue-backend` and `music-queue-frontend`.
+- **Port Defaults & Collisions:** The `.env.example` defines sample override values (e.g., 8011, 8012, 1111). However, the `docker-compose.yml` defaults to mapping the host's `443` port for both frontend and backend unless `FRONTEND_HTTPS_PORT` and `BACKEND_PORT` are explicitly overridden, which causes a default host-port 443 collision.
 
 ## REST Endpoints
 There are exactly 19 registered HTTP REST endpoints plus 1 WebSocket endpoint (`/ws`):
@@ -82,9 +82,16 @@ SQLite with 7 tables, index, trigger, and single-row queue JSON storage.
 - **Authorization:** Complete lack of backend toggle authorization.
 
 ## Testing & CI
-- **Frontend scripts and discovered test files:** Vitest-only scripts configured in `package.json`.
-- **Server tests:** Go unit tests contain known stale/failing test cases. Tests were executed, and `TestLoadDefaults` failed. `TestLoadDefaults` expects the historical HostPIN default 6666, while current configuration defaults it to 9512.
-- **Verification commands actually run and their limitations:** `npm run test:unit -- --run` runs the frontend vitest suite. `go test ./...` runs backend unit tests. No E2E suite exists.
+### Static Inspection
+- `frontend/package.json` exposes Vitest through `test:unit`.
+- The non-watch command is `npm run test:unit -- --run`.
+- `TestLoadDefaults` expects HostPIN 6666.
+- `config.Load` defaults HostPIN to 9512.
+- Therefore, that assertion is stale and expected to fail in a clean environment.
+- No frontend E2E script was found.
+
+### Command Execution
+*(No commands were executed during this inspection; exact command output must be included when claiming tests were run).*
 
 ## Prioritized Known-Risk Register
 1. **Critical:** Absence of JWT/server session/per-request identity allowing trivial spoofing of identity/roles (client-supplied `user_id`/`UserRole`).

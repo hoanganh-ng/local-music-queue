@@ -1,6 +1,6 @@
 # 🎵 Local Music Queue
 
-A local-network music queue application powered by **YouTube**. Perfect for parties or office environments where anyone on the same network can contribute to a shared playlist with role-based access control and priority queue management.
+A local-network music queue application powered by **YouTube**. Perfect for parties or office environments where anyone on the same network can contribute to a shared playlist with priority queue management.
 
 ![Go](https://img.shields.io/badge/Backend-Go-00ADD8?style=flat-square&logo=go)
 ![Vue.js](https://img.shields.io/badge/Frontend-Vue.js-4FC08D?style=flat-square&logo=vue.js)
@@ -19,7 +19,7 @@ For the authoritative current state of the implementation, including security ca
 - 📝 **Activity Feed**: Track joins, song additions, skips, and priority changes
 - 💎 **Priority Queue System**: Daily token awards for song prioritization
 - 🗳️ **Community Voting**: Democratic skip and priority votes.
-- 🔒 **Role-Based Access**: Host, Admin, Guest
+- 🔒 **Role Metadata**: Host, Admin, Guest (Trusted per-request identity and comprehensive backend authorization are not currently implemented. Roles are used as metadata by the frontend and for some client-supplied request checks).
 - 🌐 **HTTPS Support**: Let's Encrypt integration with DuckDNS for production
 
 ## 🏗️ Architecture
@@ -111,14 +111,16 @@ docker-compose up --build
 
 ### Docker Compose Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `FRONTEND_HTTP_PORT` | Frontend HTTP port | `8011` |
-| `FRONTEND_HTTPS_PORT` | Frontend HTTPS port | `8012` |
-| `BACKEND_PORT` | Backend API port | `1111` |
-| `DUCKDNS_DOMAIN` | DuckDNS subdomain | Optional |
-| `DUCKDNS_TOKEN` | DuckDNS token | Optional |
-| `LETSENCRYPT_EMAIL` | Let's Encrypt email | Optional |
+*Note: Using Compose without overrides causes frontend HTTPS and backend to compete for host port 443.*
+
+| Variable | Description | Compose Fallback | `.env.example` Sample |
+|----------|-------------|------------------|-----------------------|
+| `FRONTEND_HTTP_PORT` | Frontend HTTP port | `80` | `8011` |
+| `FRONTEND_HTTPS_PORT` | Frontend HTTPS port | `443` | `8012` |
+| `BACKEND_PORT` | Backend API port | `443` | `1111` |
+| `DUCKDNS_DOMAIN` | DuckDNS subdomain | - | Optional |
+| `DUCKDNS_TOKEN` | DuckDNS token | - | Optional |
+| `LETSENCRYPT_EMAIL` | Let's Encrypt email | - | Optional |
 
 ## 🛠️ Development
 
@@ -157,7 +159,7 @@ Comprehensive documentation is available in the `documents/` folder:
 ### Authentication
 
 - **Primary**: Google OAuth 2.0 with email-based role assignment
-- **Roles**: Host (full control + player), Admin (remote control), Guest (add songs)
+- **Roles**: Host, Admin, Guest (Assigned role metadata used by the frontend and client-supplied request checks; trusted per-request identity and comprehensive backend authorization are not currently implemented.)
 - **Email Domain**: Restricted to `@urekamedia.vn` by default (configurable)
 
 ### Priority System
@@ -173,7 +175,7 @@ Comprehensive documentation is available in the `documents/` folder:
 - **Time-Limited**: 30-second voting window with live countdown
 - **Real-time Updates**: Live vote counts broadcast to all connected clients
 - **In-Memory Sessions**: Vote sessions cleared on server restart
-- **Role Restriction**: Host excluded from voting (has direct controls)
+- **Role Restriction**: Host excluded from voting. (Note: Role eligibility relies on the client-supplied user_role value and is not a trusted authorization boundary.)
 
 ### Real-time Updates
 
