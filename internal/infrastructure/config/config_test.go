@@ -56,8 +56,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ClientPIN != "5555" {
 		t.Errorf("Expected default ClientPIN 5555, got %s", cfg.ClientPIN)
 	}
-	if cfg.HostPIN != "6666" {
-		t.Errorf("Expected default HostPIN 6666, got %s", cfg.HostPIN)
+	if cfg.HostPIN != "9512" {
+		t.Errorf("Expected default HostPIN 9512, got %s", cfg.HostPIN)
 	}
 	if cfg.DBPath != "./.localdb/music_queue.db" {
 		t.Errorf("Expected default DBPath ./.localdb/music_queue.db, got %s", cfg.DBPath)
