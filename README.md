@@ -88,6 +88,8 @@ The project follows **Clean Architecture** principles with four distinct layers:
 
 #### Full Stack (Recommended)
 
+Before startup, the three certificate values (`DUCKDNS_DOMAIN`, `DUCKDNS_TOKEN`, `LETSENCRYPT_EMAIL`) and non-conflicting `FRONTEND_HTTPS_PORT`/`BACKEND_PORT` overrides must be configured.
+
 ```bash
 docker-compose up --build
 ```
@@ -102,7 +104,7 @@ docker-compose up --build
 |----------|-------------|---------|
 | `PORT` | Server port | `1111` |
 | `GOOGLE_CLIENT_ID` | Google OAuth client ID | Required |
-| `HOST_EMAILS` | Comma-separated host emails | Required |
+| `HOST_EMAILS` | Comma-separated host emails | Optional at startup but required to assign any account the Host role |
 | `ADMIN_EMAILS` | Comma-separated admin emails | Optional |
 | `DB_PATH` | SQLite database path | `./.localdb/music_queue.db` |
 | `YTDLP_PATH` | yt-dlp executable path | `yt-dlp` |
@@ -113,21 +115,23 @@ docker-compose up --build
 
 *Note: Using Compose without overrides causes frontend HTTPS and backend to compete for host port 443.*
 
+`DUCKDNS_DOMAIN`, `DUCKDNS_TOKEN`, and `LETSENCRYPT_EMAIL` are required by the current backend and frontend container startup scripts. Both containers exit during certificate setup if any of those values is absent.
+
 | Variable | Description | Compose Fallback | `.env.example` Sample |
 |----------|-------------|------------------|-----------------------|
 | `FRONTEND_HTTP_PORT` | Frontend HTTP port | `80` | `8011` |
 | `FRONTEND_HTTPS_PORT` | Frontend HTTPS port | `443` | `8012` |
 | `BACKEND_PORT` | Backend API port | `443` | `1111` |
-| `DUCKDNS_DOMAIN` | DuckDNS subdomain | - | Optional |
-| `DUCKDNS_TOKEN` | DuckDNS token | - | Optional |
-| `LETSENCRYPT_EMAIL` | Let's Encrypt email | - | Optional |
+| `DUCKDNS_DOMAIN` | DuckDNS subdomain | - | Required |
+| `DUCKDNS_TOKEN` | DuckDNS token | - | Required |
+| `LETSENCRYPT_EMAIL` | Let's Encrypt email | - | Required |
 
 ## 🛠️ Development
 
 ### Testing
 
 - **Backend**: `go test ./...`
-  - *Note*: `TestLoadDefaults` fails because it expects the historical HostPIN default 6666, while current configuration defaults it to 9512.
+  - *Note*: `TestLoadDefaults` contains a stale HostPIN assertion and is expected to fail in a clean environment: the test expects 6666 while config.Load defaults to 9512.
 - **Backend (single test)**: `go test -run TestName ./path/to/package`
 - **Frontend Unit**: `cd frontend && npm run test:unit -- --run`
 

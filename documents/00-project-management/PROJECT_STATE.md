@@ -13,6 +13,7 @@ The project follows a Clean Architecture pattern in Go (Domain, Usecase, Infrast
 ## Deployment Topology
 Current deployment topology consists of a two-service direct-HTTPS deployment orchestrating via Docker Compose. The Compose service names are `backend` and `frontend`, and their configured container names are `music-queue-backend` and `music-queue-frontend`.
 - **Port Defaults & Collisions:** The `.env.example` defines sample override values (e.g., 8011, 8012, 1111). However, the `docker-compose.yml` defaults to mapping the host's `443` port for both frontend and backend unless `FRONTEND_HTTPS_PORT` and `BACKEND_PORT` are explicitly overridden, which causes a default host-port 443 collision.
+- **Certificate Requirements:** `DUCKDNS_DOMAIN`, `DUCKDNS_TOKEN`, and `LETSENCRYPT_EMAIL` are mandatory for both current container startup scripts. Missing values cause container startup to exit during certificate setup.
 
 ## REST Endpoints
 There are exactly 19 registered HTTP REST endpoints plus 1 WebSocket endpoint (`/ws`):
