@@ -2,14 +2,14 @@
 
 This document provides an overview of the new documentation structure created on 2026-04-23.
 
-## Overview
-
-The documentation has been reorganized from a flat structure into a logical, numbered hierarchy with 9 main sections. This makes it easier to find information and understand the project progressively.
+## Source of Truth
+**Note:** `00-project-management/PROJECT_STATE.md` is the authoritative source for current implementation facts.
 
 ## Structure
 
 ```
 documents/
+├── 00-project-management/          # Project management and baseline state
 ├── 01-overview/                    # Project introduction
 │   ├── README.md                   # Project overview and quick start
 │   ├── architecture.md             # Clean Architecture explanation
@@ -19,60 +19,52 @@ documents/
 │   ├── installation.md             # Local development setup
 │   ├── docker-deployment.md        # Docker deployment guide
 │   ├── environment-variables.md    # Complete env var reference
-│   └── first-run.md                # [TODO] Initial configuration
+│   └── first-run.md                # [Planned] Initial configuration
 │
 ├── 03-features/                    # Feature documentation
 │   ├── authentication.md           # Google OAuth, roles, email restrictions
 │   ├── priority-system.md          # Daily tokens, prioritization mechanics
-│   ├── queue-management.md         # [TODO] Queue operations
-│   ├── youtube-integration.md      # [TODO] Search, metadata, yt-dlp
-│   ├── real-time-updates.md        # [TODO] WebSocket, delta broadcasting
-│   ├── activity-tracking.md        # [TODO] Activity log
-│   ├── playback-control.md         # [TODO] YouTube player, sync
-│   └── permissions.md              # [TODO] Host/Admin/Guest capabilities
+│   ├── queue-management.md         # [Planned] Queue operations
+│   ├── youtube-integration.md      # [Planned] Search, metadata, yt-dlp
+│   ├── real-time-updates.md        # [Planned] WebSocket, delta broadcasting
+│   ├── activity-tracking.md        # [Planned] Activity log
+│   ├── playback-control.md         # [Planned] YouTube player, sync
+│   ├── permissions.md              # [Planned] Host/Admin/Guest capabilities
+│   ├── auto-queue.md               # Auto-queue configuration
+│   └── voting.md                   # Community voting mechanics
 │
 ├── 04-api-reference/               # API documentation
-│   ├── rest-endpoints.md           # [TODO] All HTTP endpoints
-│   ├── websocket-events.md         # [TODO] All WebSocket events
-│   └── error-codes.md              # [TODO] Error responses
+│   ├── rest-endpoints.md           # [Planned] All HTTP endpoints
+│   ├── websocket-events.md         # [Planned] All WebSocket events
+│   └── error-codes.md              # [Planned] Error responses
 │
 ├── 05-frontend/                    # Frontend guide
-│   ├── components.md               # [TODO] Component hierarchy
-│   ├── state-management.md         # [TODO] Store structure
-│   ├── routing.md                  # [TODO] Vue Router config
-│   └── styling.md                  # [TODO] Design system
+│   ├── components.md               # [Planned] Component hierarchy
+│   ├── state-management.md         # [Planned] Store structure
+│   ├── routing.md                  # [Planned] Vue Router config
+│   └── styling.md                  # [Planned] Design system
 │
 ├── 06-backend/                     # Backend guide
-│   ├── domain-layer.md             # [TODO] Entities and interfaces
-│   ├── usecase-layer.md            # [TODO] Business logic
-│   ├── infrastructure-layer.md     # [TODO] Repositories, services
-│   ├── delivery-layer.md           # [TODO] HTTP, WebSocket
-│   └── database-schema.md          # [TODO] SQLite tables
+│   ├── domain-layer.md             # [Planned] Entities and interfaces
+│   ├── usecase-layer.md            # [Planned] Business logic
+│   ├── infrastructure-layer.md     # [Planned] Repositories, services
+│   ├── delivery-layer.md           # [Planned] HTTP, WebSocket
+│   └── database-schema.md          # [Planned] SQLite tables
 │
 ├── 07-deployment/                  # Deployment guides
-│   ├── docker.md                   # [TODO] Dockerfile details
-│   ├── docker-compose.md           # [TODO] Service orchestration
+│   ├── docker.md                   # [Planned] Dockerfile details
+│   ├── docker-compose.md           # [Planned] Service orchestration
 │   ├── https-setup.md              # Let's Encrypt, DuckDNS, certificates
-│   ├── nginx-configuration.md      # [TODO] Reverse proxy config
-│   └── production-checklist.md     # [TODO] Pre-launch verification
+│   ├── nginx-configuration.md      # [Planned] Reverse proxy config
+│   └── production-checklist.md     # [Planned] Pre-launch verification
 │
 ├── 08-development/                 # Development guides
-│   ├── local-development.md        # [TODO] Running without Docker
-│   ├── testing.md                  # [TODO] Running tests
-│   ├── contributing.md             # [TODO] Code style, PR process
-│   └── debugging.md                # [TODO] Common issues
+│   ├── local-development.md        # [Planned] Running without Docker
+│   ├── testing.md                  # [Planned] Running tests
+│   ├── contributing.md             # [Planned] Code style, PR process
+│   └── debugging.md                # [Planned] Common issues
 │
 └── 09-roadmap/                     # Project roadmap
     ├── implemented-features.md     # Complete list of implemented features
     └── future-features.md          # Planned enhancements
-
-Old structure (kept for reference):
-├── init/                           # Original implementation steps
-│   ├── requirements.md
-│   ├── backend_steps.md
-│   └── frontend_steps.md
-└── features/                       # Original advanced features docs
-    ├── backend_advanced_features.md
-    ├── frontend_advanced_features.md
-    └── infrastructure_and_deployment.md
 ```

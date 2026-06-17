@@ -7,6 +7,9 @@ A local-network music queue application powered by **YouTube**. Perfect for part
 ![WebSocket](https://img.shields.io/badge/Real--time-WebSocket-green?style=flat-square)
 ![OAuth](https://img.shields.io/badge/Auth-Google%20OAuth-4285F4?style=flat-square&logo=google)
 
+## 📌 Project State
+For the authoritative current state of the implementation, including security caveats and known risks, please refer directly to **[PROJECT_STATE.md](documents/00-project-management/PROJECT_STATE.md)**.
+
 ## ✨ Features
 
 - 🔐 **Google OAuth Authentication**: Email-based role assignment (Host, Admin, Guest)
@@ -15,8 +18,8 @@ A local-network music queue application powered by **YouTube**. Perfect for part
 - 📺 **Host Playback**: Centralized playback control on the host machine
 - 📝 **Activity Feed**: Track joins, song additions, skips, and priority changes
 - 💎 **Priority Queue System**: Daily token awards for song prioritization
-- 🗳️ **Community Voting**: Democratic skip and priority votes with strict majority
-- 🔒 **Role-Based Access**: Host (full control), Admin (remote control), Guest (add songs)
+- 🗳️ **Community Voting**: Democratic skip and priority votes.
+- 🔒 **Role-Based Access**: Host, Admin, Guest
 - 🌐 **HTTPS Support**: Let's Encrypt integration with DuckDNS for production
 
 ## 🏗️ Architecture
@@ -92,7 +95,7 @@ docker-compose up --build
 #### Backend Only
 
 ```bash
-docker build -t local-music-queue-backend -f Dockerfile.backend .
+docker build -t local-music-queue-backend .
 docker run -p 1111:1111 \
   -v $(pwd)/.localdb:/app/data \
   local-music-queue-backend
@@ -137,9 +140,9 @@ docker run -p 80:80 local-music-queue-frontend
 ### Testing
 
 - **Backend**: `go test ./...`
+  - *Note*: `TestLoadDefaults` fails because it expects the historical HostPIN default 6666, while current configuration defaults it to 9512.
 - **Backend (single test)**: `go test -run TestName ./path/to/package`
-- **Frontend Unit**: `cd frontend && npm run test:unit`
-- **Frontend E2E**: `cd frontend && npm run test:e2e`
+- **Frontend Unit**: `cd frontend && npm run test:unit -- --run`
 
 ### Quick Commands
 
@@ -151,6 +154,8 @@ docker run -p 80:80 local-music-queue-frontend
 ## 📚 Documentation
 
 Comprehensive documentation is available in the `documents/` folder:
+
+- **[Project Management](documents/00-project-management/)** - Sprints and baseline state
 
 - **[Overview](documents/01-overview/)** - Architecture and technology stack
 - **[Getting Started](documents/02-getting-started/)** - Installation and deployment
@@ -180,7 +185,6 @@ Comprehensive documentation is available in the `documents/` folder:
 ### Community Voting
 
 - **Democratic Control**: Guests and Admins can vote to skip or prioritize songs
-- **Strict Majority**: Requires `(connectedUsers / 2) + 1` votes to pass (minimum 2)
 - **Time-Limited**: 30-second voting window with live countdown
 - **Real-time Updates**: Live vote counts broadcast to all connected clients
 - **In-Memory Sessions**: Vote sessions cleared on server restart
@@ -189,15 +193,14 @@ Comprehensive documentation is available in the `documents/` folder:
 ### Real-time Updates
 
 - WebSocket delta broadcasting reduces bandwidth by ~90%
-- Only changed data sent, not full state
-- Sequence numbers on all messages for gap detection
+- WebSocket delta broadcasting with 16 event types wrapped in a standard sequence envelope
 - Auto-reconnect on disconnect (3-second retry)
 
 ### Database
 
-- SQLite with 5 tables: queue_state, activities, users, user_sessions, priority_transactions
+- SQLite with 7 tables.
 - Pure Go SQLite driver (no CGo dependency)
-- Atomic queue state updates via JSON blob storage
+- Atomic queue state updates via single-row JSON blob storage
 
 ## 📄 License
 

@@ -1,0 +1,1 @@
+- [Auto-Queue Feature Complete](auto_queue_feature_complete.md) — Comprehensive feature document created combining all auto-queue docs
