@@ -2,8 +2,9 @@
 
 **Baseline Date:** 2026-06-19
 **Branch:** dev
-**Original Sprint 001 Baseline Commit:** `0131b44ff1ac6b263cebef6d2526196042c5560f` (pre-sprint baseline)
-**Current Inspected Dev Commit:** `9c0fba72ca21f933c88817c3b4975bf3319f9b2b` (containing Sprint 003 implementation)
+**Original Sprint 001 Baseline Commit:** `0131b44ff1ac6b263cebef6d2526196042c5560f`
+**Sprint 003 Implementation Predecessor Commit:** `9c0fba72ca21f933c88817c3b4975bf3319f9b2b`
+**Last Architect-Inspected Implementation Commit:** `0b47d1142c1f6b2a7527f404bc100af2a24c57d4`
 
 ## Source-Priority Rule
 This `PROJECT_STATE.md` document is the authoritative documentation snapshot for the inspected commit. If any other documentation conflicts with this document, this document is correct regarding the documented state of the codebase. However, if conflicts are discovered between this document and the actual implementation or tests, the implementation and tests themselves remain the ultimate source of truth.
@@ -92,6 +93,7 @@ SQLite with 7 tables, index, trigger, and single-row queue JSON storage.
 ### Command Execution
 During the Sprint 003 verification:
 - `go test -count=1 ./internal/usecase/auth ./internal/usecase/queue ./internal/delivery/http ./internal/infrastructure/session` - PASS
+- `go test -race -count=1 ./internal/usecase/auth ./internal/usecase/queue ./internal/delivery/http ./internal/infrastructure/session` - PASS
 - `go test ./...` - BLOCKED (Pre-existing environmental blocker: `open letsencrypt-backend/accounts: permission denied`)
 - `go test -race ./...` - BLOCKED (Pre-existing environmental blocker: `open letsencrypt-backend/accounts: permission denied`)
 - `go vet ./...` - BLOCKED (Pre-existing environmental blocker: `open letsencrypt-backend/accounts: permission denied`)

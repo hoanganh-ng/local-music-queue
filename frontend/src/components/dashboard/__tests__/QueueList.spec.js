@@ -22,6 +22,16 @@ vi.mock('../../../services/api', () => ({
   }
 }))
 
+const { mockToastError } = vi.hoisted(() => ({
+  mockToastError: vi.fn()
+}))
+vi.mock('../../composables/useToast', () => ({
+  useToast: () => ({
+    error: mockToastError,
+    success: vi.fn(),
+  })
+}))
+
 describe('QueueList', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -29,6 +39,7 @@ describe('QueueList', () => {
     globalStore.clearUser()
     mockPush.mockReset()
     mockRemoveSong.mockReset()
+    mockToastError.mockReset()
     vi.restoreAllMocks()
   })
 
@@ -223,6 +234,7 @@ describe('QueueList', () => {
 
     await wrapper.find('.remove-btn').trigger('click')
 
+    expect(mockToastError).toHaveBeenCalledWith('Permission denied: Forbidden')
     expect(globalStore.currentUser).not.toBeNull()
     expect(sessionStorage.getItem('lmq_session_token')).toBe('test-token')
     expect(mockPush).not.toHaveBeenCalled()
