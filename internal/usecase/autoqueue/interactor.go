@@ -2,6 +2,7 @@ package autoqueue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"local-music-queue/internal/domain"
 	"local-music-queue/internal/domain/entity"
@@ -16,18 +17,41 @@ import (
 // The usecase layer uses this abstraction to avoid importing the delivery layer.
 type BroadcastFunc func(eventType string, data interface{})
 
-// AddSongFunc is a callback for adding a song to the queue with proper locking.
-type AddSongFunc func(ctx context.Context, song *entity.Song) error
+// AddAutoQueueSongFunc atomically revalidates an auto-queue candidate and
+// inserts it under the queue lock. Returns ErrAutoQueueStale (defined by the
+// queue interactor) when the source song is no longer current or an upcoming
+// song now exists. The Result carries the authoritative post-mutation snapshot
+// (current_index, current_song, status, elapsed, activity) so the broadcaster
+// can publish it without a follow-up state reload.
+type AddAutoQueueSongFunc func(ctx context.Context, song *entity.Song, expectedSourceSongID string) (*AddSongResult, error)
+
+// AddSongResult mirrors queue.AddSongResult shape. Re-declared here as a small
+// transport struct so the auto-queue package does not import usecase/queue
+// (avoiding an upward dependency from a leaf usecase).
+type AddSongResult struct {
+	Song         entity.Song
+	Position     int
+	CurrentIndex int
+	CurrentSong  *entity.Song
+	Status       entity.PlaybackStatus
+	Elapsed      int
+	Activity     entity.Activity
+}
+
+// ErrAutoQueueStale is the sentinel returned by AddAutoQueueSongFunc when the
+// candidate is no longer valid. The wiring layer adapts queue.ErrAutoQueueStale
+// to this sentinel so the autoqueue package stays independent of usecase/queue.
+var ErrAutoQueueStale = errors.New("auto-queue candidate is stale")
 
 // Interactor handles auto-queue business logic.
 type Interactor struct {
-	autoQueueRepo domain.AutoQueueRepository
-	queueRepo     repository.QueueRepository
-	fetcher       domain.RelatedSongFetcher
-	broadcaster   BroadcastFunc
-	addSongFunc   AddSongFunc
-	mu            sync.Mutex
-	triggering    bool
+	autoQueueRepo    domain.AutoQueueRepository
+	queueRepo        repository.QueueRepository
+	fetcher          domain.RelatedSongFetcher
+	broadcaster      BroadcastFunc
+	addAutoQueueSong AddAutoQueueSongFunc
+	mu               sync.Mutex
+	triggering       bool
 }
 
 // NewInteractor creates a new AutoQueue Interactor.
@@ -48,9 +72,11 @@ func (i *Interactor) SetBroadcaster(fn BroadcastFunc) {
 	i.broadcaster = fn
 }
 
-// SetAddSongFunc sets the callback for adding songs with proper locking.
-func (i *Interactor) SetAddSongFunc(fn AddSongFunc) {
-	i.addSongFunc = fn
+// SetAddAutoQueueSongFunc sets the callback that revalidates and inserts the
+// auto-queue candidate atomically. This callback is mandatory; without it
+// CheckAndTrigger will refuse to perform a candidate insertion.
+func (i *Interactor) SetAddAutoQueueSongFunc(fn AddAutoQueueSongFunc) {
+	i.addAutoQueueSong = fn
 }
 
 // CheckAndTrigger checks if auto-queue should fire and adds a song if needed.
@@ -136,21 +162,20 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context) error {
 		return nil
 	}
 
-	// Use the injected AddSongFunc if available (preferred for proper locking),
-	// otherwise fall back to direct repo access (legacy path).
-	if i.addSongFunc != nil {
-		if err := i.addSongFunc(ctx, song); err != nil {
-			return fmt.Errorf("failed to add song via callback: %w", err)
-		}
-	} else {
-		// Legacy path: direct repo access (has race condition risk)
-		queue.Add(*song)
-		if err := i.queueRepo.Save(ctx, queue); err != nil {
-			return fmt.Errorf("failed to save queue: %w", err)
-		}
+	if i.addAutoQueueSong == nil {
+		// No insertion callback wired; refuse to mutate queue state directly to
+		// avoid the race conditions the Sprint 004 stale-candidate fix targets.
+		log.Printf("auto-queue: add-song callback not configured, skipping insertion")
+		return nil
+	}
 
-		activity := entity.NewActivity(entity.ActivitySongAdded, "Auto-Queue", fmt.Sprintf("added \"%s\"", song.Title))
-		_ = i.queueRepo.AddActivity(ctx, activity)
+	result, err := i.addAutoQueueSong(ctx, song, lastSong.ID)
+	if err != nil {
+		if errors.Is(err, ErrAutoQueueStale) {
+			log.Printf("auto-queue: candidate %q stale at insertion, dropping (no save, no broadcast)", song.ID)
+			return nil
+		}
+		return fmt.Errorf("failed to add song via callback: %w", err)
 	}
 
 	historyEntry := domain.PlayHistoryEntry{
@@ -162,13 +187,17 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context) error {
 		log.Printf("auto-queue: failed to append history: %v", err)
 	}
 
-	// Broadcast auto-queue event to connected clients
+	// Broadcast auto-queue event to connected clients with the authoritative
+	// snapshot captured by the locked insertion. No second state reload.
 	if i.broadcaster != nil {
-		activity := entity.NewActivity(entity.ActivitySongAdded, "Auto-Queue", fmt.Sprintf("added \"%s\"", song.Title))
 		i.broadcaster("auto_queue_added", map[string]interface{}{
-			"song":              *song,
+			"song":              result.Song,
 			"source_song_title": lastSong.Title,
-			"activity":          activity,
+			"activity":          result.Activity,
+			"current_index":     result.CurrentIndex,
+			"current_song":      result.CurrentSong,
+			"status":            result.Status,
+			"elapsed":           result.Elapsed,
 		})
 	}
 

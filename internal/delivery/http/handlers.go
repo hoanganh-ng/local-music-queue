@@ -150,7 +150,7 @@ func (h *Handlers) HandleAddSong(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	song, err := h.queue.AddSong(r.Context(), req.URL, req.AddedBy, req.AddedByID, req.Metadata)
+	res, err := h.queue.AddSong(r.Context(), req.URL, req.AddedBy, req.AddedByID, req.Metadata)
 	if err != nil {
 		if errors.Is(err, entity.ErrSongAlreadyInQueue) {
 			http.Error(w, err.Error(), http.StatusConflict)
@@ -160,22 +160,22 @@ func (h *Handlers) HandleAddSong(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get current state to determine position
-	state, _ := h.queue.GetState(r.Context())
-	position := len(state.Songs) - 1 // Song was added at end
-
-	// Get the activity that was just logged
-	activity := entity.NewActivity(entity.ActivitySongAdded, req.AddedBy,
-		fmt.Sprintf("added \"%s\"", song.Title))
-
-	// Broadcast DELTA: only the new song
+	// Broadcast DELTA using the authoritative snapshot captured under the same
+	// lock as the queue mutation; do not re-load state here (Sprint 004 fixes
+	// the race where a concurrent skip/end/auto-queue mutation could ship a
+	// stale position or playback state).
 	h.hub.Broadcast(ws.EventSongAdded, ws.SongAddedData{
-		Song:     *song,
-		Position: position,
-		Activity: activity,
+		Song:         res.Song,
+		Position:     res.Position,
+		Activity:     res.Activity,
+		CurrentIndex: res.CurrentIndex,
+		CurrentSong:  res.CurrentSong,
+		Status:       res.Status,
+		Elapsed:      res.Elapsed,
 	})
 
-	json.NewEncoder(w).Encode(song)
+	// HTTP response body preserves the documented single-song shape.
+	json.NewEncoder(w).Encode(res.Song)
 }
 
 type SkipRequest struct {

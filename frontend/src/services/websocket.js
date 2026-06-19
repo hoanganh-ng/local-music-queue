@@ -1,5 +1,22 @@
 import { globalStore } from '../store'
 
+// applyAuthoritativeSnapshot applies the Sprint 004 post-mutation fields
+// (current_index, current_song, status, elapsed) that song_added and
+// auto_queue_added now carry. Each field is applied only when present, so
+// older deployments missing the fields still work.
+function applyAuthoritativeSnapshot(data) {
+  if (!data) return
+  if (typeof data.current_index === 'number') {
+    globalStore.updateCurrentIndex(data.current_index, data.current_song || null)
+  }
+  if (data.status) {
+    globalStore.updatePlaybackStatus(data.status)
+  }
+  if (typeof data.elapsed === 'number') {
+    globalStore.updateElapsed(data.elapsed)
+  }
+}
+
 class WebSocketClient {
   constructor() {
     this.ws = null
@@ -100,6 +117,8 @@ class WebSocketClient {
         }
         globalStore.addSong(message.data.song, message.data.position)
         globalStore.addActivity(message.data.activity)
+        // Sprint 004: apply authoritative post-mutation snapshot from backend.
+        applyAuthoritativeSnapshot(message.data)
         this.callbacks.songAdded.forEach(cb => {
           try {
             cb(message.data.song)
@@ -172,15 +191,11 @@ class WebSocketClient {
           const position = globalStore.queueState.songs ? globalStore.queueState.songs.length : 0
           globalStore.addSong(message.data.song, position)
           globalStore.addActivity(message.data.activity)
-
-          // If the queue was paused at the last song, auto-start playback
-          if (globalStore.queueState.status === 'paused') {
-            globalStore.updatePlaybackStatus('playing')
-            globalStore.updateCurrentIndex(
-              globalStore.queueState.songs.length - 1,
-              message.data.song
-            )
-          }
+          // Sprint 004: backend is the sole owner of current_index/status.
+          // The frontend no longer promotes the newest auto-queued song to
+          // current when the local store happens to be paused — that heuristic
+          // raced the authoritative state. Apply only what the backend sent.
+          applyAuthoritativeSnapshot(message.data)
         }
         break
       case 'auto_queue_config_changed':

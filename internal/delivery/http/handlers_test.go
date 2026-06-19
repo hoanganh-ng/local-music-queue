@@ -542,16 +542,13 @@ EOF
 	// Song 0: guestUser owned
 	// Song 1: otherGuestUser owned
 	// Song 2: guestUser owned
-	err = queueInteractor.AddSongDirect(ctx, &entity.Song{ID: "vid0", Title: "Song 0", AddedByID: guestUser.ID, AddedBy: guestUser.DisplayName})
-	if err != nil {
+	if _, err = queueInteractor.AddSongDirect(ctx, &entity.Song{ID: "vid0", Title: "Song 0", AddedByID: guestUser.ID, AddedBy: guestUser.DisplayName}); err != nil {
 		t.Fatalf("failed to add song 0: %v", err)
 	}
-	err = queueInteractor.AddSongDirect(ctx, &entity.Song{ID: "vid1", Title: "Song 1", AddedByID: otherGuestUser.ID, AddedBy: otherGuestUser.DisplayName})
-	if err != nil {
+	if _, err = queueInteractor.AddSongDirect(ctx, &entity.Song{ID: "vid1", Title: "Song 1", AddedByID: otherGuestUser.ID, AddedBy: otherGuestUser.DisplayName}); err != nil {
 		t.Fatalf("failed to add song 1: %v", err)
 	}
-	err = queueInteractor.AddSongDirect(ctx, &entity.Song{ID: "vid2", Title: "Song 2", AddedByID: guestUser.ID, AddedBy: guestUser.DisplayName})
-	if err != nil {
+	if _, err = queueInteractor.AddSongDirect(ctx, &entity.Song{ID: "vid2", Title: "Song 2", AddedByID: guestUser.ID, AddedBy: guestUser.DisplayName}); err != nil {
 		t.Fatalf("failed to add song 2: %v", err)
 	}
 
@@ -997,4 +994,66 @@ func TestHandleGoogleLogin_HTTP(t *testing.T) {
 			t.Errorf("expected 500, got %d. Body: %s", rr.Code, rr.Body.String())
 		}
 	})
+}
+
+// TestHandleAddSong_BroadcastCarriesAuthoritativeFields covers Issue #8 case 1:
+// HandleAddSong must broadcast SongAddedData with current_index, current_song,
+// status, and elapsed taken from the snapshot captured inside the locked
+// AddSong mutation — not from a follow-up GetState reload that could race.
+func TestHandleAddSong_BroadcastCarriesAuthoritativeFields(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping on windows: requires shell scripts")
+	}
+
+	tc := newTestContext(t)
+
+	// Seed an existing playing song so the new add is appended at position 3
+	// (newTestContext already added vid0,vid1,vid2 with current playing vid0).
+	body, _ := json.Marshal(AddSongRequest{
+		URL:     "https://youtube.com/watch?v=newone",
+		AddedBy: "Alice",
+		Metadata: &entity.SearchResult{
+			ID:    "newone",
+			Title: "Brand New",
+			URL:   "https://youtube.com/watch?v=newone",
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/queue/add", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	tc.handlers.HandleAddSong(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d. Body: %s", rr.Code, rr.Body.String())
+	}
+
+	if len(tc.broadcaster.broadcasts) == 0 {
+		t.Fatal("expected at least one broadcast")
+	}
+	last := tc.broadcaster.broadcasts[len(tc.broadcaster.broadcasts)-1]
+	if last.eventType != ws.EventSongAdded {
+		t.Fatalf("expected event %q, got %q", ws.EventSongAdded, last.eventType)
+	}
+	data, ok := last.data.(ws.SongAddedData)
+	if !ok {
+		t.Fatalf("expected ws.SongAddedData, got %T", last.data)
+	}
+
+	if data.Song.ID != "newone" {
+		t.Errorf("expected song id 'newone', got %q", data.Song.ID)
+	}
+	if data.Position != 3 {
+		t.Errorf("expected Position 3, got %d", data.Position)
+	}
+	if data.CurrentIndex != 0 {
+		t.Errorf("expected CurrentIndex 0 (vid0 still playing), got %d", data.CurrentIndex)
+	}
+	if data.CurrentSong == nil || data.CurrentSong.ID != "vid0" {
+		t.Errorf("expected CurrentSong 'vid0', got %+v", data.CurrentSong)
+	}
+	if data.Status != entity.StatusPlaying {
+		t.Errorf("expected Status playing, got %s", data.Status)
+	}
+	if data.Activity.Type != entity.ActivitySongAdded || data.Activity.User != "Alice" {
+		t.Errorf("expected ActivitySongAdded for Alice, got %+v", data.Activity)
+	}
 }

@@ -72,6 +72,47 @@ func (m *mockFetcher) FetchRelated(ctx context.Context, videoID string, exclude 
 	return m.song, m.err
 }
 
+// testAddAutoQueueSong is the test stand-in for queue.AddAutoQueueSong. It
+// applies the same staleness rules the real interactor enforces, returning
+// ErrAutoQueueStale on any violation and otherwise mutating the shared
+// mockQueueRepo to mirror the locked insertion.
+func testAddAutoQueueSong(repo *mockQueueRepo) AddAutoQueueSongFunc {
+	return func(ctx context.Context, song *entity.Song, expectedSourceSongID string) (*AddSongResult, error) {
+		q := repo.queue
+		if q == nil || q.CurrentIndex < 0 || q.CurrentIndex >= len(q.Songs) {
+			return nil, ErrAutoQueueStale
+		}
+		if q.Songs[q.CurrentIndex].ID != expectedSourceSongID {
+			return nil, ErrAutoQueueStale
+		}
+		if q.CurrentIndex != len(q.Songs)-1 {
+			return nil, ErrAutoQueueStale
+		}
+		if q.ContainsSong(song.ID) {
+			return nil, ErrAutoQueueStale
+		}
+
+		q.Add(*song)
+		activity := entity.NewActivity(entity.ActivitySongAdded, song.AddedBy, "added")
+		repo.activities = append(repo.activities, activity)
+
+		var currentSong *entity.Song
+		if q.CurrentIndex >= 0 && q.CurrentIndex < len(q.Songs) {
+			s := q.Songs[q.CurrentIndex]
+			currentSong = &s
+		}
+		return &AddSongResult{
+			Song:         *song,
+			Position:     len(q.Songs) - 1,
+			CurrentIndex: q.CurrentIndex,
+			CurrentSong:  currentSong,
+			Status:       q.Status,
+			Elapsed:      q.Elapsed,
+			Activity:     activity,
+		}, nil
+	}
+}
+
 func TestCheckAndTrigger_DisabledConfig(t *testing.T) {
 	autoQueueRepo := &mockAutoQueueRepo{
 		config: &domain.AutoQueueConfig{Enabled: false, Strategy: domain.StrategyRelated},
@@ -136,6 +177,7 @@ func TestCheckAndTrigger_LastSong_Triggers(t *testing.T) {
 	}
 
 	interactor := NewInteractor(autoQueueRepo, queueRepo, fetcher)
+	interactor.SetAddAutoQueueSongFunc(testAddAutoQueueSong(queueRepo))
 
 	err := interactor.CheckAndTrigger(context.Background())
 	if err != nil {
@@ -168,6 +210,7 @@ func TestCheckAndTrigger_FetcherSuccess(t *testing.T) {
 	}
 
 	interactor := NewInteractor(autoQueueRepo, queueRepo, fetcher)
+	interactor.SetAddAutoQueueSongFunc(testAddAutoQueueSong(queueRepo))
 
 	err := interactor.CheckAndTrigger(context.Background())
 	if err != nil {
@@ -207,6 +250,7 @@ func TestCheckAndTrigger_FetcherFailsFallbackSuccess(t *testing.T) {
 	fetcher := &mockFetcher{err: ErrFetchFailed}
 
 	interactor := NewInteractor(autoQueueRepo, queueRepo, fetcher)
+	interactor.SetAddAutoQueueSongFunc(testAddAutoQueueSong(queueRepo))
 
 	err := interactor.CheckAndTrigger(context.Background())
 	if err != nil {
@@ -239,6 +283,7 @@ func TestCheckAndTrigger_BothFail(t *testing.T) {
 	fetcher := &mockFetcher{err: ErrFetchFailed}
 
 	interactor := NewInteractor(autoQueueRepo, queueRepo, fetcher)
+	interactor.SetAddAutoQueueSongFunc(testAddAutoQueueSong(queueRepo))
 
 	err := interactor.CheckAndTrigger(context.Background())
 	if err != nil {
@@ -268,6 +313,7 @@ func TestCheckAndTrigger_Concurrency(t *testing.T) {
 	}
 
 	interactor := NewInteractor(autoQueueRepo, queueRepo, fetcher)
+	interactor.SetAddAutoQueueSongFunc(testAddAutoQueueSong(queueRepo))
 
 	var wg sync.WaitGroup
 	for i := 0; i < 5; i++ {
@@ -301,5 +347,146 @@ func TestSetEnabled(t *testing.T) {
 	cfg, _ := interactor.GetConfig(context.Background())
 	if !cfg.Enabled {
 		t.Error("expected Enabled=true after SetEnabled(true)")
+	}
+}
+
+// --- Sprint 004 regressions for Issue #8 ---
+
+// blockingFetcher pauses on Wait until released, so a test can simulate a
+// concurrent queue mutation landing while the FetchRelated call is in flight.
+type blockingFetcher struct {
+	song    *entity.Song
+	release chan struct{}
+	started chan struct{}
+}
+
+func (b *blockingFetcher) FetchRelated(ctx context.Context, videoID string, exclude []string) (*entity.Song, error) {
+	close(b.started)
+	<-b.release
+	return b.song, nil
+}
+
+// TestCheckAndTrigger_StaleDuringBlockedFetch covers Issue #8 case 3:
+// while FetchRelated is blocked, the queue advances such that the source song
+// is no longer current. The Sprint 004 contract requires the candidate be
+// dropped atomically — no queue save, no play_history append, no activity,
+// no auto_queue_added broadcast.
+func TestCheckAndTrigger_StaleDuringBlockedFetch(t *testing.T) {
+	autoQueueRepo := &mockAutoQueueRepo{
+		config:  &domain.AutoQueueConfig{Enabled: true, Strategy: domain.StrategyRelated},
+		history: []domain.PlayHistoryEntry{},
+	}
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "source", Title: "Source"})
+	queueRepo := &mockQueueRepo{queue: q}
+
+	fetcher := &blockingFetcher{
+		song:    &entity.Song{ID: "candidate", Title: "Candidate", AddedBy: entity.SystemUserID},
+		release: make(chan struct{}),
+		started: make(chan struct{}),
+	}
+
+	interactor := NewInteractor(autoQueueRepo, queueRepo, fetcher)
+	interactor.SetAddAutoQueueSongFunc(testAddAutoQueueSong(queueRepo))
+
+	var broadcasts []string
+	var broadcastMu sync.Mutex
+	interactor.SetBroadcaster(func(eventType string, _ interface{}) {
+		broadcastMu.Lock()
+		defer broadcastMu.Unlock()
+		broadcasts = append(broadcasts, eventType)
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- interactor.CheckAndTrigger(context.Background())
+	}()
+
+	// Wait for fetcher to enter its blocked section.
+	<-fetcher.started
+
+	// Simulate a concurrent mutation: another song was manually added so the
+	// source song is no longer last (and source is no longer the "tail" the
+	// auto-queue interactor expected).
+	queueRepo.queue.Add(entity.Song{ID: "manual-add", Title: "Manual"})
+
+	// Release the fetcher; CheckAndTrigger will now reach AddAutoQueueSong,
+	// which must reject the candidate as stale.
+	close(fetcher.release)
+
+	if err := <-done; err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Queue must still have exactly source + manual-add (2 songs); no candidate.
+	if got := len(queueRepo.queue.Songs); got != 2 {
+		t.Errorf("queue mutated by stale candidate: %d songs (want 2)", got)
+	}
+	for _, s := range queueRepo.queue.Songs {
+		if s.ID == "candidate" {
+			t.Errorf("stale candidate %q inserted into queue", s.ID)
+		}
+	}
+	// No play_history entry written.
+	if len(autoQueueRepo.history) != 0 {
+		t.Errorf("expected 0 history entries on stale candidate, got %d", len(autoQueueRepo.history))
+	}
+	// No queue activity recorded (the stand-in only writes activity on success).
+	if len(queueRepo.activities) != 0 {
+		t.Errorf("expected 0 activities on stale candidate, got %d", len(queueRepo.activities))
+	}
+	// No broadcast emitted.
+	broadcastMu.Lock()
+	defer broadcastMu.Unlock()
+	for _, e := range broadcasts {
+		if e == "auto_queue_added" {
+			t.Errorf("auto_queue_added broadcast must not fire for stale candidate")
+		}
+	}
+}
+
+// TestCheckAndTrigger_SuccessCarriesAuthoritativeBroadcast asserts the
+// auto_queue_added broadcast payload carries the post-mutation snapshot
+// (current_index, current_song, status, elapsed) per Sprint 004.
+func TestCheckAndTrigger_SuccessCarriesAuthoritativeBroadcast(t *testing.T) {
+	autoQueueRepo := &mockAutoQueueRepo{
+		config:  &domain.AutoQueueConfig{Enabled: true, Strategy: domain.StrategyRelated},
+		history: []domain.PlayHistoryEntry{},
+	}
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "source", Title: "Source"})
+	queueRepo := &mockQueueRepo{queue: q}
+	fetcher := &mockFetcher{
+		song: &entity.Song{ID: "candidate", Title: "Candidate", AddedBy: entity.SystemUserID},
+	}
+
+	interactor := NewInteractor(autoQueueRepo, queueRepo, fetcher)
+	interactor.SetAddAutoQueueSongFunc(testAddAutoQueueSong(queueRepo))
+
+	var capturedType string
+	var captured map[string]interface{}
+	interactor.SetBroadcaster(func(eventType string, data interface{}) {
+		capturedType = eventType
+		if m, ok := data.(map[string]interface{}); ok {
+			captured = m
+		}
+	})
+
+	if err := interactor.CheckAndTrigger(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedType != "auto_queue_added" {
+		t.Fatalf("expected auto_queue_added broadcast, got %q", capturedType)
+	}
+	if captured == nil {
+		t.Fatal("expected non-nil payload")
+	}
+	for _, k := range []string{"song", "source_song_title", "activity", "current_index", "current_song", "status", "elapsed"} {
+		if _, ok := captured[k]; !ok {
+			t.Errorf("broadcast payload missing %q", k)
+		}
+	}
+	if got, _ := captured["source_song_title"].(string); got != "Source" {
+		t.Errorf("expected source_song_title 'Source', got %q", got)
 	}
 }

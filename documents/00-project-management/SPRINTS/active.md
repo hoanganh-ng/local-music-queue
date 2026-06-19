@@ -1,7 +1,5 @@
 # Active Sprint
 
-**No active sprint.** Sprint 003 has been closed. No later sprint has been approved.
+**Sprint 004 — Authoritative Playback Advancement** is the active sprint. Implementation is complete and awaiting Architect review; the sprint has not been advanced or closed by the implementer.
 
-Work is currently pending Product Owner selection of the next sprint.
-
-**Explicit Statement:** No sprint is authorized for work until the Product Owner approves and activates a new sprint.
+See [004-authoritative-playback-advancement.md](./004-authoritative-playback-advancement.md).

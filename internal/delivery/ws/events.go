@@ -31,11 +31,18 @@ type UserJoinedData struct {
 	Activity    entity.Activity `json:"activity"`
 }
 
-// SongAddedData contains only the new song
+// SongAddedData contains only the new song.
+// Sprint 004 adds the authoritative post-mutation snapshot
+// (current_index, current_song, status, elapsed) so clients no longer need
+// to infer playback state after receiving the event.
 type SongAddedData struct {
-	Song     entity.Song     `json:"song"`
-	Position int             `json:"position"`
-	Activity entity.Activity `json:"activity"`
+	Song         entity.Song           `json:"song"`
+	Position     int                   `json:"position"`
+	Activity     entity.Activity       `json:"activity"`
+	CurrentIndex int                   `json:"current_index"`
+	CurrentSong  *entity.Song          `json:"current_song"`
+	Status       entity.PlaybackStatus `json:"status"`
+	Elapsed      int                   `json:"elapsed"`
 }
 
 // SongSkippedData contains index changes and new current song
@@ -125,10 +132,17 @@ type VoteResolvedData struct {
 }
 
 // AutoQueueAddedData contains info about auto-added song.
+// Sprint 004 adds the authoritative post-mutation snapshot
+// (current_index, current_song, status, elapsed) so clients no longer need
+// to infer playback state after receiving the event.
 type AutoQueueAddedData struct {
-	Song            entity.Song     `json:"song"`
-	SourceSongTitle string          `json:"source_song_title"`
-	Activity        entity.Activity `json:"activity"`
+	Song            entity.Song           `json:"song"`
+	SourceSongTitle string                `json:"source_song_title"`
+	Activity        entity.Activity       `json:"activity"`
+	CurrentIndex    int                   `json:"current_index"`
+	CurrentSong     *entity.Song          `json:"current_song"`
+	Status          entity.PlaybackStatus `json:"status"`
+	Elapsed         int                   `json:"elapsed"`
 }
 
 // AutoQueueConfigChangedData contains the updated auto-queue configuration.

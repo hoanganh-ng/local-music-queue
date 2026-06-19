@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -8,6 +10,7 @@ import (
 
 	delivery "local-music-queue/internal/delivery/http"
 	"local-music-queue/internal/delivery/ws"
+	"local-music-queue/internal/domain/entity"
 	"local-music-queue/internal/infrastructure/config"
 	"local-music-queue/internal/infrastructure/persistence"
 	"local-music-queue/internal/infrastructure/session"
@@ -118,8 +121,29 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	// Wire auto-queue into queue interactor
 	qInteractor.SetAutoQueueTrigger(autoQueueInteractor)
 
-	// Wire auto-queue callbacks to avoid race conditions
-	autoQueueInteractor.SetAddSongFunc(qInteractor.AddSongDirect)
+	// Wire auto-queue callbacks to avoid race conditions.
+	// Adapter translates between queue.AddAutoQueueSong (which owns the lock
+	// and returns queue.AddSongResult / queue.ErrAutoQueueStale) and the
+	// transport types declared in the autoqueue package, so autoqueue stays
+	// independent of usecase/queue.
+	autoQueueInteractor.SetAddAutoQueueSongFunc(func(ctx context.Context, song *entity.Song, expectedSourceSongID string) (*usecaseAutoQueue.AddSongResult, error) {
+		res, err := qInteractor.AddAutoQueueSong(ctx, song, expectedSourceSongID)
+		if err != nil {
+			if errors.Is(err, usecaseQueue.ErrAutoQueueStale) {
+				return nil, usecaseAutoQueue.ErrAutoQueueStale
+			}
+			return nil, err
+		}
+		return &usecaseAutoQueue.AddSongResult{
+			Song:         res.Song,
+			Position:     res.Position,
+			CurrentIndex: res.CurrentIndex,
+			CurrentSong:  res.CurrentSong,
+			Status:       res.Status,
+			Elapsed:      res.Elapsed,
+			Activity:     res.Activity,
+		}, nil
+	})
 
 	// 4. Initialize Delivery with queue state callback
 	hub := ws.NewHub(qInteractor.GetState)

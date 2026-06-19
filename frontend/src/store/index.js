@@ -73,18 +73,14 @@ export const globalStore = reactive({
     this.queueState.current_index = currentIndex
   },
 
-  // NEW: Add song to queue
+  // Add song to queue. Sprint 004: this is a pure splice + queue recalc.
+  // The previous "if queue was empty, set as current" auto-promotion was
+  // removed because backend now ships the authoritative current_index /
+  // current_song / status on the same song_added event — letting the store
+  // also infer them double-applied and could disagree with the backend.
   addSong(song, position) {
     // Insert song at specified position
     this.queueState.songs.splice(position, 0, song)
-
-    // If queue was empty, set as current song
-    if (this.queueState.current_index === -1 && this.queueState.songs.length === 1) {
-      this.queueState.current_index = 0
-      this.queueState.current_song = song
-      this.queueState.status = 'playing'
-    }
-
     // Recalculate "Up Next" queue
     this.recalculateQueue()
   },

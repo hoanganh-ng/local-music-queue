@@ -105,11 +105,11 @@ func TestAddSong_Success(t *testing.T) {
 	if !repo.addActCalled {
 		t.Error("expected QueueRepository.AddActivity to be called")
 	}
-	if song.AddedBy != "Alice" {
-		t.Errorf("expected AddedBy 'Alice', got '%s'", song.AddedBy)
+	if song.Song.AddedBy != "Alice" {
+		t.Errorf("expected AddedBy 'Alice', got '%s'", song.Song.AddedBy)
 	}
-	if song.ID != "vid1" {
-		t.Errorf("expected song ID 'vid1', got '%s'", song.ID)
+	if song.Song.ID != "vid1" {
+		t.Errorf("expected song ID 'vid1', got '%s'", song.Song.ID)
 	}
 	// Queue should have the song
 	if repo.queue == nil || len(repo.queue.Songs) != 1 {
@@ -142,14 +142,14 @@ func TestAddSong_WithMetadata_SkipsFetch(t *testing.T) {
 	if !repo.saveCalled {
 		t.Error("expected Save to be called")
 	}
-	if song.ID != "vid2" {
-		t.Errorf("expected song ID 'vid2', got '%s'", song.ID)
+	if song.Song.ID != "vid2" {
+		t.Errorf("expected song ID 'vid2', got '%s'", song.Song.ID)
 	}
-	if song.Title != "Fast Song" {
-		t.Errorf("expected title 'Fast Song', got '%s'", song.Title)
+	if song.Song.Title != "Fast Song" {
+		t.Errorf("expected title 'Fast Song', got '%s'", song.Song.Title)
 	}
-	if song.AddedBy != "Bob" {
-		t.Errorf("expected AddedBy 'Bob', got '%s'", song.AddedBy)
+	if song.Song.AddedBy != "Bob" {
+		t.Errorf("expected AddedBy 'Bob', got '%s'", song.Song.AddedBy)
 	}
 }
 
@@ -639,4 +639,172 @@ func TestRemoveSong_Usecase(t *testing.T) {
 			t.Errorf("expected activity user to be 'HostUser', got '%s'", res.Activity.User)
 		}
 	})
+}
+
+// --- Sprint 004: authoritative add-song snapshot + auto-queue staleness ---
+
+// TestAddSong_AuthoritativeResult asserts the result returned by AddSong carries
+// the post-mutation playback snapshot (Position, CurrentIndex, CurrentSong,
+// Status, Elapsed, Activity) built inside the same lock as the queue write.
+func TestAddSong_AuthoritativeResult(t *testing.T) {
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "existing", Title: "Existing", URL: "url-existing"})
+	// CurrentIndex 0, Status playing, Elapsed default 0.
+	repo := &mockQueueRepo{queue: q}
+	yt := &mockYouTubeService{
+		song: &entity.Song{ID: "newvid", Title: "New", URL: "url-new"},
+	}
+	interactor := NewInteractor(repo, yt)
+
+	res, err := interactor.AddSong(context.Background(), "url-new", "Alice", 1, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if res.Position != 1 {
+		t.Errorf("expected Position 1, got %d", res.Position)
+	}
+	if res.CurrentIndex != 0 {
+		t.Errorf("expected CurrentIndex 0, got %d", res.CurrentIndex)
+	}
+	if res.CurrentSong == nil || res.CurrentSong.ID != "existing" {
+		t.Errorf("expected CurrentSong 'existing', got %+v", res.CurrentSong)
+	}
+	if res.Status != entity.StatusPlaying {
+		t.Errorf("expected Status playing, got %s", res.Status)
+	}
+	if res.Activity.Type != entity.ActivitySongAdded || res.Activity.User != "Alice" {
+		t.Errorf("expected ActivitySongAdded for Alice, got %+v", res.Activity)
+	}
+}
+
+// TestAddSong_AuthoritativeResult_FirstSong asserts that when the queue was
+// empty, the snapshot reflects the just-promoted current song (queue.Add
+// promotes the first inserted song; see entity.Queue.Add).
+func TestAddSong_AuthoritativeResult_FirstSong(t *testing.T) {
+	repo := &mockQueueRepo{}
+	yt := &mockYouTubeService{
+		song: &entity.Song{ID: "only", Title: "Only", URL: "url-only"},
+	}
+	interactor := NewInteractor(repo, yt)
+
+	res, err := interactor.AddSong(context.Background(), "url-only", "Alice", 1, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Position != 0 {
+		t.Errorf("expected Position 0, got %d", res.Position)
+	}
+	if res.CurrentIndex != 0 {
+		t.Errorf("expected CurrentIndex 0 (auto-promoted), got %d", res.CurrentIndex)
+	}
+	if res.CurrentSong == nil || res.CurrentSong.ID != "only" {
+		t.Errorf("expected CurrentSong 'only', got %+v", res.CurrentSong)
+	}
+	if res.Status != entity.StatusPlaying {
+		t.Errorf("expected Status playing (auto-start), got %s", res.Status)
+	}
+}
+
+func TestAddAutoQueueSong_Success(t *testing.T) {
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "source", Title: "Source", URL: "url"})
+	// CurrentIndex 0, last song.
+	repo := &mockQueueRepo{queue: q}
+	interactor := NewInteractor(repo, &mockYouTubeService{})
+
+	candidate := &entity.Song{ID: "candidate", Title: "Candidate", URL: "url-cand", AddedBy: "Auto-Queue"}
+	res, err := interactor.AddAutoQueueSong(context.Background(), candidate, "source")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !repo.saveCalled {
+		t.Error("expected Save to be called")
+	}
+	if !repo.addActCalled {
+		t.Error("expected AddActivity to be called")
+	}
+	if res.Position != 1 || res.CurrentIndex != 0 || res.Status != entity.StatusPlaying {
+		t.Errorf("expected snapshot Position=1 CurrentIndex=0 Status=playing, got %+v", res)
+	}
+	if res.Activity.User != "Auto-Queue" {
+		t.Errorf("expected activity user 'Auto-Queue', got %s", res.Activity.User)
+	}
+}
+
+// TestAddAutoQueueSong_StaleSource: source song has already advanced
+// (e.g. SkipSong landed between FetchRelated start and finish).
+func TestAddAutoQueueSong_StaleSource(t *testing.T) {
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "old-source", Title: "Old", URL: "url-old"})
+	q.Add(entity.Song{ID: "new-current", Title: "New", URL: "url-new"})
+	q.CurrentIndex = 1 // advanced; old-source is no longer current
+	repo := &mockQueueRepo{queue: q}
+	interactor := NewInteractor(repo, &mockYouTubeService{})
+
+	candidate := &entity.Song{ID: "candidate", Title: "Candidate", AddedBy: "Auto-Queue"}
+	res, err := interactor.AddAutoQueueSong(context.Background(), candidate, "old-source")
+	if !errors.Is(err, ErrAutoQueueStale) {
+		t.Fatalf("expected ErrAutoQueueStale, got %v", err)
+	}
+	if res != nil {
+		t.Error("expected nil result on stale candidate")
+	}
+	if repo.saveCalled {
+		t.Error("Save must not be called for stale candidate")
+	}
+	if repo.addActCalled {
+		t.Error("AddActivity must not be called for stale candidate")
+	}
+	if len(repo.queue.Songs) != 2 {
+		t.Errorf("queue unchanged expected (2 songs), got %d", len(repo.queue.Songs))
+	}
+}
+
+// TestAddAutoQueueSong_StaleUpcomingExists: queue acquired an upcoming song
+// between fetch start and finish (e.g. manual add).
+func TestAddAutoQueueSong_StaleUpcomingExists(t *testing.T) {
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "source", Title: "Source", URL: "url"})
+	q.Add(entity.Song{ID: "manual-add", Title: "Manual", URL: "url-manual"})
+	// CurrentIndex 0, but upcoming song now exists → trigger condition violated.
+	repo := &mockQueueRepo{queue: q}
+	interactor := NewInteractor(repo, &mockYouTubeService{})
+
+	candidate := &entity.Song{ID: "candidate", Title: "Candidate", AddedBy: "Auto-Queue"}
+	_, err := interactor.AddAutoQueueSong(context.Background(), candidate, "source")
+	if !errors.Is(err, ErrAutoQueueStale) {
+		t.Fatalf("expected ErrAutoQueueStale, got %v", err)
+	}
+	if repo.saveCalled {
+		t.Error("Save must not be called when upcoming exists")
+	}
+	if repo.addActCalled {
+		t.Error("AddActivity must not be called when upcoming exists")
+	}
+}
+
+// TestAddAutoQueueSong_StaleDuplicate: candidate id already present in
+// upcoming queue (concurrent enqueue) → stale.
+func TestAddAutoQueueSong_StaleDuplicate(t *testing.T) {
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "source", Title: "Source", URL: "url"})
+	repo := &mockQueueRepo{queue: q}
+	interactor := NewInteractor(repo, &mockYouTubeService{})
+
+	// Race: another goroutine already added "candidate" before we reach the
+	// locked insertion. ContainsSong only inspects upcoming songs (after
+	// CurrentIndex), so seed an upcoming song with the same id.
+	q.Songs = append(q.Songs, entity.Song{ID: "candidate", Title: "Already Here"})
+	// upcoming exists now too → expect stale on upcoming check (first match).
+	candidate := &entity.Song{ID: "candidate", Title: "Candidate", AddedBy: "Auto-Queue"}
+	_, err := interactor.AddAutoQueueSong(context.Background(), candidate, "source")
+	if !errors.Is(err, ErrAutoQueueStale) {
+		t.Fatalf("expected ErrAutoQueueStale, got %v", err)
+	}
+	if repo.saveCalled {
+		t.Error("Save must not be called when candidate is duplicate or upcoming")
+	}
 }

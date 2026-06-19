@@ -104,6 +104,14 @@ const showPlayer = ref(true)
 let syncInterval = null
 const isUpdatingFromProp = ref(false)
 let statusChangeTimeout = null
+// Sprint 004: suppress backend status calls fired by the transient
+// PAUSED/BUFFERING/PLAYING events the YT IFrame API emits while
+// loadVideoById is swapping videos. Without this flag a programmatic load
+// races a real backend pause against playback. Genuine host play/pause
+// clicks still go through `isUpdatingFromProp` and are unaffected.
+const isLoadingVideo = ref(false)
+let loadingTimeout = null
+const LOADING_GUARD_MS = 1500
 
 // Helper to extract Video ID from URL
 const videoId = computed(() => {
@@ -138,6 +146,7 @@ onMounted(() => {
 onUnmounted(() => {
   if (syncInterval) clearInterval(syncInterval)
   if (statusChangeTimeout) clearTimeout(statusChangeTimeout)
+  if (loadingTimeout) clearTimeout(loadingTimeout)
 })
 
 function initPlayer() {
@@ -183,6 +192,21 @@ function onPlayerStateChange(event) {
         // The prop watcher will update the player state
       })
       .catch(err => console.error('Song ended call failed:', err))
+    return
+  }
+
+  // Sprint 004: while a programmatic loadVideoById is settling, the YT API
+  // fires transient PAUSED/BUFFERING/PLAYING events that do not reflect host
+  // intent. Suppress the backend status call for those. Clear the guard as
+  // soon as a stable PLAYING event matching props.status arrives.
+  if (isLoadingVideo.value) {
+    if (newStatus === 'playing' && props.status === 'playing') {
+      isLoadingVideo.value = false
+      if (loadingTimeout) {
+        clearTimeout(loadingTimeout)
+        loadingTimeout = null
+      }
+    }
     return
   }
 
@@ -241,10 +265,26 @@ watch(() => videoId.value, (newId, oldId) => {
   if (props.isHost && ytPlayer && ytPlayer.loadVideoById) {
     if (newId) {
       if (newId !== oldId) {
+        // Sprint 004: arm the load-guard so transient PAUSED/BUFFERING events
+        // from the iframe during the swap do not race a backend pause.
+        isLoadingVideo.value = true
+        if (loadingTimeout) clearTimeout(loadingTimeout)
+        loadingTimeout = setTimeout(() => {
+          isLoadingVideo.value = false
+          loadingTimeout = null
+        }, LOADING_GUARD_MS)
+
         ytPlayer.loadVideoById(newId)
         if (props.status === 'playing') ytPlayer.playVideo()
       }
     } else {
+      // No video to load: stopVideo also fires transient events; guard them.
+      isLoadingVideo.value = true
+      if (loadingTimeout) clearTimeout(loadingTimeout)
+      loadingTimeout = setTimeout(() => {
+        isLoadingVideo.value = false
+        loadingTimeout = null
+      }, LOADING_GUARD_MS)
       ytPlayer.stopVideo()
     }
   }

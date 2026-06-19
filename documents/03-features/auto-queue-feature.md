@@ -137,9 +137,15 @@ Broadcast when a song is auto-added to the queue.
     "addedBy": "system:autoqueue",
     "addedAt": "2026-05-06T09:35:45Z"
   },
-  "source_song_title": "Song that triggered the auto-add"
+  "source_song_title": "Song that triggered the auto-add",
+  "current_index": 0,
+  "current_song": { "id": "...", "title": "..." },
+  "status": "playing",
+  "elapsed": 12
 }
 ```
+
+**Sprint 004:** The payload was extended additively with `current_index`, `current_song`, `status`, and `elapsed`. These fields are populated from the authoritative post-mutation snapshot captured under the queue lock by `queue.Interactor.AddAutoQueueSong`. Clients use them directly; legacy clients that ignore the new fields continue to function. A stale candidate (source song no longer current or an upcoming song now exists) is rejected atomically and produces **no** `auto_queue_added` broadcast, no play-history append, no activity, and no queue save.
 
 **Broadcast:** To all connected clients in real-time
 
@@ -437,6 +443,13 @@ cd frontend && npm run test:unit
 ---
 
 ## Bug Fixes & Improvements
+
+### Sprint 004 (2026-06-19): Stale Candidate Atomicity
+
+- **Issue:** When a queue mutation (skip, song-ended, manual add) landed between the auto-queue interactor's slow `FetchRelated` call and the candidate's insertion, the candidate was still appended and broadcast even though it was no longer valid (the source song that seeded the radio mix was no longer current, or an upcoming song now existed).
+- **Root Cause:** The candidate-insertion path did not re-check the staleness preconditions under the queue lock.
+- **Fix:** Introduced `queue.Interactor.AddAutoQueueSong`, which atomically (under the queue mutation lock) re-checks the source-song identity, the trigger condition (current is last), and the duplicate guard. On any violation it returns `queue.ErrAutoQueueStale` with zero side effects — no queue save, no play-history append, no activity, no WebSocket broadcast. The `auto_queue_added` broadcast payload was extended with the post-mutation snapshot (`current_index`, `current_song`, `status`, `elapsed`).
+- **Files:** `internal/usecase/queue/interactor.go`, `internal/usecase/autoqueue/interactor.go`, `internal/delivery/ws/events.go`, `cmd/server/main.go`, `frontend/src/services/websocket.js`.
 
 ### Critical Fixes (2026-05-06)
 
