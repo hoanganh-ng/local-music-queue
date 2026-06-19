@@ -75,6 +75,7 @@ import { useRouter } from 'vue-router'
 import { globalStore } from '../store'
 import { api } from '../services/api'
 import { wsClient } from '../services/websocket'
+import { sessionHelper } from '../services/session'
 
 import ActivityLog from '../components/dashboard/ActivityLog.vue'
 import NowPlaying from '../components/dashboard/NowPlaying.vue'
@@ -164,6 +165,7 @@ onUnmounted(() => {
 })
 
 const handleLogout = () => {
+  sessionHelper.clearSession()
   globalStore.clearUser()
   wsClient.disconnect()
   router.push({ name: 'Auth' })

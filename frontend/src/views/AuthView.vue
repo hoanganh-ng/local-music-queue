@@ -37,6 +37,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { globalStore } from '../store'
 import { api } from '../services/api'
+import { sessionHelper } from '../services/session'
 
 const router = useRouter()
 const error = ref('')
@@ -48,7 +49,9 @@ onMounted(() => {
     error.value = ''
     isLoading.value = true
     try {
-      const user = await api.loginWithGoogle(response.credential)
+      const responseData = await api.loginWithGoogle(response.credential)
+      const { session_token, session_expires_at, ...user } = responseData
+      sessionHelper.saveSession(session_token, session_expires_at)
       globalStore.setUser(user)
       router.push({ name: 'Dashboard' })
     } catch (err) {

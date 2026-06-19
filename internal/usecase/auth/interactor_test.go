@@ -8,6 +8,43 @@ import (
 	"time"
 )
 
+type mockClock struct {
+	now time.Time
+}
+
+func (m *mockClock) Now() time.Time {
+	return m.now
+}
+
+type mockSessionStore struct {
+	sessions map[string]int
+	token    string
+	err      error
+}
+
+func (m *mockSessionStore) Create(ctx context.Context, userID int, ttl time.Duration) (string, time.Time, error) {
+	if m.err != nil {
+		return "", time.Time{}, m.err
+	}
+	m.sessions[m.token] = userID
+	return m.token, time.Now().Add(ttl), nil
+}
+
+func (m *mockSessionStore) Resolve(ctx context.Context, token string) (int, error) {
+	if m.err != nil {
+		return 0, m.err
+	}
+	id, ok := m.sessions[token]
+	if !ok {
+		return 0, errors.New("not found")
+	}
+	return id, nil
+}
+
+func (m *mockClock) nowFunc() time.Time {
+	return m.now
+}
+
 var ErrNotFound = errors.New("not found")
 
 // Mock UserRepository for testing
@@ -93,7 +130,9 @@ func TestNewInteractor(t *testing.T) {
 	hostEmails := []string{"host@example.com"}
 	adminEmails := []string{"admin@example.com"}
 
-	interactor := NewInteractor(repo, clientID, hostEmails, adminEmails)
+	clock := &mockClock{now: time.Now()}
+	store := &mockSessionStore{sessions: make(map[string]int), token: "test-token"}
+	interactor := NewInteractor(repo, clientID, hostEmails, adminEmails, store, clock)
 
 	if interactor == nil {
 		t.Fatal("expected non-nil interactor")
@@ -105,7 +144,9 @@ func TestNewInteractor(t *testing.T) {
 
 func TestIsHostEmail(t *testing.T) {
 	repo := newMockUserRepo()
-	interactor := NewInteractor(repo, "client-id", []string{"host@example.com", "Host2@Example.com"}, []string{})
+	clock := &mockClock{now: time.Now()}
+	store := &mockSessionStore{sessions: make(map[string]int), token: "test-token"}
+	interactor := NewInteractor(repo, "client-id", []string{"host@example.com", "Host2@Example.com"}, []string{}, store, clock)
 
 	tests := []struct {
 		email    string
@@ -128,7 +169,9 @@ func TestIsHostEmail(t *testing.T) {
 
 func TestIsAdminEmail(t *testing.T) {
 	repo := newMockUserRepo()
-	interactor := NewInteractor(repo, "client-id", []string{}, []string{"admin@example.com", "Admin2@Example.com"})
+	clock := &mockClock{now: time.Now()}
+	store := &mockSessionStore{sessions: make(map[string]int), token: "test-token"}
+	interactor := NewInteractor(repo, "client-id", []string{}, []string{"admin@example.com", "Admin2@Example.com"}, store, clock)
 
 	tests := []struct {
 		email    string

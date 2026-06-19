@@ -12,6 +12,20 @@ import (
 )
 
 // Interactor handles queue-related business logic.
+var (
+	ErrInvalidIndex     = errors.New("invalid song index")
+	ErrNotSongOwner     = errors.New("user does not own the song")
+	ErrCannotRemoveSong = errors.New("guest cannot remove current or already-played song")
+)
+
+type RemoveSongResult struct {
+	RemovedIndex    int
+	ResultingIndex  int
+	ResultingStatus entity.PlaybackStatus
+	Activity        entity.Activity
+	RemovedSong     entity.Song
+}
+
 type Interactor struct {
 	repo        repository.QueueRepository
 	youtube     service.YouTubeService
@@ -301,36 +315,67 @@ func (i *Interactor) PrevSong(ctx context.Context, requestedBy string) error {
 	return nil
 }
 
-// RemoveSong removes a song at the specified index.
-func (i *Interactor) RemoveSong(ctx context.Context, requestedBy string, index int) error {
+// RemoveSong removes a song at the specified index, enforcing permissions.
+func (i *Interactor) RemoveSong(ctx context.Context, user *entity.User, index int) (*RemoveSongResult, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
 	queue, err := i.repo.Load(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to load queue: %w", err)
+		return nil, fmt.Errorf("failed to load queue: %w", err)
 	}
 
+	// 1. Validate index
 	if index < 0 || index >= len(queue.Songs) {
-		return fmt.Errorf("invalid song index")
+		return nil, ErrInvalidIndex
 	}
 
-	songTitle := queue.Songs[index].Title
+	// 2. Check actor role and ownership
+	if user.Role != entity.RoleHost && user.Role != entity.RoleAdmin {
+		if user.Role == entity.RoleGuest {
+			// Guest:
+			// - index must be greater than queue.CurrentIndex
+			// - song.AddedByID must equal the guest's ID
+			// - AddedByID must not be zero
+			if index <= queue.CurrentIndex {
+				return nil, ErrCannotRemoveSong
+			}
+			song := queue.Songs[index]
+			if song.AddedByID == 0 || song.AddedByID != user.ID {
+				return nil, ErrNotSongOwner
+			}
+		} else {
+			// Unknown/unauthorized role
+			return nil, ErrNotSongOwner
+		}
+	}
 
+	// Capture removed-song information
+	removedSong := queue.Songs[index]
+
+	// Call the existing queue entity mutation
 	err = queue.Remove(index)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	// Save queue
 	err = i.repo.Save(ctx, queue)
 	if err != nil {
-		return fmt.Errorf("failed to save queue: %w", err)
+		return nil, fmt.Errorf("failed to save queue: %w", err)
 	}
 
-	activity := entity.NewActivity(entity.ActivityPlayback, requestedBy, fmt.Sprintf("removed \"%s\" from queue", songTitle))
+	// Add successful activity
+	activity := entity.NewActivity(entity.ActivityPlayback, user.DisplayName, fmt.Sprintf("removed \"%s\" from queue", removedSong.Title))
 	_ = i.repo.AddActivity(ctx, activity)
 
-	return nil
+	return &RemoveSongResult{
+		RemovedIndex:    index,
+		ResultingIndex:  queue.CurrentIndex,
+		ResultingStatus: queue.Status,
+		Activity:        activity,
+		RemovedSong:     removedSong,
+	}, nil
 }
 
 // ClearQueue clears all upcoming songs.

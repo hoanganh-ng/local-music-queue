@@ -1,4 +1,14 @@
+import { sessionHelper } from './session'
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'https://localhost:443'
+
+export class APIError extends Error {
+  constructor(status, message) {
+    super(message)
+    this.status = status
+    this.name = 'APIError'
+  }
+}
 
 export const api = {
   async request(endpoint, options = {}) {
@@ -6,6 +16,10 @@ export const api = {
 
     const defaultHeaders = {
       'Content-Type': 'application/json'
+    }
+
+    if (sessionHelper.isValid()) {
+      defaultHeaders['Authorization'] = `Bearer ${sessionHelper.getToken()}`
     }
 
     const config = {
@@ -29,7 +43,7 @@ export const api = {
 
     if (!response.ok) {
       const errorText = await response.text()
-      throw new Error(errorText || `API Request failed with status ${response.status}`)
+      throw new APIError(response.status, errorText || `API Request failed with status ${response.status}`)
     }
 
     return await response.json()

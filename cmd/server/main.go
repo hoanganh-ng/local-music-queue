@@ -10,6 +10,7 @@ import (
 	"local-music-queue/internal/delivery/ws"
 	"local-music-queue/internal/infrastructure/config"
 	"local-music-queue/internal/infrastructure/persistence"
+	"local-music-queue/internal/infrastructure/session"
 	"local-music-queue/internal/infrastructure/youtube"
 	usecaseActivity "local-music-queue/internal/usecase/activity"
 	usecaseAuth "local-music-queue/internal/usecase/auth"
@@ -98,9 +99,13 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 
 	ytService := youtube.NewYTDLPService(cfg.YTDLPPath)
 
+	// Initialize Session Store
+	sessionClock := usecaseAuth.RealClock{}
+	sessionStore := session.NewInMemoryStore(sessionClock)
+
 	// 3. Initialize Usecases
 	qInteractor := usecaseQueue.NewInteractor(repo, ytService)
-	authInteractor := usecaseAuth.NewInteractor(userRepo, googleClientID, hostEmails, adminEmails)
+	authInteractor := usecaseAuth.NewInteractor(userRepo, googleClientID, hostEmails, adminEmails, sessionStore, sessionClock)
 	actInteractor := usecaseActivity.NewInteractor(repo)
 	priorityInteractor := usecasePriority.NewInteractor(userRepo, repo)
 	voteInteractor := usecaseVote.NewInteractor(repo, userRepo, 0) // 0 = default 30s expiry

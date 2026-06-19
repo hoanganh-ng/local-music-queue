@@ -27,7 +27,7 @@
               <span v-if="song.added_by === 'system:autoqueue'" class="auto-badge" aria-label="Added by radio mode">📻 auto</span>
               {{ song.title || song.url }}
             </div>
-            <button v-if="canControl" class="remove-btn" @click="handleRemove(index)" title="Remove from queue">
+            <button v-if="canRemoveSong(song)" class="remove-btn" @click="handleRemove(index)" title="Remove from queue">
               &times;
             </button>
           </div>
@@ -73,8 +73,10 @@
 
 <script setup>
 import { computed, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { api } from '../../services/api'
 import { globalStore } from '../../store'
+import { sessionHelper } from '../../services/session'
 import VoteButton from './VoteButton.vue'
 import { useToast } from '../../composables/useToast'
 import { useConfirm } from '../../composables/useConfirm'
@@ -102,6 +104,14 @@ const currentUser = computed(() => globalStore.currentUser)
 const prioritizingIndex = ref(null)
 const toast = useToast()
 const { confirm } = useConfirm()
+const router = useRouter()
+
+function canRemoveSong(song) {
+  if (!currentUser.value) return false
+  const role = currentUser.value.role
+  if (role === 'host' || role === 'admin') return true
+  return song.added_by_id !== undefined && song.added_by_id !== 0 && song.added_by_id === currentUser.value.id
+}
 
 function shouldShowPrioritizeButton(song) {
   if (!currentUser.value) return false
@@ -177,7 +187,16 @@ async function handleRemove(indexInQueue) {
     await api.removeSong(fullIndex, globalStore.currentUser.display_name)
   } catch (err) {
     console.error('Remove song failed:', err)
-    toast.error('Could not remove song.')
+    if (err.status === 401) {
+      toast.error('Session expired. Please log in again.')
+      sessionHelper.clearSession()
+      globalStore.clearUser()
+      router.push({ name: 'Auth' })
+    } else if (err.status === 403) {
+      toast.error('Permission denied: ' + err.message)
+    } else {
+      toast.error('Failed to remove song.')
+    }
   }
 }
 

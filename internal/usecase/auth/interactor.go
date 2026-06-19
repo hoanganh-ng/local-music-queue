@@ -25,20 +25,44 @@ type GoogleUserInfo struct {
 
 // Interactor handles authentication logic.
 type Interactor struct {
-	userRepo    repository.UserRepository
-	clientID    string
-	hostEmails  []string
-	adminEmails []string
+	userRepo     repository.UserRepository
+	clientID     string
+	hostEmails   []string
+	adminEmails  []string
+	sessionStore SessionStore
+	clock        Clock
 }
 
 // NewInteractor creates a new Auth Interactor.
-func NewInteractor(userRepo repository.UserRepository, clientID string, hostEmails, adminEmails []string) *Interactor {
+func NewInteractor(userRepo repository.UserRepository, clientID string, hostEmails, adminEmails []string, sessionStore SessionStore, clock Clock) *Interactor {
 	return &Interactor{
-		userRepo:    userRepo,
-		clientID:    clientID,
-		hostEmails:  hostEmails,
-		adminEmails: adminEmails,
+		userRepo:     userRepo,
+		clientID:     clientID,
+		hostEmails:   hostEmails,
+		adminEmails:  adminEmails,
+		sessionStore: sessionStore,
+		clock:        clock,
 	}
+}
+
+// CreateSession creates a new session for the user ID with a 12-hour TTL.
+func (i *Interactor) CreateSession(ctx context.Context, userID int) (string, time.Time, error) {
+	return i.sessionStore.Create(ctx, userID, 12*time.Hour)
+}
+
+// ResolveSession resolves a session token to the user, loading the user from repository.
+func (i *Interactor) ResolveSession(ctx context.Context, token string) (*entity.User, error) {
+	userID, err := i.sessionStore.Resolve(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+
+	user, err := i.userRepo.GetUserByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	return user, nil
 }
 
 // VerifyGoogleToken verifies the Google ID token and returns user info.

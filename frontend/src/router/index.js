@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { globalStore } from '../store'
+import { sessionHelper } from '../services/session'
 
 const routes = [
   {
@@ -21,7 +22,14 @@ const router = createRouter({
 })
 
 router.beforeEach((to, from, next) => {
-  const isAuthenticated = !!globalStore.currentUser
+  const hasUser = !!globalStore.currentUser
+  const hasValidSession = sessionHelper.isValid()
+  const isAuthenticated = hasUser && hasValidSession
+
+  // Clear legacy localStorage user without valid session
+  if (hasUser && !hasValidSession) {
+    globalStore.clearUser()
+  }
 
   if (to.meta.requiresAuth && !isAuthenticated) {
     next({ name: 'Auth' })

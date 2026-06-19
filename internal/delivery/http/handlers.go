@@ -12,6 +12,8 @@ import (
 	"local-music-queue/internal/usecase/queue"
 	"local-music-queue/internal/usecase/vote"
 	"net/http"
+	"strings"
+	"time"
 )
 
 type Handlers struct {
@@ -64,6 +66,13 @@ func (h *Handlers) HandleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 	// Reload user to get updated priority balance
 	user, _ = h.auth.LoginWithGoogle(r.Context(), req.IDToken)
 
+	// Create session token
+	token, expiresAt, err := h.auth.CreateSession(r.Context(), user.ID)
+	if err != nil {
+		http.Error(w, "failed to create session: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	// Log join activity
 	joinActivity := entity.NewActivity(entity.ActivityUserJoined, user.DisplayName, "joined the room")
 	_ = h.activity.LogActivity(r.Context(), joinActivity)
@@ -75,7 +84,17 @@ func (h *Handlers) HandleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 		Activity:    joinActivity,
 	})
 
-	json.NewEncoder(w).Encode(user)
+	response := struct {
+		*entity.User
+		SessionToken     string    `json:"session_token"`
+		SessionExpiresAt time.Time `json:"session_expires_at"`
+	}{
+		User:             user,
+		SessionToken:     token,
+		SessionExpiresAt: expiresAt,
+	}
+
+	json.NewEncoder(w).Encode(response)
 }
 
 type LoginRequest struct {
@@ -348,6 +367,18 @@ type RemoveSongRequest struct {
 	RequestedBy string `json:"requested_by"`
 }
 
+func extractToken(r *http.Request) string {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return ""
+	}
+	parts := strings.Split(authHeader, " ")
+	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+		return ""
+	}
+	return parts[1]
+}
+
 func (h *Handlers) HandleRemoveSong(w http.ResponseWriter, r *http.Request) {
 	var req RemoveSongRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -355,20 +386,37 @@ func (h *Handlers) HandleRemoveSong(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := h.queue.RemoveSong(r.Context(), req.RequestedBy, req.Index)
+	token := extractToken(r)
+	if token == "" {
+		http.Error(w, "missing or malformed Authorization header", http.StatusUnauthorized)
+		return
+	}
+
+	user, err := h.auth.ResolveSession(r.Context(), token)
 	if err != nil {
+		http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	res, err := h.queue.RemoveSong(r.Context(), user, req.Index)
+	if err != nil {
+		if errors.Is(err, queue.ErrInvalidIndex) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if errors.Is(err, queue.ErrNotSongOwner) || errors.Is(err, queue.ErrCannotRemoveSong) {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	stateAfter, _ := h.queue.GetState(r.Context())
-	activity := entity.NewActivity(entity.ActivityPlayback, req.RequestedBy, "removed a song from queue")
-
 	h.hub.Broadcast(ws.EventSongRemoved, ws.SongRemovedData{
-		RemovedIndex: req.Index,
-		NewIndex:     stateAfter.CurrentIndex,
-		Status:       stateAfter.Status,
-		Activity:     activity,
+		RemovedIndex: res.RemovedIndex,
+		NewIndex:     res.ResultingIndex,
+		Status:       res.ResultingStatus,
+		Activity:     res.Activity,
 	})
 
 	w.WriteHeader(http.StatusNoContent)

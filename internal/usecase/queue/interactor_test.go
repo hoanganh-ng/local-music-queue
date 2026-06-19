@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"local-music-queue/internal/domain/entity"
+	"strings"
 	"testing"
 )
 
@@ -477,4 +478,158 @@ func TestSearchYouTube_ServiceError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when service fails")
 	}
+}
+
+func TestRemoveSong_Usecase(t *testing.T) {
+	setupQueue := func() (*entity.Queue, *mockQueueRepo, *Interactor) {
+		q := entity.NewQueue()
+		q.Add(entity.Song{ID: "vid0", Title: "Song 0", AddedByID: 10, AddedBy: "Guest1"})
+		q.Add(entity.Song{ID: "vid1", Title: "Song 1", AddedByID: 20, AddedBy: "Guest2"})
+		q.Add(entity.Song{ID: "vid2", Title: "Song 2", AddedByID: 10, AddedBy: "Guest1"})
+		q.Add(entity.Song{ID: "vid3", Title: "Song 3", AddedByID: 20, AddedBy: "Guest2"})
+		q.Add(entity.Song{ID: "vid4", Title: "Song 4", AddedByID: 0, AddedBy: "System"})
+		q.CurrentIndex = 1
+		q.Status = entity.StatusPlaying
+		repo := &mockQueueRepo{queue: q}
+		interactor := NewInteractor(repo, &mockYouTubeService{})
+		return q, repo, interactor
+	}
+
+	ctx := context.Background()
+	guest1 := &entity.User{ID: 10, Role: entity.RoleGuest, DisplayName: "Guest1"}
+	host := &entity.User{ID: 1, Role: entity.RoleHost, DisplayName: "HostUser"}
+	admin := &entity.User{ID: 2, Role: entity.RoleAdmin, DisplayName: "AdminUser"}
+
+	t.Run("Guest removes own upcoming song", func(t *testing.T) {
+		_, repo, interactor := setupQueue()
+		res, err := interactor.RemoveSong(ctx, guest1, 2)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.RemovedIndex != 2 {
+			t.Errorf("expected removed index 2, got %d", res.RemovedIndex)
+		}
+		if len(repo.queue.Songs) != 4 {
+			t.Errorf("expected 4 songs remaining, got %d", len(repo.queue.Songs))
+		}
+	})
+
+	t.Run("Guest cannot remove another user's song", func(t *testing.T) {
+		_, repo, interactor := setupQueue()
+		_, err := interactor.RemoveSong(ctx, guest1, 3)
+		if !errors.Is(err, ErrNotSongOwner) {
+			t.Errorf("expected ErrNotSongOwner, got %v", err)
+		}
+		if repo.saveCalled {
+			t.Error("Save should not have been called")
+		}
+	})
+
+	t.Run("Guest cannot remove current song", func(t *testing.T) {
+		_, repo, interactor := setupQueue()
+		_, err := interactor.RemoveSong(ctx, guest1, 1)
+		if !errors.Is(err, ErrCannotRemoveSong) {
+			t.Errorf("expected ErrCannotRemoveSong, got %v", err)
+		}
+		if repo.saveCalled {
+			t.Error("Save should not have been called")
+		}
+	})
+
+	t.Run("Guest cannot remove already-played song", func(t *testing.T) {
+		_, repo, interactor := setupQueue()
+		_, err := interactor.RemoveSong(ctx, guest1, 0)
+		if !errors.Is(err, ErrCannotRemoveSong) {
+			t.Errorf("expected ErrCannotRemoveSong, got %v", err)
+		}
+		if repo.saveCalled {
+			t.Error("Save should not have been called")
+		}
+	})
+
+	t.Run("Guest cannot remove AddedByID == 0 song", func(t *testing.T) {
+		_, repo, interactor := setupQueue()
+		_, err := interactor.RemoveSong(ctx, guest1, 4)
+		if !errors.Is(err, ErrNotSongOwner) {
+			t.Errorf("expected ErrNotSongOwner, got %v", err)
+		}
+		if repo.saveCalled {
+			t.Error("Save should not have been called")
+		}
+	})
+
+	t.Run("Host removes another user's song", func(t *testing.T) {
+		_, _, interactor := setupQueue()
+		res, err := interactor.RemoveSong(ctx, host, 3)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.RemovedIndex != 3 {
+			t.Errorf("expected removed index 3, got %d", res.RemovedIndex)
+		}
+	})
+
+	t.Run("Admin removes another user's song", func(t *testing.T) {
+		_, _, interactor := setupQueue()
+		res, err := interactor.RemoveSong(ctx, admin, 3)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.RemovedIndex != 3 {
+			t.Errorf("expected removed index 3, got %d", res.RemovedIndex)
+		}
+	})
+
+	t.Run("Host removes current song", func(t *testing.T) {
+		_, repo, interactor := setupQueue()
+		res, err := interactor.RemoveSong(ctx, host, 1)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.RemovedIndex != 1 {
+			t.Errorf("expected removed index 1, got %d", res.RemovedIndex)
+		}
+		if repo.queue.CurrentIndex != 1 {
+			t.Errorf("expected CurrentIndex to be 1, got %d", repo.queue.CurrentIndex)
+		}
+	})
+
+	t.Run("Invalid index returns ErrInvalidIndex", func(t *testing.T) {
+		_, repo, interactor := setupQueue()
+		_, err := interactor.RemoveSong(ctx, host, 10)
+		if !errors.Is(err, ErrInvalidIndex) {
+			t.Errorf("expected ErrInvalidIndex, got %v", err)
+		}
+		if repo.saveCalled {
+			t.Error("Save should not have been called")
+		}
+	})
+
+	t.Run("Authorization denial does not add activity", func(t *testing.T) {
+		_, repo, interactor := setupQueue()
+		_, _ = interactor.RemoveSong(ctx, guest1, 3)
+		if repo.addActCalled {
+			t.Error("AddActivity should not have been called")
+		}
+	})
+
+	t.Run("Save failure returns internal error", func(t *testing.T) {
+		_, repo, interactor := setupQueue()
+		repo.saveErr = errors.New("save error")
+		_, err := interactor.RemoveSong(ctx, host, 2)
+		if err == nil || !strings.Contains(err.Error(), "failed to save queue") {
+			t.Errorf("expected save error, got %v", err)
+		}
+	})
+
+	t.Run("Successful activity uses authenticated actor display name", func(t *testing.T) {
+		_, _, interactor := setupQueue()
+		res, err := interactor.RemoveSong(ctx, host, 2)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.Activity.User != "HostUser" {
+			t.Errorf("expected activity user to be 'HostUser', got '%s'", res.Activity.User)
+		}
+	})
 }

@@ -2,10 +2,13 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"local-music-queue/internal/delivery/ws"
 	"local-music-queue/internal/domain/entity"
+	"local-music-queue/internal/domain/repository"
 	"local-music-queue/internal/infrastructure/persistence"
+	"local-music-queue/internal/infrastructure/session"
 	"local-music-queue/internal/infrastructure/youtube"
 	"local-music-queue/internal/usecase/activity"
 	"local-music-queue/internal/usecase/auth"
@@ -18,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 // newTestHandlers creates Handlers wired to a temp SQLite DB and a fake yt-dlp.
@@ -49,7 +53,9 @@ EOF
 	}
 
 	queueInteractor := queue.NewInteractor(repo, ytSvc)
-	authInteractor := auth.NewInteractor(userRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"})
+	sessionClock := auth.RealClock{}
+	sessionStore := session.NewInMemoryStore(sessionClock)
+	authInteractor := auth.NewInteractor(userRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, sessionStore, sessionClock)
 	actInteractor := activity.NewInteractor(repo)
 	priorityInteractor := priority.NewInteractor(userRepo, repo)
 	voteInteractor := vote.NewInteractor(repo, userRepo, 0)
@@ -272,7 +278,9 @@ EOF
 	userRepo := persistence.NewSQLiteUserRepository(repo.DB())
 
 	queueInteractor := queue.NewInteractor(repo, ytSvc)
-	authInteractor := auth.NewInteractor(userRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"})
+	sessionClock := auth.RealClock{}
+	sessionStore := session.NewInMemoryStore(sessionClock)
+	authInteractor := auth.NewInteractor(userRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, sessionStore, sessionClock)
 	actInteractor := activity.NewInteractor(repo)
 	priorityInteractor := priority.NewInteractor(userRepo, repo)
 	voteInteractor := vote.NewInteractor(repo, userRepo, 0)
@@ -321,4 +329,193 @@ func TestHandleSearchYouTube_EmptyQuery(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", rr.Code)
 	}
+}
+
+func newTestHandlersWithStore(t *testing.T) (*Handlers, repository.UserRepository, auth.SessionStore) {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	repo, err := persistence.NewSQLiteRepository(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+
+	userRepo := persistence.NewSQLiteUserRepository(repo.DB())
+
+	var ytSvc *youtube.YTDLPService
+	if runtime.GOOS != "windows" {
+		script := filepath.Join(dir, "fake-ytdlp")
+		content := `#!/bin/sh
+cat <<'EOF'
+{"id":"test123","title":"Test Song","uploader":"Artist","duration":180.0,"thumbnail":"thumb.jpg","webpage_url":"https://youtube.com/watch?v=test123"}
+EOF
+`
+		os.WriteFile(script, []byte(content), 0755)
+		ytSvc = youtube.NewYTDLPService(script)
+	} else {
+		ytSvc = youtube.NewYTDLPService("echo")
+	}
+
+	queueInteractor := queue.NewInteractor(repo, ytSvc)
+	sessionClock := auth.RealClock{}
+	sessionStore := session.NewInMemoryStore(sessionClock)
+	authInteractor := auth.NewInteractor(userRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, sessionStore, sessionClock)
+	actInteractor := activity.NewInteractor(repo)
+	priorityInteractor := priority.NewInteractor(userRepo, repo)
+	voteInteractor := vote.NewInteractor(repo, userRepo, 0)
+	hub := ws.NewHub(queueInteractor.GetState)
+	go hub.Run()
+
+	return NewHandlers(queueInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, hub), userRepo, sessionStore
+}
+
+func TestHandleRemoveSong_HTTP(t *testing.T) {
+	ctx := context.Background()
+	h, userRepo, sessionStore := newTestHandlersWithStore(t)
+
+	guestUser := &entity.User{
+		Email:       "guest@urekamedia.vn",
+		DisplayName: "GuestOne",
+		Role:        entity.RoleGuest,
+	}
+	err := userRepo.CreateUser(ctx, guestUser)
+	if err != nil {
+		t.Fatalf("failed to create guest user: %v", err)
+	}
+
+	otherGuestUser := &entity.User{
+		Email:       "other@urekamedia.vn",
+		DisplayName: "GuestTwo",
+		Role:        entity.RoleGuest,
+	}
+	err = userRepo.CreateUser(ctx, otherGuestUser)
+	if err != nil {
+		t.Fatalf("failed to create other guest: %v", err)
+	}
+
+	hostUser := &entity.User{
+		Email:       "host@example.com",
+		DisplayName: "HostUser",
+		Role:        entity.RoleHost,
+	}
+	err = userRepo.CreateUser(ctx, hostUser)
+	if err != nil {
+		t.Fatalf("failed to create host user: %v", err)
+	}
+
+	guestToken, _, _ := sessionStore.Create(ctx, guestUser.ID, time.Hour)
+	_, _, _ = sessionStore.Create(ctx, otherGuestUser.ID, time.Hour)
+
+	h.queue.AddSongDirect(ctx, &entity.Song{ID: "vid0", Title: "Song 0", AddedByID: guestUser.ID, AddedBy: guestUser.DisplayName})
+	h.queue.AddSongDirect(ctx, &entity.Song{ID: "vid1", Title: "Song 1", AddedByID: otherGuestUser.ID, AddedBy: otherGuestUser.DisplayName})
+	h.queue.AddSongDirect(ctx, &entity.Song{ID: "vid2", Title: "Song 2", AddedByID: guestUser.ID, AddedBy: guestUser.DisplayName})
+
+	t.Run("Missing bearer header returns 401", func(t *testing.T) {
+		body, _ := json.Marshal(RemoveSongRequest{Index: 1, RequestedBy: "guest"})
+		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
+		rr := httptest.NewRecorder()
+		h.HandleRemoveSong(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401, got %d", rr.Code)
+		}
+	})
+
+	t.Run("Malformed bearer header returns 401", func(t *testing.T) {
+		body, _ := json.Marshal(RemoveSongRequest{Index: 1, RequestedBy: "guest"})
+		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer")
+		rr := httptest.NewRecorder()
+		h.HandleRemoveSong(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401, got %d", rr.Code)
+		}
+	})
+
+	t.Run("Invalid token returns 401", func(t *testing.T) {
+		body, _ := json.Marshal(RemoveSongRequest{Index: 1, RequestedBy: "guest"})
+		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer invalid-token")
+		rr := httptest.NewRecorder()
+		h.HandleRemoveSong(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401, got %d", rr.Code)
+		}
+	})
+
+	t.Run("Expired token returns 401", func(t *testing.T) {
+		expiredToken, _, _ := sessionStore.Create(ctx, guestUser.ID, -time.Hour)
+		body, _ := json.Marshal(RemoveSongRequest{Index: 1, RequestedBy: "guest"})
+		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+expiredToken)
+		rr := httptest.NewRecorder()
+		h.HandleRemoveSong(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401, got %d", rr.Code)
+		}
+	})
+
+	t.Run("Malformed JSON returns 400", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader([]byte("not json")))
+		req.Header.Set("Authorization", "Bearer "+guestToken)
+		rr := httptest.NewRecorder()
+		h.HandleRemoveSong(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d", rr.Code)
+		}
+	})
+
+	t.Run("Invalid index returns 400", func(t *testing.T) {
+		body, _ := json.Marshal(RemoveSongRequest{Index: 10, RequestedBy: "guest"})
+		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+guestToken)
+		rr := httptest.NewRecorder()
+		h.HandleRemoveSong(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d", rr.Code)
+		}
+	})
+
+	t.Run("Guest ownership failure returns 403", func(t *testing.T) {
+		body, _ := json.Marshal(RemoveSongRequest{Index: 1, RequestedBy: "guest"})
+		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+guestToken)
+		rr := httptest.NewRecorder()
+		h.HandleRemoveSong(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("expected 403, got %d", rr.Code)
+		}
+	})
+
+	t.Run("Guest non-upcoming removal returns 403", func(t *testing.T) {
+		body, _ := json.Marshal(RemoveSongRequest{Index: 0, RequestedBy: "guest"})
+		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+guestToken)
+		rr := httptest.NewRecorder()
+		h.HandleRemoveSong(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("expected 403, got %d", rr.Code)
+		}
+	})
+
+	t.Run("requested_by does not override auth role/permissions", func(t *testing.T) {
+		body, _ := json.Marshal(RemoveSongRequest{Index: 1, RequestedBy: "host@example.com"})
+		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+guestToken)
+		rr := httptest.NewRecorder()
+		h.HandleRemoveSong(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("expected 403 even with host requested_by, got %d", rr.Code)
+		}
+	})
+
+	t.Run("Success returns 204", func(t *testing.T) {
+		body, _ := json.Marshal(RemoveSongRequest{Index: 2, RequestedBy: "guest"})
+		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+guestToken)
+		rr := httptest.NewRecorder()
+		h.HandleRemoveSong(rr, req)
+		if rr.Code != http.StatusNoContent {
+			t.Errorf("expected 204, got %d", rr.Code)
+		}
+	})
 }

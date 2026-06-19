@@ -67,8 +67,8 @@ SQLite with 7 tables, index, trigger, and single-row queue JSON storage.
 
 ## Authentication & Authorization
 - **Login Verification:** Verifies Google OAuth token audience and `email_verified` fields. Hard-coded allowed domain check. Also logs configured emails (Host/Admin emails) on startup.
-- **Identity Management:** There is a complete absence of JWT, server session, or per-request authenticated identity. Roles are assigned as identity metadata and UI behavior only; this does not claim effective backend RBAC. Identity and role are client-supplied on subsequent requests.
-- **Authorization Enforcement:** Absence of backend authorization checks on most playback operations (e.g. skip, clear queue) and auto-queue toggling.
+- **Identity Management:** Server-issued session tokens (stored in memory) are used to authenticate requests for song removal (`POST /api/queue/remove`). For other endpoints, there remains an absence of server sessions or per-request authenticated identity, where roles and identity are client-supplied.
+- **Authorization Enforcement:** Backend authorization checks are enforced on song removal (`POST /api/queue/remove`). There is an absence of backend authorization checks on other playback operations (e.g., skip, clear queue) and auto-queue toggling.
 - **WebSocket Caveats:** Accepts any origin without validation. Also uses an insecure query parameter `user_id` for connection identification.
 
 ## Community Voting Mechanics

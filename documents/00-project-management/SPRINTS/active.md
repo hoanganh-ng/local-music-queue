@@ -1,10 +1,10 @@
 # Active Sprint
 
 The currently active sprint is:
-**[Sprint 002 - Restore Trustworthy Verification Baseline](002-trustworthy-verification-baseline.md)**
+**[Sprint 003 - Trusted Owned-Song Removal](003-trusted-owned-song-removal.md)**
 
-**Goal:** Establish a reliable, repeatable verification baseline for the existing Local Music Queue implementation.
+**Goal:** Fix GitHub Issue #7 by allowing authenticated guests to remove their own upcoming songs while preserving host/admin removal authority.
 
-**Status:** In progress — awaiting Architect review and Product Owner approval.
+**Status:** In progress.
 
-**Explicit Statement:** No later sprint is approved. Work is currently restricted solely to the scope defined in Sprint 002.
+**Explicit Statement:** No later sprint is approved. Work is currently restricted solely to the scope defined in Sprint 003.
