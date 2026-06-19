@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { shallowMount } from '@vue/test-utils'
 import DashboardView from '../DashboardView.vue'
 import { globalStore } from '../../store'
 import { wsClient } from '../../services/websocket'
@@ -33,7 +33,7 @@ describe('DashboardView', () => {
     localStorage.clear()
     sessionStorage.clear()
     globalStore.clearUser()
-    vi.restoreAllMocks()
+    vi.clearAllMocks()
   })
 
   it('logout clears sessionStorage, globalStore user, and navigates to Auth', async () => {
@@ -41,7 +41,7 @@ describe('DashboardView', () => {
     sessionStorage.setItem('lmq_session_token', 'active-token')
     sessionStorage.setItem('lmq_session_expires_at', 'expires-at')
 
-    const wrapper = mount(DashboardView)
+    const wrapper = shallowMount(DashboardView)
     const logoutBtn = wrapper.find('.logout-btn')
     expect(logoutBtn.exists()).toBe(true)
 
