@@ -5,6 +5,6 @@ The currently active sprint is:
 
 **Goal:** Establish a reliable, repeatable verification baseline for the existing Local Music Queue implementation.
 
-**Status:** In progress — awaiting verification results.
+**Status:** In progress — awaiting Architect review and Product Owner approval.
 
 **Explicit Statement:** No later sprint is approved. Work is currently restricted solely to the scope defined in Sprint 002.
