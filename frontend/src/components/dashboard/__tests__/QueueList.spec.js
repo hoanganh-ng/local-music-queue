@@ -25,7 +25,7 @@ vi.mock('../../../services/api', () => ({
 const { mockToastError } = vi.hoisted(() => ({
   mockToastError: vi.fn()
 }))
-vi.mock('../../composables/useToast', () => ({
+vi.mock('../../../composables/useToast', () => ({
   useToast: () => ({
     error: mockToastError,
     success: vi.fn(),
