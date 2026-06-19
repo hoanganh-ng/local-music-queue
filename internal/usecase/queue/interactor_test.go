@@ -666,8 +666,14 @@ func TestAddSong_AuthoritativeResult(t *testing.T) {
 	if res.Position != 1 {
 		t.Errorf("expected Position 1, got %d", res.Position)
 	}
+	if res.PreviousCurrentIndex != 0 {
+		t.Errorf("expected PreviousCurrentIndex 0, got %d", res.PreviousCurrentIndex)
+	}
 	if res.CurrentIndex != 0 {
 		t.Errorf("expected CurrentIndex 0, got %d", res.CurrentIndex)
+	}
+	if res.PlaybackAdvanced {
+		t.Errorf("expected PlaybackAdvanced false (normal append), got true")
 	}
 	if res.CurrentSong == nil || res.CurrentSong.ID != "existing" {
 		t.Errorf("expected CurrentSong 'existing', got %+v", res.CurrentSong)
@@ -697,14 +703,49 @@ func TestAddSong_AuthoritativeResult_FirstSong(t *testing.T) {
 	if res.Position != 0 {
 		t.Errorf("expected Position 0, got %d", res.Position)
 	}
+	if res.PreviousCurrentIndex != -1 {
+		t.Errorf("expected PreviousCurrentIndex -1, got %d", res.PreviousCurrentIndex)
+	}
 	if res.CurrentIndex != 0 {
 		t.Errorf("expected CurrentIndex 0 (auto-promoted), got %d", res.CurrentIndex)
+	}
+	if !res.PlaybackAdvanced {
+		t.Errorf("expected PlaybackAdvanced true (empty queue promotion), got false")
 	}
 	if res.CurrentSong == nil || res.CurrentSong.ID != "only" {
 		t.Errorf("expected CurrentSong 'only', got %+v", res.CurrentSong)
 	}
 	if res.Status != entity.StatusPlaying {
 		t.Errorf("expected Status playing (auto-start), got %s", res.Status)
+	}
+}
+
+// TestAddSong_AuthoritativeResult_ExhaustedPaused advances playback from an
+// exhausted-paused tail (queue.Add promotes the new song when current is
+// last AND status is paused).
+func TestAddSong_AuthoritativeResult_ExhaustedPaused(t *testing.T) {
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "source", Title: "Source", URL: "url"})
+	q.CurrentIndex = 0
+	q.Status = entity.StatusPaused // exhausted
+	repo := &mockQueueRepo{queue: q}
+	yt := &mockYouTubeService{
+		song: &entity.Song{ID: "after", Title: "After", URL: "url-after"},
+	}
+	interactor := NewInteractor(repo, yt)
+
+	res, err := interactor.AddSong(context.Background(), "url-after", "Alice", 1, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.PreviousCurrentIndex != 0 {
+		t.Errorf("expected PreviousCurrentIndex 0, got %d", res.PreviousCurrentIndex)
+	}
+	if res.CurrentIndex != 1 {
+		t.Errorf("expected CurrentIndex 1 (promoted), got %d", res.CurrentIndex)
+	}
+	if !res.PlaybackAdvanced {
+		t.Errorf("expected PlaybackAdvanced true (exhausted paused), got false")
 	}
 }
 
@@ -729,8 +770,46 @@ func TestAddAutoQueueSong_Success(t *testing.T) {
 	if res.Position != 1 || res.CurrentIndex != 0 || res.Status != entity.StatusPlaying {
 		t.Errorf("expected snapshot Position=1 CurrentIndex=0 Status=playing, got %+v", res)
 	}
+	if res.PreviousCurrentIndex != 0 {
+		t.Errorf("expected PreviousCurrentIndex 0, got %d", res.PreviousCurrentIndex)
+	}
+	if res.PlaybackAdvanced {
+		t.Errorf("expected PlaybackAdvanced false (auto-queue appends, doesn't advance), got true")
+	}
 	if res.Activity.User != "Auto-Queue" {
 		t.Errorf("expected activity user 'Auto-Queue', got %s", res.Activity.User)
+	}
+}
+
+// TestAddAutoQueueSong_LoadFailureIsOperational: ErrAutoQueueStale is reserved
+// for predicate failures evaluated against a successfully-loaded queue. A
+// repository load failure must surface as a wrapped operational error so the
+// caller can distinguish an infra failure from a stale state.
+func TestAddAutoQueueSong_LoadFailureIsOperational(t *testing.T) {
+	repo := &mockQueueRepo{
+		loadErr: errors.New("db unavailable"),
+	}
+	interactor := NewInteractor(repo, &mockYouTubeService{})
+
+	candidate := &entity.Song{ID: "candidate", Title: "Candidate", AddedBy: "Auto-Queue"}
+	res, err := interactor.AddAutoQueueSong(context.Background(), candidate, "source")
+	if err == nil {
+		t.Fatal("expected error on repository load failure")
+	}
+	if errors.Is(err, ErrAutoQueueStale) {
+		t.Errorf("load failure must NOT be reported as ErrAutoQueueStale, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "failed to load queue for auto-queue revalidation") {
+		t.Errorf("expected wrapped load error, got %v", err)
+	}
+	if res != nil {
+		t.Error("expected nil result on operational load failure")
+	}
+	if repo.saveCalled {
+		t.Error("Save must not be called on load failure")
+	}
+	if repo.addActCalled {
+		t.Error("AddActivity must not be called on load failure")
 	}
 }
 

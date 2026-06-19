@@ -444,12 +444,63 @@ cd frontend && npm run test:unit
 
 ## Bug Fixes & Improvements
 
-### Sprint 004 (2026-06-19): Stale Candidate Atomicity
+### Sprint 004 (2026-06-19): Authoritative Playback Advancement + Auto-Queue Serialization (review pending)
 
-- **Issue:** When a queue mutation (skip, song-ended, manual add) landed between the auto-queue interactor's slow `FetchRelated` call and the candidate's insertion, the candidate was still appended and broadcast even though it was no longer valid (the source song that seeded the radio mix was no longer current, or an upcoming song now existed).
-- **Root Cause:** The candidate-insertion path did not re-check the staleness preconditions under the queue lock.
-- **Fix:** Introduced `queue.Interactor.AddAutoQueueSong`, which atomically (under the queue mutation lock) re-checks the source-song identity, the trigger condition (current is last), and the duplicate guard. On any violation it returns `queue.ErrAutoQueueStale` with zero side effects — no queue save, no play-history append, no activity, no WebSocket broadcast. The `auto_queue_added` broadcast payload was extended with the post-mutation snapshot (`current_index`, `current_song`, `status`, `elapsed`).
-- **Files:** `internal/usecase/queue/interactor.go`, `internal/usecase/autoqueue/interactor.go`, `internal/delivery/ws/events.go`, `cmd/server/main.go`, `frontend/src/services/websocket.js`.
+**First issue:** When a queue mutation (skip, song-ended, manual add) landed
+between the auto-queue interactor's slow `FetchRelated` call and the
+candidate's insertion, the candidate was still appended and broadcast even
+though it was no longer valid (the source song that seeded the radio mix was
+no longer current, or an upcoming song now existed).
+
+**Second issue:** `SetEnabled(false)` landing during the slow `FetchRelated`
+window could not be observed before the candidate was inserted, because the
+auto-queue interactor did not re-check `cfg.Enabled` after the fetch.
+
+**Third issue:** A repository load failure during the locked insertion was
+collapsed into `ErrAutoQueueStale`, masking operational failures as stale
+candidates.
+
+**Root causes:**
+- The candidate-insertion path did not re-check the staleness preconditions
+  under the queue lock.
+- The auto-queue interactor read `cfg.Enabled` once before the slow fetch and
+  did not re-validate after.
+- `AddAutoQueueSong` returned `ErrAutoQueueStale` for any failure, including
+  repository load failures.
+
+**Fix:**
+- Introduced `queue.Interactor.AddAutoQueueSong`, which atomically (under
+  the queue mutation lock) re-checks the source-song identity, the trigger
+  condition (current is last), and the duplicate guard. On any violation it
+  returns `queue.ErrAutoQueueStale` with zero side effects — no queue save,
+  no play-history append, no activity, no WebSocket broadcast.
+- Repository load failures in `AddAutoQueueSong` are wrapped and returned as
+  operational errors. `ErrAutoQueueStale` is reserved for stale predicates
+  evaluated against a successfully-loaded queue.
+- `autoqueue.Interactor.CheckAndTrigger` now reads `cfg.Enabled` both before
+  and after `FetchRelated`. The slow fetch runs OUTSIDE the interactor's
+  mutex; the pre-fetch and post-fetch config checks share the same mutex as
+  `SetEnabled`, so a `SetEnabled(false)` that lands mid-fetch is observed
+  before the candidate is inserted (zero save, history, activity, or
+  broadcast).
+- The `auto_queue_added` broadcast payload was extended with the
+  post-mutation snapshot (`current_index`, `current_song`, `status`,
+  `elapsed`).
+- `queue.Interactor.AddSong`, `AddSongDirect`, and `AddAutoQueueSong` now
+  return an `AddSongResult` carrying `PreviousCurrentIndex` and
+  `PlaybackAdvanced` (captured under the same lock). These are internal and
+  are NOT serialized over WebSocket.
+
+**Files:** `internal/usecase/queue/interactor.go`,
+`internal/usecase/autoqueue/interactor.go`, `internal/delivery/ws/events.go`,
+`cmd/server/main.go`, `frontend/src/services/websocket.js`,
+`frontend/src/store/index.js`, `frontend/src/components/dashboard/NowPlaying.vue`.
+
+**Note:** This entry is a review-pending second-pass summary. The first
+implementation pass landed but did not satisfy the auto-queue serialization,
+load-failure-distinction, generation-safe player transitions, or legacy
+fallback review findings. Do not mark Sprint 004 complete until Architect
+review confirms the second-pass implementation is correct.
 
 ### Critical Fixes (2026-05-06)
 

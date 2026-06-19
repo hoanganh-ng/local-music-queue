@@ -104,12 +104,13 @@ const showPlayer = ref(true)
 let syncInterval = null
 const isUpdatingFromProp = ref(false)
 let statusChangeTimeout = null
-// Sprint 004: suppress backend status calls fired by the transient
-// PAUSED/BUFFERING/PLAYING events the YT IFrame API emits while
-// loadVideoById is swapping videos. Without this flag a programmatic load
-// races a real backend pause against playback. Genuine host play/pause
-// clicks still go through `isUpdatingFromProp` and are unaffected.
-const isLoadingVideo = ref(false)
+// Sprint 004 (generation-safe transitions): every videoId change arms a fresh
+// monotonic `loadGeneration`. A callback (PAUSED/BUFFERING/PLAYING/ENDED) that
+// arrives with a generation older than the current one belongs to a previous
+// load and must not affect the new song. The safety timer clears the guard if
+// no matching PLAYING settles within LOADING_GUARD_MS.
+let loadGeneration = 0
+let settledGeneration = 0
 let loadingTimeout = null
 const LOADING_GUARD_MS = 1500
 
@@ -147,6 +148,10 @@ onUnmounted(() => {
   if (syncInterval) clearInterval(syncInterval)
   if (statusChangeTimeout) clearTimeout(statusChangeTimeout)
   if (loadingTimeout) clearTimeout(loadingTimeout)
+  // Invalidate any in-flight load callbacks and clear the settled marker so
+  // no later event handler can reach api.* through this component.
+  loadGeneration++
+  settledGeneration++
 })
 
 function initPlayer() {
@@ -179,34 +184,48 @@ function onPlayerStateChange(event) {
   if (isUpdatingFromProp.value) return
 
   const state = event.data
-  let newStatus = null
 
-  if (state === window.YT.PlayerState.PLAYING) {
-    newStatus = 'playing'
-  } else if (state === window.YT.PlayerState.PAUSED) {
-    newStatus = 'paused'
-  } else if (state === window.YT.PlayerState.ENDED) {
-    api.songEnded()
-      .then(() => {
-        // Backend will broadcast status change via WebSocket
-        // The prop watcher will update the player state
-      })
-      .catch(err => console.error('Song ended call failed:', err))
+  if (state === window.YT.PlayerState.ENDED) {
+    // Sprint 004 (generation-safe): only treat ENDED as genuine end-of-media
+    // when it matches the currently settled generation. An ENDED arriving while
+    // a newer videoId has been swapped in (or during the swap itself) belongs
+    // to the previous video and must NOT advance the backend.
+    if (loadGeneration === settledGeneration) {
+      api.songEnded()
+        .then(() => {
+          // Backend will broadcast status change via WebSocket
+          // The prop watcher will update the player state
+        })
+        .catch(err => console.error('Song ended call failed:', err))
+    }
     return
   }
 
-  // Sprint 004: while a programmatic loadVideoById is settling, the YT API
-  // fires transient PAUSED/BUFFERING/PLAYING events that do not reflect host
-  // intent. Suppress the backend status call for those. Clear the guard as
-  // soon as a stable PLAYING event matching props.status arrives.
-  if (isLoadingVideo.value) {
-    if (newStatus === 'playing' && props.status === 'playing') {
-      isLoadingVideo.value = false
+  // Sprint 004 (generation-safe): while a programmatic loadVideoById is
+  // settling, the YT API fires transient PAUSED/BUFFERING/PLAYING events that
+  // do not reflect host intent. Suppress the backend status call for those.
+  // The settledGeneration is only advanced on a stable PLAYING matching
+  // props.status, so an older-generation late PLAYING cannot clear the guard.
+  if (loadGeneration !== settledGeneration) {
+    if (
+      state === window.YT.PlayerState.PLAYING &&
+      props.status === 'playing'
+    ) {
+      settledGeneration = loadGeneration
       if (loadingTimeout) {
         clearTimeout(loadingTimeout)
         loadingTimeout = null
       }
     }
+    return
+  }
+
+  let newStatus = null
+  if (state === window.YT.PlayerState.PLAYING) {
+    newStatus = 'playing'
+  } else if (state === window.YT.PlayerState.PAUSED) {
+    newStatus = 'paused'
+  } else {
     return
   }
 
@@ -265,12 +284,23 @@ watch(() => videoId.value, (newId, oldId) => {
   if (props.isHost && ytPlayer && ytPlayer.loadVideoById) {
     if (newId) {
       if (newId !== oldId) {
-        // Sprint 004: arm the load-guard so transient PAUSED/BUFFERING events
-        // from the iframe during the swap do not race a backend pause.
-        isLoadingVideo.value = true
+        // Sprint 004 (generation-safe): arm a fresh load generation. Any
+        // callback from a previous load (older generation) cannot affect the
+        // new song. Cancel any pending statusChangeTimeout so a stale PAUSED
+        // debounce cannot fire after a new load begins.
+        loadGeneration++
+        if (statusChangeTimeout) {
+          clearTimeout(statusChangeTimeout)
+          statusChangeTimeout = null
+        }
         if (loadingTimeout) clearTimeout(loadingTimeout)
         loadingTimeout = setTimeout(() => {
-          isLoadingVideo.value = false
+          // Safety: if no matching PLAYING settled within the guard window,
+          // advance settledGeneration so further callbacks are evaluated
+          // against the current state instead of being silently dropped.
+          if (loadGeneration > settledGeneration) {
+            settledGeneration = loadGeneration
+          }
           loadingTimeout = null
         }, LOADING_GUARD_MS)
 
@@ -279,10 +309,16 @@ watch(() => videoId.value, (newId, oldId) => {
       }
     } else {
       // No video to load: stopVideo also fires transient events; guard them.
-      isLoadingVideo.value = true
+      loadGeneration++
+      if (statusChangeTimeout) {
+        clearTimeout(statusChangeTimeout)
+        statusChangeTimeout = null
+      }
       if (loadingTimeout) clearTimeout(loadingTimeout)
       loadingTimeout = setTimeout(() => {
-        isLoadingVideo.value = false
+        if (loadGeneration > settledGeneration) {
+          settledGeneration = loadGeneration
+        }
         loadingTimeout = null
       }, LOADING_GUARD_MS)
       ytPlayer.stopVideo()

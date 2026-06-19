@@ -2,23 +2,38 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { wsClient } from '../websocket'
 import { globalStore } from '../../store'
 
+// Mutable queueState so the legacy fallback can read it during tests.
+const liveQueueState = { songs: [], status: 'paused', current_index: -1 }
+
 // Mock the globalStore with the surface websocket.js touches.
 vi.mock('../../store', () => ({
   globalStore: {
-    queueState: { songs: [], status: 'paused', current_index: -1 },
+    get queueState() { return liveQueueState },
+    set queueState(v) { Object.assign(liveQueueState, v) },
     updateQueueState: vi.fn(),
-    addSong: vi.fn(),
+    addSong: vi.fn((song) => { liveQueueState.songs.push(song) }),
     addActivity: vi.fn(),
-    updateCurrentIndex: vi.fn(),
-    updatePlaybackStatus: vi.fn(),
-    updateElapsed: vi.fn(),
+    updateCurrentIndex: vi.fn((idx, song) => {
+      liveQueueState.current_index = idx
+      liveQueueState.current_song = song
+    }),
+    updatePlaybackStatus: vi.fn((status) => {
+      liveQueueState.status = status
+    }),
+    updateElapsed: vi.fn((elapsed) => {
+      liveQueueState.elapsed = elapsed
+    }),
   }
 }))
 
 describe('WebSocketClient', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    globalStore.queueState = { songs: [], status: 'paused', current_index: -1 }
+    liveQueueState.songs = []
+    liveQueueState.status = 'paused'
+    liveQueueState.current_index = -1
+    liveQueueState.current_song = null
+    liveQueueState.elapsed = 0
   })
 
   it('should handle queue_updated message', () => {
@@ -111,17 +126,58 @@ describe('WebSocketClient', () => {
     ).toBeUndefined()
   })
 
-  it('song_added without authoritative fields skips authoritative setters', () => {
+  it('legacy song_added with first song promotes it to current and starts playback', () => {
+    // Stateful assertion: empty queue, no current song. Legacy payload
+    // (no authoritative fields). After handling, the inserted song is
+    // promoted to current, status is playing, elapsed is 0.
+    liveQueueState.songs = []
+    liveQueueState.current_index = -1
+    liveQueueState.current_song = null
+    liveQueueState.status = 'stopped'
+
+    const song = { id: 'first', title: 'First' }
     wsClient.handleMessage({
       type: 'song_added',
       data: {
-        song: { id: 'x', title: 'X' },
+        song,
         position: 0,
         activity: { type: 'song_added', user: 'Alice' },
       },
     })
 
-    expect(globalStore.addSong).toHaveBeenCalled()
+    expect(globalStore.addSong).toHaveBeenCalledWith(song, 0)
+    // The legacy fallback promotes the inserted song to current and starts
+    // playback. These calls happen via the SAME authoritative setters the
+    // Sprint 004 path uses — but the trigger is the frontend's first-song
+    // inference, not the backend. Verify the exact arguments.
+    expect(globalStore.updateCurrentIndex).toHaveBeenCalledTimes(1)
+    expect(globalStore.updateCurrentIndex).toHaveBeenCalledWith(0, song)
+    expect(globalStore.updatePlaybackStatus).toHaveBeenCalledTimes(1)
+    expect(globalStore.updatePlaybackStatus).toHaveBeenCalledWith('playing')
+    expect(globalStore.updateElapsed).toHaveBeenCalledTimes(1)
+    expect(globalStore.updateElapsed).toHaveBeenCalledWith(0)
+  })
+
+  it('legacy song_added with non-empty queue does NOT infer advancement', () => {
+    // Stateful assertion: existing current song. Legacy payload must NOT
+    // shift current_index or change status — exhausted-queue advancement is
+    // reserved for backend-authoritative state.
+    liveQueueState.songs = [{ id: 'cur', title: 'Cur' }]
+    liveQueueState.current_index = 0
+    liveQueueState.current_song = { id: 'cur', title: 'Cur' }
+    liveQueueState.status = 'playing'
+
+    const song = { id: 'second', title: 'Second' }
+    wsClient.handleMessage({
+      type: 'song_added',
+      data: {
+        song,
+        position: 1,
+        activity: { type: 'song_added', user: 'Alice' },
+      },
+    })
+
+    expect(globalStore.addSong).toHaveBeenCalledWith(song, 1)
     expect(globalStore.updateCurrentIndex).not.toHaveBeenCalled()
     expect(globalStore.updatePlaybackStatus).not.toHaveBeenCalled()
     expect(globalStore.updateElapsed).not.toHaveBeenCalled()

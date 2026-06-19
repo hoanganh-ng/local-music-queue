@@ -3,6 +3,7 @@ package autoqueue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"local-music-queue/internal/domain"
 	"local-music-queue/internal/domain/entity"
 	"sync"
@@ -92,7 +93,9 @@ func testAddAutoQueueSong(repo *mockQueueRepo) AddAutoQueueSongFunc {
 			return nil, ErrAutoQueueStale
 		}
 
+		previousCurrentIndex := q.CurrentIndex
 		q.Add(*song)
+		advanced := q.CurrentIndex != previousCurrentIndex
 		activity := entity.NewActivity(entity.ActivitySongAdded, song.AddedBy, "added")
 		repo.activities = append(repo.activities, activity)
 
@@ -102,13 +105,15 @@ func testAddAutoQueueSong(repo *mockQueueRepo) AddAutoQueueSongFunc {
 			currentSong = &s
 		}
 		return &AddSongResult{
-			Song:         *song,
-			Position:     len(q.Songs) - 1,
-			CurrentIndex: q.CurrentIndex,
-			CurrentSong:  currentSong,
-			Status:       q.Status,
-			Elapsed:      q.Elapsed,
-			Activity:     activity,
+			Song:                 *song,
+			Position:             len(q.Songs) - 1,
+			PreviousCurrentIndex: previousCurrentIndex,
+			CurrentIndex:         q.CurrentIndex,
+			CurrentSong:          currentSong,
+			Status:               q.Status,
+			Elapsed:              q.Elapsed,
+			PlaybackAdvanced:     advanced,
+			Activity:             activity,
 		}, nil
 	}
 }
@@ -347,6 +352,140 @@ func TestSetEnabled(t *testing.T) {
 	cfg, _ := interactor.GetConfig(context.Background())
 	if !cfg.Enabled {
 		t.Error("expected Enabled=true after SetEnabled(true)")
+	}
+}
+
+// TestCheckAndTrigger_DisabledMidFlight blocks the fetcher and verifies that
+// a SetEnabled(false) call landing while FetchRelated is in flight prevents
+// any queue insertion, history append, activity, or broadcast. The slow fetch
+// itself is never held under the interactor's mutex.
+func TestCheckAndTrigger_DisabledMidFlight(t *testing.T) {
+	autoQueueRepo := &mockAutoQueueRepo{
+		config:  &domain.AutoQueueConfig{Enabled: true, Strategy: domain.StrategyRelated},
+		history: []domain.PlayHistoryEntry{},
+	}
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "source", Title: "Source"})
+	queueRepo := &mockQueueRepo{queue: q}
+
+	fetcher := &blockingFetcher{
+		song:    &entity.Song{ID: "candidate", Title: "Candidate", AddedBy: entity.SystemUserID},
+		release: make(chan struct{}),
+		started: make(chan struct{}),
+	}
+
+	interactor := NewInteractor(autoQueueRepo, queueRepo, fetcher)
+	interactor.SetAddAutoQueueSongFunc(testAddAutoQueueSong(queueRepo))
+
+	var broadcasts []string
+	var broadcastMu sync.Mutex
+	interactor.SetBroadcaster(func(eventType string, _ interface{}) {
+		broadcastMu.Lock()
+		defer broadcastMu.Unlock()
+		broadcasts = append(broadcasts, eventType)
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- interactor.CheckAndTrigger(context.Background())
+	}()
+
+	<-fetcher.started
+
+	// Disable auto-queue while the fetcher is blocked. SetEnabled now takes
+	// the same mutex as the post-fetch revalidation, so the post-fetch
+	// re-check will observe Enabled=false.
+	if err := interactor.SetEnabled(context.Background(), false); err != nil {
+		t.Fatalf("SetEnabled(false) failed: %v", err)
+	}
+
+	close(fetcher.release)
+	if err := <-done; err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Candidate must NOT be inserted.
+	if got := len(queueRepo.queue.Songs); got != 1 {
+		t.Errorf("queue mutated by disabled-mid-flight candidate: %d songs (want 1)", got)
+	}
+	for _, s := range queueRepo.queue.Songs {
+		if s.ID == "candidate" {
+			t.Errorf("disabled-mid-flight candidate %q inserted into queue", s.ID)
+		}
+	}
+	// No history entry written.
+	if len(autoQueueRepo.history) != 0 {
+		t.Errorf("expected 0 history entries, got %d", len(autoQueueRepo.history))
+	}
+	// No queue activity recorded (the stand-in only writes activity on success).
+	if len(queueRepo.activities) != 0 {
+		t.Errorf("expected 0 activities, got %d", len(queueRepo.activities))
+	}
+	// No broadcast emitted.
+	broadcastMu.Lock()
+	defer broadcastMu.Unlock()
+	for _, e := range broadcasts {
+		if e == "auto_queue_added" {
+			t.Errorf("auto_queue_added broadcast must not fire when disabled mid-flight")
+		}
+	}
+}
+
+// TestCheckAndTrigger_LoadFailurePropagates ensures that a load failure
+// observed by the AddAutoQueueSong callback surfaces as a non-nil error from
+// CheckAndTrigger. The error is NOT ErrAutoQueueStale (which is reserved for
+// stale predicates against a successfully-loaded queue) — it is the wrapped
+// operational error the callback returns.
+func TestCheckAndTrigger_LoadFailurePropagates(t *testing.T) {
+	autoQueueRepo := &mockAutoQueueRepo{
+		config:  &domain.AutoQueueConfig{Enabled: true, Strategy: domain.StrategyRelated},
+		history: []domain.PlayHistoryEntry{},
+	}
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "source", Title: "Source"})
+	queueRepo := &mockQueueRepo{queue: q}
+
+	fetcher := &mockFetcher{
+		song: &entity.Song{ID: "candidate", Title: "Candidate", AddedBy: entity.SystemUserID},
+	}
+
+	interactor := NewInteractor(autoQueueRepo, queueRepo, fetcher)
+
+	// Inject a stand-in that simulates a repository load failure. The error
+	// is a wrapped operational failure — NOT ErrAutoQueueStale — so we can
+	// assert CheckAndTrigger surfaces it as such.
+	loadErr := errors.New("db unavailable")
+	interactor.SetAddAutoQueueSongFunc(func(ctx context.Context, song *entity.Song, expectedSourceSongID string) (*AddSongResult, error) {
+		return nil, fmt.Errorf("failed to load queue for auto-queue revalidation: %w", loadErr)
+	})
+
+	var broadcasts []string
+	var broadcastMu sync.Mutex
+	interactor.SetBroadcaster(func(eventType string, _ interface{}) {
+		broadcastMu.Lock()
+		defer broadcastMu.Unlock()
+		broadcasts = append(broadcasts, eventType)
+	})
+
+	err := interactor.CheckAndTrigger(context.Background())
+	if err == nil {
+		t.Fatal("expected error from CheckAndTrigger when load fails")
+	}
+	if errors.Is(err, ErrAutoQueueStale) {
+		t.Errorf("load failure must not surface as ErrAutoQueueStale, got %v", err)
+	}
+	if !errors.Is(err, loadErr) {
+		t.Errorf("expected wrapped load error to reach CheckAndTrigger, got %v", err)
+	}
+	if len(autoQueueRepo.history) != 0 {
+		t.Errorf("expected 0 history entries, got %d", len(autoQueueRepo.history))
+	}
+	broadcastMu.Lock()
+	defer broadcastMu.Unlock()
+	for _, e := range broadcasts {
+		if e == "auto_queue_added" {
+			t.Errorf("auto_queue_added broadcast must not fire when load fails")
+		}
 	}
 }
 

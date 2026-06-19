@@ -29,13 +29,15 @@ type AddAutoQueueSongFunc func(ctx context.Context, song *entity.Song, expectedS
 // transport struct so the auto-queue package does not import usecase/queue
 // (avoiding an upward dependency from a leaf usecase).
 type AddSongResult struct {
-	Song         entity.Song
-	Position     int
-	CurrentIndex int
-	CurrentSong  *entity.Song
-	Status       entity.PlaybackStatus
-	Elapsed      int
-	Activity     entity.Activity
+	Song                 entity.Song
+	Position             int
+	PreviousCurrentIndex int
+	CurrentIndex         int
+	CurrentSong          *entity.Song
+	Status               entity.PlaybackStatus
+	Elapsed              int
+	PlaybackAdvanced     bool
+	Activity             entity.Activity
 }
 
 // ErrAutoQueueStale is the sentinel returned by AddAutoQueueSongFunc when the
@@ -50,8 +52,11 @@ type Interactor struct {
 	fetcher          domain.RelatedSongFetcher
 	broadcaster      BroadcastFunc
 	addAutoQueueSong AddAutoQueueSongFunc
-	mu               sync.Mutex
-	triggering       bool
+	// mu serializes the "still enabled?" final check + queue insertion with
+	// SetEnabled. The slow FetchRelated call is intentionally held outside
+	// this lock — only the pre-fetch and post-fetch config checks take it.
+	mu         sync.Mutex
+	triggering bool
 }
 
 // NewInteractor creates a new AutoQueue Interactor.
@@ -80,6 +85,19 @@ func (i *Interactor) SetAddAutoQueueSongFunc(fn AddAutoQueueSongFunc) {
 }
 
 // CheckAndTrigger checks if auto-queue should fire and adds a song if needed.
+//
+// Serialization contract:
+//   - Pre-fetch: mu is taken to read config + queue snapshot, then released
+//     before FetchRelated runs (so the slow yt-dlp call is NOT held under
+//     any lock).
+//   - Post-fetch: mu is re-acquired to re-validate that auto-queue is still
+//     enabled and the queue tail is unchanged, then released before calling
+//     addAutoQueueSong. SetEnabled takes the same mu, so a SetEnabled(false)
+//     that completes while FetchRelated was in flight will be observed
+//     before the candidate is inserted — the candidate is dropped with no
+//     save, history, activity, or broadcast.
+//   - addAutoQueueSong performs its own internal queue lock; no overlap with
+//     mu here.
 func (i *Interactor) CheckAndTrigger(ctx context.Context) error {
 	i.mu.Lock()
 	if i.triggering {
@@ -94,32 +112,39 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context) error {
 	}()
 	i.mu.Unlock()
 
+	// --- Phase 1: pre-fetch revalidation ---
+	i.mu.Lock()
 	cfg, err := i.autoQueueRepo.GetConfig(ctx)
 	if err != nil {
+		i.mu.Unlock()
 		log.Printf("auto-queue: failed to get config: %v", err)
 		return fmt.Errorf("failed to get config: %w", err)
 	}
-
 	if !cfg.Enabled {
+		i.mu.Unlock()
 		log.Printf("auto-queue: disabled, skipping trigger")
 		return nil
 	}
 
 	queue, err := i.queueRepo.Load(ctx)
 	if err != nil {
+		i.mu.Unlock()
 		log.Printf("auto-queue: failed to load queue: %v", err)
 		return fmt.Errorf("failed to load queue: %w", err)
 	}
 
 	if len(queue.Songs) == 0 {
+		i.mu.Unlock()
 		log.Printf("auto-queue: queue empty, skipping trigger")
 		return nil
 	}
 	if queue.CurrentIndex < 0 || queue.CurrentIndex >= len(queue.Songs) {
+		i.mu.Unlock()
 		log.Printf("auto-queue: invalid current index %d for %d songs, skipping trigger", queue.CurrentIndex, len(queue.Songs))
 		return nil
 	}
 	if queue.CurrentIndex != len(queue.Songs)-1 {
+		i.mu.Unlock()
 		log.Printf("auto-queue: current index %d is not last (%d), skipping trigger", queue.CurrentIndex, len(queue.Songs)-1)
 		return nil
 	}
@@ -145,6 +170,8 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context) error {
 	for id := range excludeMap {
 		exclude = append(exclude, id)
 	}
+	i.mu.Unlock()
+	// --- End Phase 1: mu released before slow FetchRelated ---
 
 	song, err := i.fetcher.FetchRelated(ctx, lastSong.ID, exclude)
 	if err != nil {
@@ -161,6 +188,22 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context) error {
 		log.Printf("auto-queue: no song available (fetcher and fallback both failed)")
 		return nil
 	}
+
+	// --- Phase 2: post-fetch revalidation under mu, serialized with SetEnabled ---
+	i.mu.Lock()
+	cfg, err = i.autoQueueRepo.GetConfig(ctx)
+	if err != nil {
+		i.mu.Unlock()
+		log.Printf("auto-queue: failed to re-get config: %v", err)
+		return fmt.Errorf("failed to get config: %w", err)
+	}
+	if !cfg.Enabled {
+		i.mu.Unlock()
+		log.Printf("auto-queue: disabled mid-flight, dropping candidate %q (no save, no history, no activity, no broadcast)", song.ID)
+		return nil
+	}
+	i.mu.Unlock()
+	// --- End Phase 2 ---
 
 	if i.addAutoQueueSong == nil {
 		// No insertion callback wired; refuse to mutate queue state directly to
@@ -241,8 +284,15 @@ func (i *Interactor) GetConfig(ctx context.Context) (*domain.AutoQueueConfig, er
 	return i.autoQueueRepo.GetConfig(ctx)
 }
 
-// SetEnabled updates the enabled flag for auto-queue.
+// SetEnabled updates the enabled flag for auto-queue. Holds the same mutex
+// as the post-fetch config revalidation in CheckAndTrigger, so a SetEnabled
+// that completes while a slow FetchRelated was in flight will be observed
+// before the candidate is inserted — the candidate is dropped with no save,
+// history, activity, or broadcast.
 func (i *Interactor) SetEnabled(ctx context.Context, enabled bool) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
 	cfg, err := i.autoQueueRepo.GetConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get config: %w", err)

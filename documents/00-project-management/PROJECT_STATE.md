@@ -62,7 +62,7 @@ WebSocket uses a structured envelope for delta state distribution.
   15. `auto_queue_added`
   16. `auto_queue_config_changed`
 - **Frontend Compatibility:** The frontend also accepts legacy `queue_updated` and `status_updated` messages.
-- **Sprint 004 Additive Fields:** `song_added` and `auto_queue_added` carry additional authoritative post-mutation fields `current_index`, `current_song`, `status`, and `elapsed`, captured under the same lock as the queue mutation. All pre-existing fields and their JSON tags are unchanged; legacy backends omitting the new fields remain compatible because the frontend applies each field only when present.
+- **Sprint 004 Additive Fields (review pending):** `song_added` and `auto_queue_added` carry additional authoritative post-mutation fields `current_index`, `current_song`, `status`, and `elapsed`, captured under the same lock as the queue mutation. All pre-existing fields and their JSON tags are unchanged. The frontend applies the additive fields when present; legacy backends omitting them trigger the single approved fallback (first-song promotion when the queue was empty). The Sprint 004 second-pass implementation also adds `previous_current_index` and `playback_advanced` to the internal `AddSongResult` struct returned from the queue interactor — these are NOT serialized over WebSocket. The compatibility claim in this section should be re-verified after Architect review.
 
 ## Database
 SQLite with 7 tables, index, trigger, and single-row queue JSON storage.

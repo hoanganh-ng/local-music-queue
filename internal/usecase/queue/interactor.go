@@ -35,14 +35,22 @@ type RemoveSongResult struct {
 // AddSong, AddSongDirect, and AddAutoQueueSong. The snapshot is built inside
 // the same lock as the queue mutation, so callers do not need to (and must
 // not) re-load queue state to derive position or playback fields.
+//
+// PreviousCurrentIndex records the CurrentIndex captured *before* the mutation
+// ran. PlaybackAdvanced reports whether this mutation caused the queue to
+// promote the new song to current (the empty-queue case or the exhausted
+// paused case handled by entity.Queue.Add). Callers can use these to decide
+// whether to render "now playing" transitions.
 type AddSongResult struct {
-	Song         entity.Song
-	Position     int
-	CurrentIndex int
-	CurrentSong  *entity.Song
-	Status       entity.PlaybackStatus
-	Elapsed      int
-	Activity     entity.Activity
+	Song                 entity.Song
+	Position             int
+	PreviousCurrentIndex int
+	CurrentIndex         int
+	CurrentSong          *entity.Song
+	Status               entity.PlaybackStatus
+	Elapsed              int
+	PlaybackAdvanced     bool
+	Activity             entity.Activity
 }
 
 type Interactor struct {
@@ -111,7 +119,11 @@ func (i *Interactor) AddSong(ctx context.Context, url string, addedBy string, ad
 		return nil, entity.ErrSongAlreadyInQueue
 	}
 
+	// Capture pre-mutation current index so the result can report whether
+	// the addition advanced playback (empty queue or exhausted paused queue).
+	previousCurrentIndex := queue.CurrentIndex
 	queue.Add(*song)
+	advanced := queue.CurrentIndex != previousCurrentIndex
 
 	err = i.repo.Save(ctx, queue)
 	if err != nil {
@@ -121,7 +133,7 @@ func (i *Interactor) AddSong(ctx context.Context, url string, addedBy string, ad
 	activity := entity.NewActivity(entity.ActivitySongAdded, addedBy, fmt.Sprintf("added \"%s\"", song.Title))
 	_ = i.repo.AddActivity(ctx, activity)
 
-	return buildAddSongResult(queue, *song, activity), nil
+	return buildAddSongResult(queue, *song, previousCurrentIndex, advanced, activity), nil
 }
 
 // AddSongDirect adds a pre-built song to the queue without fetching metadata.
@@ -141,7 +153,9 @@ func (i *Interactor) AddSongDirect(ctx context.Context, song *entity.Song) (*Add
 		return nil, entity.ErrSongAlreadyInQueue
 	}
 
+	previousCurrentIndex := queue.CurrentIndex
 	queue.Add(*song)
+	advanced := queue.CurrentIndex != previousCurrentIndex
 
 	err = i.repo.Save(ctx, queue)
 	if err != nil {
@@ -151,7 +165,7 @@ func (i *Interactor) AddSongDirect(ctx context.Context, song *entity.Song) (*Add
 	activity := entity.NewActivity(entity.ActivitySongAdded, song.AddedBy, fmt.Sprintf("added \"%s\"", song.Title))
 	_ = i.repo.AddActivity(ctx, activity)
 
-	return buildAddSongResult(queue, *song, activity), nil
+	return buildAddSongResult(queue, *song, previousCurrentIndex, advanced, activity), nil
 }
 
 // AddAutoQueueSong atomically revalidates an auto-queue candidate and inserts
@@ -161,19 +175,29 @@ func (i *Interactor) AddSongDirect(ctx context.Context, song *entity.Song) (*Add
 //   - No upcoming song exists (current is still the last in the queue), AND
 //   - The candidate is not already in the upcoming queue.
 //
-// When any condition fails, ErrAutoQueueStale is returned with no save,
-// activity, or other side effect. The slow yt-dlp fetch and the WebSocket
-// broadcast happen outside this lock; this method only performs the
-// re-check + write under the queue mutation lock.
+// When any of those predicates fails against a successfully-loaded queue,
+// ErrAutoQueueStale is returned with no save, activity, or other side effect.
+//
+// If the queue repository fails to load, the failure is returned as a wrapped
+// operational error — it is NOT collapsed into ErrAutoQueueStale, so the
+// caller (CheckAndTrigger) can distinguish an operational failure from a
+// stale-but-valid state. ErrAutoQueueStale is reserved for stale predicates
+// evaluated against a real queue snapshot.
+//
+// The slow yt-dlp fetch and the WebSocket broadcast happen outside this lock;
+// this method only performs the re-check + write under the queue mutation
+// lock.
 func (i *Interactor) AddAutoQueueSong(ctx context.Context, song *entity.Song, expectedSourceSongID string) (*AddSongResult, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
 	queue, err := i.repo.Load(ctx)
 	if err != nil {
-		// If we cannot reload queue state, treat the candidate as stale rather
-		// than fabricating a fresh queue around it.
-		return nil, ErrAutoQueueStale
+		// Operational failure (DB down, schema corruption, etc.) — surface
+		// it to the caller. Do NOT report it as ErrAutoQueueStale, which is
+		// reserved for queue states that loaded successfully but failed
+		// the staleness predicates.
+		return nil, fmt.Errorf("failed to load queue for auto-queue revalidation: %w", err)
 	}
 
 	if queue.CurrentIndex < 0 || queue.CurrentIndex >= len(queue.Songs) {
@@ -189,7 +213,9 @@ func (i *Interactor) AddAutoQueueSong(ctx context.Context, song *entity.Song, ex
 		return nil, ErrAutoQueueStale
 	}
 
+	previousCurrentIndex := queue.CurrentIndex
 	queue.Add(*song)
+	advanced := queue.CurrentIndex != previousCurrentIndex
 
 	if err := i.repo.Save(ctx, queue); err != nil {
 		return nil, fmt.Errorf("failed to save queue: %w", err)
@@ -198,25 +224,31 @@ func (i *Interactor) AddAutoQueueSong(ctx context.Context, song *entity.Song, ex
 	activity := entity.NewActivity(entity.ActivitySongAdded, song.AddedBy, fmt.Sprintf("added \"%s\"", song.Title))
 	_ = i.repo.AddActivity(ctx, activity)
 
-	return buildAddSongResult(queue, *song, activity), nil
+	return buildAddSongResult(queue, *song, previousCurrentIndex, advanced, activity), nil
 }
 
 // buildAddSongResult assembles the authoritative snapshot of post-mutation
 // queue state. The caller must hold the queue lock.
-func buildAddSongResult(queue *entity.Queue, song entity.Song, activity entity.Activity) *AddSongResult {
+//
+// previousCurrentIndex is the CurrentIndex captured before the mutation ran.
+// advanced reports whether the mutation caused CurrentIndex to change
+// (empty-queue promotion or exhausted-paused promotion by entity.Queue.Add).
+func buildAddSongResult(queue *entity.Queue, song entity.Song, previousCurrentIndex int, advanced bool, activity entity.Activity) *AddSongResult {
 	var currentSong *entity.Song
 	if queue.CurrentIndex >= 0 && queue.CurrentIndex < len(queue.Songs) {
 		s := queue.Songs[queue.CurrentIndex]
 		currentSong = &s
 	}
 	return &AddSongResult{
-		Song:         song,
-		Position:     len(queue.Songs) - 1,
-		CurrentIndex: queue.CurrentIndex,
-		CurrentSong:  currentSong,
-		Status:       queue.Status,
-		Elapsed:      queue.Elapsed,
-		Activity:     activity,
+		Song:                 song,
+		Position:             len(queue.Songs) - 1,
+		PreviousCurrentIndex: previousCurrentIndex,
+		CurrentIndex:         queue.CurrentIndex,
+		CurrentSong:          currentSong,
+		Status:               queue.Status,
+		Elapsed:              queue.Elapsed,
+		PlaybackAdvanced:     advanced,
+		Activity:             activity,
 	}
 }
 

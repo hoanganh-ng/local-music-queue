@@ -1,5 +1,16 @@
 import { globalStore } from '../store'
 
+// hasAuthoritativeFields returns true when the backend payload carries the
+// Sprint 004 authoritative post-mutation fields. Legacy backends omit them.
+function hasAuthoritativeFields(data) {
+  if (!data) return false
+  return (
+    typeof data.current_index === 'number' ||
+    data.status !== undefined ||
+    typeof data.elapsed === 'number'
+  )
+}
+
 // applyAuthoritativeSnapshot applies the Sprint 004 post-mutation fields
 // (current_index, current_song, status, elapsed) that song_added and
 // auto_queue_added now carry. Each field is applied only when present, so
@@ -14,6 +25,26 @@ function applyAuthoritativeSnapshot(data) {
   }
   if (typeof data.elapsed === 'number') {
     globalStore.updateElapsed(data.elapsed)
+  }
+}
+
+// applyLegacyFirstSongFallback keeps the single behavior the legacy backend
+// already implied by the absence of authoritative fields: when the queue had
+// no current song and the just-inserted song is the first song in the queue,
+// promote it to current, mark it as playing, and reset elapsed. This is the
+// ONLY inference the frontend is permitted to make for a legacy payload.
+// Exhausted-queue advancement and auto-queue "promote on paused" are NOT
+// performed — those would require backend-authoritative state we don't have.
+function applyLegacyFirstSongFallback(song) {
+  const hadCurrent = !!globalStore.queueState.current_song
+  const hadNoCurrentIndex = globalStore.queueState.current_index === -1 ||
+    globalStore.queueState.current_index === undefined
+  const isFirstSong = globalStore.queueState.songs.length === 1 &&
+    globalStore.queueState.songs[0] && globalStore.queueState.songs[0].id === song.id
+  if (!hadCurrent && hadNoCurrentIndex && isFirstSong) {
+    globalStore.updateCurrentIndex(0, song)
+    globalStore.updatePlaybackStatus('playing')
+    globalStore.updateElapsed(0)
   }
 }
 
@@ -117,8 +148,14 @@ class WebSocketClient {
         }
         globalStore.addSong(message.data.song, message.data.position)
         globalStore.addActivity(message.data.activity)
-        // Sprint 004: apply authoritative post-mutation snapshot from backend.
-        applyAuthoritativeSnapshot(message.data)
+        // Sprint 004: prefer backend-authoritative snapshot. If absent
+        // (legacy backend), apply only the single approved fallback:
+        // promote the just-inserted song to current if the queue was empty.
+        if (hasAuthoritativeFields(message.data)) {
+          applyAuthoritativeSnapshot(message.data)
+        } else {
+          applyLegacyFirstSongFallback(message.data.song)
+        }
         this.callbacks.songAdded.forEach(cb => {
           try {
             cb(message.data.song)
@@ -194,8 +231,14 @@ class WebSocketClient {
           // Sprint 004: backend is the sole owner of current_index/status.
           // The frontend no longer promotes the newest auto-queued song to
           // current when the local store happens to be paused — that heuristic
-          // raced the authoritative state. Apply only what the backend sent.
-          applyAuthoritativeSnapshot(message.data)
+          // raced the authoritative state. Apply only what the backend sent,
+          // or the single approved first-song fallback when the legacy
+          // payload lacks authoritative fields.
+          if (hasAuthoritativeFields(message.data)) {
+            applyAuthoritativeSnapshot(message.data)
+          } else {
+            applyLegacyFirstSongFallback(message.data.song)
+          }
         }
         break
       case 'auto_queue_config_changed':
