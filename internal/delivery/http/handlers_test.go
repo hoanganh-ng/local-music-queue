@@ -421,17 +421,73 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
-func TestHandleRemoveSong_HTTP(t *testing.T) {
+type testContext struct {
+	t               *testing.T
+	dir             string
+	repo            *persistence.SQLiteRepository
+	userRepo        repository.UserRepository
+	sessionClock    auth.RealClock
+	sessionStore    auth.SessionStore
+	queueInteractor *queue.Interactor
+	authInteractor  *auth.Interactor
+	handlers        *Handlers
+	broadcaster     *mockBroadcaster
+	guestUser       *entity.User
+	otherGuestUser  *entity.User
+	hostUser        *entity.User
+	adminUser       *entity.User
+	guestToken      string
+	otherGuestToken string
+	hostToken       string
+	adminToken      string
+}
+
+func newTestContext(t *testing.T) *testContext {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	repo, err := persistence.NewSQLiteRepository(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+
+	userRepo := persistence.NewSQLiteUserRepository(repo.DB())
+
+	var ytSvc *youtube.YTDLPService
+	if runtime.GOOS != "windows" {
+		script := filepath.Join(dir, "fake-ytdlp")
+		content := `#!/bin/sh
+cat <<'EOF'
+{"id":"test123","title":"Test Song","uploader":"Artist","duration":180.0,"thumbnail":"thumb.jpg","webpage_url":"https://youtube.com/watch?v=test123"}
+EOF
+`
+		if err := os.WriteFile(script, []byte(content), 0755); err != nil {
+			t.Fatalf("failed to write fake-ytdlp script: %v", err)
+		}
+		ytSvc = youtube.NewYTDLPService(script)
+	} else {
+		ytSvc = youtube.NewYTDLPService("echo")
+	}
+
+	queueInteractor := queue.NewInteractor(repo, ytSvc)
+	sessionClock := auth.RealClock{}
+	sessionStore := session.NewInMemoryStore(sessionClock)
+	authInteractor := auth.NewInteractor(userRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, sessionStore, sessionClock)
+	actInteractor := activity.NewInteractor(repo)
+	priorityInteractor := priority.NewInteractor(userRepo, repo)
+	voteInteractor := vote.NewInteractor(repo, userRepo, 0)
+	mockHub := &mockBroadcaster{}
+
+	handlers := NewHandlers(queueInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, mockHub)
+
 	ctx := context.Background()
-	h, userRepo, sessionStore := newTestHandlersWithStore(t)
 
 	guestUser := &entity.User{
 		Email:       "guest@urekamedia.vn",
 		DisplayName: "GuestOne",
 		Role:        entity.RoleGuest,
 	}
-	err := userRepo.CreateUser(ctx, guestUser)
-	if err != nil {
+	if err := userRepo.CreateUser(ctx, guestUser); err != nil {
 		t.Fatalf("failed to create guest user: %v", err)
 	}
 
@@ -440,8 +496,7 @@ func TestHandleRemoveSong_HTTP(t *testing.T) {
 		DisplayName: "GuestTwo",
 		Role:        entity.RoleGuest,
 	}
-	err = userRepo.CreateUser(ctx, otherGuestUser)
-	if err != nil {
+	if err := userRepo.CreateUser(ctx, otherGuestUser); err != nil {
 		t.Fatalf("failed to create other guest: %v", err)
 	}
 
@@ -450,256 +505,276 @@ func TestHandleRemoveSong_HTTP(t *testing.T) {
 		DisplayName: "HostUser",
 		Role:        entity.RoleHost,
 	}
-	err = userRepo.CreateUser(ctx, hostUser)
-	if err != nil {
+	if err := userRepo.CreateUser(ctx, hostUser); err != nil {
 		t.Fatalf("failed to create host user: %v", err)
 	}
 
-	guestToken, _, _ := sessionStore.Create(ctx, guestUser.ID, time.Hour)
-	_, _, _ = sessionStore.Create(ctx, otherGuestUser.ID, time.Hour)
-	hostToken, _, _ := sessionStore.Create(ctx, hostUser.ID, time.Hour)
-
-	setupQueue := func() {
-		state, _ := h.queue.GetState(ctx)
-		state.Songs = nil
-		state.CurrentIndex = -1
-		state.Status = entity.StatusIdle
-		_ = h.queue.AddSongDirect(ctx, &entity.Song{ID: "vid0", Title: "Song 0", AddedByID: guestUser.ID, AddedBy: guestUser.DisplayName})
-		_ = h.queue.AddSongDirect(ctx, &entity.Song{ID: "vid1", Title: "Song 1", AddedByID: otherGuestUser.ID, AddedBy: otherGuestUser.DisplayName})
-		_ = h.queue.AddSongDirect(ctx, &entity.Song{ID: "vid2", Title: "Song 2", AddedByID: guestUser.ID, AddedBy: guestUser.DisplayName})
+	adminUser := &entity.User{
+		Email:       "admin@example.com",
+		DisplayName: "AdminUser",
+		Role:        entity.RoleAdmin,
+	}
+	if err := userRepo.CreateUser(ctx, adminUser); err != nil {
+		t.Fatalf("failed to create admin user: %v", err)
 	}
 
-	t.Run("Missing bearer header returns 401", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
+	guestToken, _, err := sessionStore.Create(ctx, guestUser.ID, time.Hour)
+	if err != nil {
+		t.Fatalf("failed to create guest token: %v", err)
+	}
 
+	otherGuestToken, _, err := sessionStore.Create(ctx, otherGuestUser.ID, time.Hour)
+	if err != nil {
+		t.Fatalf("failed to create other guest token: %v", err)
+	}
+
+	hostToken, _, err := sessionStore.Create(ctx, hostUser.ID, time.Hour)
+	if err != nil {
+		t.Fatalf("failed to create host token: %v", err)
+	}
+
+	adminToken, _, err := sessionStore.Create(ctx, adminUser.ID, time.Hour)
+	if err != nil {
+		t.Fatalf("failed to create admin token: %v", err)
+	}
+
+	// Deterministic Queue setup:
+	// Song 0: guestUser owned
+	// Song 1: otherGuestUser owned
+	// Song 2: guestUser owned
+	err = queueInteractor.AddSongDirect(ctx, &entity.Song{ID: "vid0", Title: "Song 0", AddedByID: guestUser.ID, AddedBy: guestUser.DisplayName})
+	if err != nil {
+		t.Fatalf("failed to add song 0: %v", err)
+	}
+	err = queueInteractor.AddSongDirect(ctx, &entity.Song{ID: "vid1", Title: "Song 1", AddedByID: otherGuestUser.ID, AddedBy: otherGuestUser.DisplayName})
+	if err != nil {
+		t.Fatalf("failed to add song 1: %v", err)
+	}
+	err = queueInteractor.AddSongDirect(ctx, &entity.Song{ID: "vid2", Title: "Song 2", AddedByID: guestUser.ID, AddedBy: guestUser.DisplayName})
+	if err != nil {
+		t.Fatalf("failed to add song 2: %v", err)
+	}
+
+	return &testContext{
+		t:               t,
+		dir:             dir,
+		repo:            repo,
+		userRepo:        userRepo,
+		sessionClock:    sessionClock,
+		sessionStore:    sessionStore,
+		queueInteractor: queueInteractor,
+		authInteractor:  authInteractor,
+		handlers:        handlers,
+		broadcaster:     mockHub,
+		guestUser:       guestUser,
+		otherGuestUser:  otherGuestUser,
+		hostUser:        hostUser,
+		adminUser:       adminUser,
+		guestToken:      guestToken,
+		otherGuestToken: otherGuestToken,
+		hostToken:       hostToken,
+		adminToken:      adminToken,
+	}
+}
+
+func TestHandleRemoveSong_HTTP(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Missing bearer header returns 401", func(t *testing.T) {
+		tc := newTestContext(t)
 		body, _ := json.Marshal(RemoveSongRequest{Index: intPtr(1), RequestedBy: "guest"})
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 		if rr.Code != http.StatusUnauthorized {
 			t.Errorf("expected 401, got %d", rr.Code)
 		}
-		if len(mockHub.broadcasts) != 0 {
-			t.Errorf("expected 0 broadcasts, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 0 {
+			t.Errorf("expected 0 broadcasts, got %d", len(tc.broadcaster.broadcasts))
 		}
 	})
 
 	t.Run("Malformed bearer header returns 401", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
+		tc := newTestContext(t)
 		body, _ := json.Marshal(RemoveSongRequest{Index: intPtr(1), RequestedBy: "guest"})
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer")
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 		if rr.Code != http.StatusUnauthorized {
 			t.Errorf("expected 401, got %d", rr.Code)
 		}
-		if len(mockHub.broadcasts) != 0 {
-			t.Errorf("expected 0 broadcasts, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 0 {
+			t.Errorf("expected 0 broadcasts, got %d", len(tc.broadcaster.broadcasts))
 		}
 	})
 
 	t.Run("Invalid token returns 401", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
+		tc := newTestContext(t)
 		body, _ := json.Marshal(RemoveSongRequest{Index: intPtr(1), RequestedBy: "guest"})
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer invalid-token")
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 		if rr.Code != http.StatusUnauthorized {
 			t.Errorf("expected 401, got %d", rr.Code)
 		}
-		if len(mockHub.broadcasts) != 0 {
-			t.Errorf("expected 0 broadcasts, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 0 {
+			t.Errorf("expected 0 broadcasts, got %d", len(tc.broadcaster.broadcasts))
 		}
 	})
 
 	t.Run("Expired token returns 401", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
-		expiredToken, _, _ := sessionStore.Create(ctx, guestUser.ID, -time.Hour)
+		tc := newTestContext(t)
+		expiredToken, _, err := tc.sessionStore.Create(ctx, tc.guestUser.ID, -time.Hour)
+		if err != nil {
+			t.Fatalf("failed to create expired token: %v", err)
+		}
 		body, _ := json.Marshal(RemoveSongRequest{Index: intPtr(1), RequestedBy: "guest"})
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+expiredToken)
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 		if rr.Code != http.StatusUnauthorized {
 			t.Errorf("expected 401, got %d", rr.Code)
 		}
-		if len(mockHub.broadcasts) != 0 {
-			t.Errorf("expected 0 broadcasts, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 0 {
+			t.Errorf("expected 0 broadcasts, got %d", len(tc.broadcaster.broadcasts))
 		}
 	})
 
 	t.Run("Malformed JSON returns 400", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
+		tc := newTestContext(t)
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader([]byte("not json")))
-		req.Header.Set("Authorization", "Bearer "+guestToken)
+		req.Header.Set("Authorization", "Bearer "+tc.guestToken)
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 		if rr.Code != http.StatusBadRequest {
 			t.Errorf("expected 400, got %d", rr.Code)
 		}
-		if len(mockHub.broadcasts) != 0 {
-			t.Errorf("expected 0 broadcasts, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 0 {
+			t.Errorf("expected 0 broadcasts, got %d", len(tc.broadcaster.broadcasts))
 		}
 	})
 
 	t.Run("Body is null returns 400", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
+		tc := newTestContext(t)
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader([]byte("null")))
-		req.Header.Set("Authorization", "Bearer "+guestToken)
+		req.Header.Set("Authorization", "Bearer "+tc.guestToken)
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 		if rr.Code != http.StatusBadRequest {
 			t.Errorf("expected 400, got %d", rr.Code)
 		}
-		if len(mockHub.broadcasts) != 0 {
-			t.Errorf("expected 0 broadcasts, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 0 {
+			t.Errorf("expected 0 broadcasts, got %d", len(tc.broadcaster.broadcasts))
 		}
 	})
 
 	t.Run("Missing index returns 400", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
+		tc := newTestContext(t)
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader([]byte("{}")))
-		req.Header.Set("Authorization", "Bearer "+guestToken)
+		req.Header.Set("Authorization", "Bearer "+tc.guestToken)
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 		if rr.Code != http.StatusBadRequest {
 			t.Errorf("expected 400, got %d", rr.Code)
 		}
-		if len(mockHub.broadcasts) != 0 {
-			t.Errorf("expected 0 broadcasts, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 0 {
+			t.Errorf("expected 0 broadcasts, got %d", len(tc.broadcaster.broadcasts))
 		}
 	})
 
 	t.Run("Missing index with requested_by present returns 400", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
+		tc := newTestContext(t)
 		body := []byte(`{"requested_by": "guest"}`)
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+guestToken)
+		req.Header.Set("Authorization", "Bearer "+tc.guestToken)
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 		if rr.Code != http.StatusBadRequest {
 			t.Errorf("expected 400, got %d", rr.Code)
 		}
-		if len(mockHub.broadcasts) != 0 {
-			t.Errorf("expected 0 broadcasts, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 0 {
+			t.Errorf("expected 0 broadcasts, got %d", len(tc.broadcaster.broadcasts))
 		}
 	})
 
 	t.Run("Invalid index returns 400", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
+		tc := newTestContext(t)
 		body, _ := json.Marshal(RemoveSongRequest{Index: intPtr(10), RequestedBy: "guest"})
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+guestToken)
+		req.Header.Set("Authorization", "Bearer "+tc.guestToken)
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 		if rr.Code != http.StatusBadRequest {
 			t.Errorf("expected 400, got %d", rr.Code)
 		}
-		if len(mockHub.broadcasts) != 0 {
-			t.Errorf("expected 0 broadcasts, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 0 {
+			t.Errorf("expected 0 broadcasts, got %d", len(tc.broadcaster.broadcasts))
 		}
 	})
 
 	t.Run("Guest ownership failure returns 403", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
+		tc := newTestContext(t)
 		body, _ := json.Marshal(RemoveSongRequest{Index: intPtr(1), RequestedBy: "guest"})
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+guestToken)
+		req.Header.Set("Authorization", "Bearer "+tc.guestToken)
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 		if rr.Code != http.StatusForbidden {
 			t.Errorf("expected 403, got %d", rr.Code)
 		}
-		if len(mockHub.broadcasts) != 0 {
-			t.Errorf("expected 0 broadcasts, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 0 {
+			t.Errorf("expected 0 broadcasts, got %d", len(tc.broadcaster.broadcasts))
 		}
 	})
 
 	t.Run("Guest non-upcoming removal returns 403", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
+		tc := newTestContext(t)
 		body, _ := json.Marshal(RemoveSongRequest{Index: intPtr(0), RequestedBy: "guest"})
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+guestToken)
+		req.Header.Set("Authorization", "Bearer "+tc.guestToken)
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 		if rr.Code != http.StatusForbidden {
 			t.Errorf("expected 403, got %d", rr.Code)
 		}
-		if len(mockHub.broadcasts) != 0 {
-			t.Errorf("expected 0 broadcasts, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 0 {
+			t.Errorf("expected 0 broadcasts, got %d", len(tc.broadcaster.broadcasts))
 		}
 	})
 
 	t.Run("requested_by does not override auth role/permissions", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
+		tc := newTestContext(t)
 		body, _ := json.Marshal(RemoveSongRequest{Index: intPtr(1), RequestedBy: "host@example.com"})
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+guestToken)
+		req.Header.Set("Authorization", "Bearer "+tc.guestToken)
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 		if rr.Code != http.StatusForbidden {
 			t.Errorf("expected 403 even with host requested_by, got %d", rr.Code)
 		}
-		if len(mockHub.broadcasts) != 0 {
-			t.Errorf("expected 0 broadcasts, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 0 {
+			t.Errorf("expected 0 broadcasts, got %d", len(tc.broadcaster.broadcasts))
 		}
 	})
 
 	t.Run("Success returns 204 and broadcasts exactly once", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
+		tc := newTestContext(t)
 		body, _ := json.Marshal(RemoveSongRequest{Index: intPtr(2), RequestedBy: "guest"})
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+guestToken)
+		req.Header.Set("Authorization", "Bearer "+tc.guestToken)
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 		if rr.Code != http.StatusNoContent {
 			t.Errorf("expected 204, got %d", rr.Code)
 		}
 
-		if len(mockHub.broadcasts) != 1 {
-			t.Fatalf("expected exactly 1 broadcast, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 1 {
+			t.Fatalf("expected exactly 1 broadcast, got %d", len(tc.broadcaster.broadcasts))
 		}
-		b := mockHub.broadcasts[0]
+		b := tc.broadcaster.broadcasts[0]
 		if b.eventType != ws.EventSongRemoved {
 			t.Errorf("expected event song_removed, got %s", b.eventType)
 		}
@@ -713,50 +788,43 @@ func TestHandleRemoveSong_HTTP(t *testing.T) {
 	})
 
 	t.Run("Explicit index zero for authorized host/admin succeeds", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
+		tc := newTestContext(t)
 		body, _ := json.Marshal(RemoveSongRequest{Index: intPtr(0)})
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+hostToken)
+		req.Header.Set("Authorization", "Bearer "+tc.hostToken)
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 		if rr.Code != http.StatusNoContent {
 			t.Errorf("expected 204, got %d", rr.Code)
 		}
-		if len(mockHub.broadcasts) != 1 {
-			t.Errorf("expected 1 broadcast, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 1 {
+			t.Errorf("expected 1 broadcast, got %d", len(tc.broadcaster.broadcasts))
 		}
 	})
 
 	t.Run("Valid token plus GetUserByID failure returns 500", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
+		tc := newTestContext(t)
 		// Inject failing custom user repo
-		originalAuth := h.auth
-		defer func() { h.auth = originalAuth }()
+		originalAuth := tc.handlers.auth
+		defer func() { tc.handlers.auth = originalAuth }()
 
 		mockRepo := &customUserRepo{
-			UserRepository: userRepo,
+			UserRepository: tc.userRepo,
 			getErr:         errors.New("sqlite lookup failed"),
 		}
-		sessionClock := auth.RealClock{}
-		h.auth = auth.NewInteractor(mockRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, sessionStore, sessionClock)
+		tc.handlers.auth = auth.NewInteractor(mockRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, tc.sessionStore, tc.sessionClock)
 
 		body, _ := json.Marshal(RemoveSongRequest{Index: intPtr(2)})
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+guestToken)
+		req.Header.Set("Authorization", "Bearer "+tc.guestToken)
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 
 		if rr.Code != http.StatusInternalServerError {
 			t.Errorf("expected 500, got %d", rr.Code)
 		}
-		if len(mockHub.broadcasts) != 0 {
-			t.Errorf("expected 0 broadcasts, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 0 {
+			t.Errorf("expected 0 broadcasts, got %d", len(tc.broadcaster.broadcasts))
 		}
 		if rr.Body.String() == "sqlite lookup failed\n" {
 			t.Error("should not return raw DB error text in 500 body")
@@ -764,67 +832,88 @@ func TestHandleRemoveSong_HTTP(t *testing.T) {
 	})
 
 	t.Run("Queue Save failure returns 500 and does not broadcast", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
-		// Inject failing queue repo
-		originalQueue := h.queue
-		defer func() { h.queue = originalQueue }()
-
-		state, _ := h.queue.GetState(ctx)
+		tc := newTestContext(t)
+		state, err := tc.queueInteractor.GetState(ctx)
+		if err != nil {
+			t.Fatalf("failed to get state: %v", err)
+		}
 		mockQR := &failingQueueRepo{
-			QueueRepository: h.queue.GetRepository(),
+			QueueRepository: tc.repo,
 			saveErr:         errors.New("sqlite save failure"),
 		}
-		// In handlers_test.go newTestHandlersWithStore uses youtube service
-		// We need to retrieve it or pass nil (not needed for simple removal)
-		h.queue = queue.NewInteractor(mockQR, nil)
-		// Restore the state in the new interactor
-		mockQR.QueueRepository.Save(ctx, state)
+		tc.handlers.queue = queue.NewInteractor(mockQR, nil)
+		err = mockQR.QueueRepository.Save(ctx, state)
+		if err != nil {
+			t.Fatalf("failed to restore queue state in repo: %v", err)
+		}
 
 		body, _ := json.Marshal(RemoveSongRequest{Index: intPtr(2)})
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+guestToken)
+		req.Header.Set("Authorization", "Bearer "+tc.guestToken)
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 
 		if rr.Code != http.StatusInternalServerError {
 			t.Errorf("expected 500, got %d", rr.Code)
 		}
-		if len(mockHub.broadcasts) != 0 {
-			t.Errorf("expected 0 broadcasts, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 0 {
+			t.Errorf("expected 0 broadcasts, got %d", len(tc.broadcaster.broadcasts))
 		}
 	})
 
 	t.Run("Spoofed requested_by does not change activity attribution", func(t *testing.T) {
-		setupQueue()
-		mockHub := &mockBroadcaster{}
-		h.hub = mockHub
-
+		tc := newTestContext(t)
 		body, _ := json.Marshal(RemoveSongRequest{Index: intPtr(2), RequestedBy: "SpoofedUser"})
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+guestToken)
+		req.Header.Set("Authorization", "Bearer "+tc.guestToken)
 		rr := httptest.NewRecorder()
-		h.HandleRemoveSong(rr, req)
+		tc.handlers.HandleRemoveSong(rr, req)
 
 		if rr.Code != http.StatusNoContent {
 			t.Errorf("expected 204, got %d", rr.Code)
 		}
 
-		if len(mockHub.broadcasts) != 1 {
-			t.Fatalf("expected exactly 1 broadcast, got %d", len(mockHub.broadcasts))
+		if len(tc.broadcaster.broadcasts) != 1 {
+			t.Fatalf("expected exactly 1 broadcast, got %d", len(tc.broadcaster.broadcasts))
 		}
-		b := mockHub.broadcasts[0]
+		b := tc.broadcaster.broadcasts[0]
 		data := b.data.(ws.SongRemovedData)
-		if data.Activity.User != guestUser.DisplayName {
-			t.Errorf("expected activity user to be '%s', got '%s'", guestUser.DisplayName, data.Activity.User)
+		if data.Activity.User != tc.guestUser.DisplayName {
+			t.Errorf("expected activity user to be '%s', got '%s'", tc.guestUser.DisplayName, data.Activity.User)
+		}
+	})
+
+	t.Run("Admin can remove another user's song and broadcasts exactly once", func(t *testing.T) {
+		tc := newTestContext(t)
+		body, _ := json.Marshal(RemoveSongRequest{Index: intPtr(1)}) // otherGuestUser's song
+		req := httptest.NewRequest(http.MethodPost, "/api/queue/remove", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+tc.adminToken)
+		rr := httptest.NewRecorder()
+		tc.handlers.HandleRemoveSong(rr, req)
+
+		if rr.Code != http.StatusNoContent {
+			t.Errorf("expected 204, got %d. Body: %s", rr.Code, rr.Body.String())
+		}
+
+		if len(tc.broadcaster.broadcasts) != 1 {
+			t.Fatalf("expected exactly 1 broadcast, got %d", len(tc.broadcaster.broadcasts))
+		}
+		b := tc.broadcaster.broadcasts[0]
+		if b.eventType != ws.EventSongRemoved {
+			t.Errorf("expected event song_removed, got %s", b.eventType)
+		}
+		data, ok := b.data.(ws.SongRemovedData)
+		if !ok {
+			t.Fatalf("expected ws.SongRemovedData, got %T", b.data)
+		}
+		if data.RemovedIndex != 1 {
+			t.Errorf("expected removed_index 1, got %d", data.RemovedIndex)
 		}
 	})
 }
 
 func TestHandleGoogleLogin_HTTP(t *testing.T) {
-	h, userRepo, _ := newTestHandlersWithStore(t)
+	h, userRepo, sessionStore := newTestHandlersWithStore(t)
 
 	// Hijack http.DefaultClient to mock Google token info endpoint
 	oldTransport := http.DefaultClient.Transport
@@ -881,7 +970,7 @@ func TestHandleGoogleLogin_HTTP(t *testing.T) {
 			getErr:         errors.New("reload db failure"),
 		}
 		sessionClock := auth.RealClock{}
-		h.auth = auth.NewInteractor(mockRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, h.auth.GetSessionStore(), sessionClock)
+		h.auth = auth.NewInteractor(mockRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, sessionStore, sessionClock)
 
 		http.DefaultClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			tokenInfo := `{

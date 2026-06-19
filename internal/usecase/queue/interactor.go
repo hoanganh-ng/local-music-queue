@@ -33,10 +33,6 @@ type Interactor struct {
 	mu          sync.RWMutex
 }
 
-func (i *Interactor) GetRepository() repository.QueueRepository {
-	return i.repo
-}
-
 // AutoQueueTrigger is the interface for triggering auto-queue checks.
 type AutoQueueTrigger interface {
 	CheckAndTrigger(ctx context.Context) error

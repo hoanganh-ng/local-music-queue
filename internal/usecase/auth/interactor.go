@@ -45,11 +45,6 @@ func NewInteractor(userRepo repository.UserRepository, clientID string, hostEmai
 	}
 }
 
-// GetSessionStore returns the configured session store.
-func (i *Interactor) GetSessionStore() SessionStore {
-	return i.sessionStore
-}
-
 // CreateSession creates a new session for the user ID with a 12-hour TTL.
 func (i *Interactor) CreateSession(ctx context.Context, userID int) (string, time.Time, error) {
 	return i.sessionStore.Create(ctx, userID, 12*time.Hour)

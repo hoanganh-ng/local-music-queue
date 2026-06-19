@@ -2,7 +2,8 @@
 
 **Baseline Date:** 2026-06-19
 **Branch:** dev
-**Baseline Commit:** `0131b44ff1ac6b263cebef6d2526196042c5560f` (with Sprint 003 Trusted Removal applied)
+**Original Sprint 001 Baseline Commit:** `0131b44ff1ac6b263cebef6d2526196042c5560f` (pre-sprint baseline)
+**Current Inspected Dev Commit:** `9c0fba72ca21f933c88817c3b4975bf3319f9b2b` (containing Sprint 003 implementation)
 
 ## Source-Priority Rule
 This `PROJECT_STATE.md` document is the authoritative documentation snapshot for the inspected commit. If any other documentation conflicts with this document, this document is correct regarding the documented state of the codebase. However, if conflicts are discovered between this document and the actual implementation or tests, the implementation and tests themselves remain the ultimate source of truth.
@@ -89,14 +90,22 @@ SQLite with 7 tables, index, trigger, and single-row queue JSON storage.
 - No frontend E2E script was found.
 
 ### Command Execution
-*(No commands were executed during this inspection; exact command output must be included when claiming tests were run).*
+During the Sprint 003 verification:
+- `go test -count=1 ./internal/usecase/auth ./internal/usecase/queue ./internal/delivery/http ./internal/infrastructure/session` - PASS
+- `go test ./...` - BLOCKED (Pre-existing environmental blocker: `open letsencrypt-backend/accounts: permission denied`)
+- `go test -race ./...` - BLOCKED (Pre-existing environmental blocker: `open letsencrypt-backend/accounts: permission denied`)
+- `go vet ./...` - BLOCKED (Pre-existing environmental blocker: `open letsencrypt-backend/accounts: permission denied`)
+- `cd frontend && npm run test:unit -- --run` - BLOCKED (Environmental: `npm: command not found`)
+- `cd frontend && npm run build` - BLOCKED (Environmental: `npm: command not found`)
+- `docker compose config` - PASS
+- `git diff --check` - PASS
+- `git status --short --untracked-files=all` - PASS
 
 ## Prioritized Known-Risk Register
 1. **Critical:** Absence of JWT/server session/per-request identity allowing trivial spoofing of identity/roles on most endpoints, with the song removal endpoint (`POST /api/queue/remove`) as the explicit exception.
 2. **Critical:** Lack of backend authorization checks on most queue operations (except song removal) and auto-queue configuration.
 3. **High:** In-memory voting state is lost on restart.
-4. **Medium:** Stale backend tests (e.g., `TestLoadDefaults`).
-5. **High:** WebSocket vulnerabilities (origin not validated, `user_id` via query string).
+4. **High:** WebSocket vulnerabilities (origin not validated, `user_id` via query string).
 
 ## Deferred Runtime Sprint Candidates
 - Implement secure JWT-based or session-based authentication.

@@ -19,7 +19,9 @@ vi.mock('../../services/websocket', () => ({
   }
 }))
 
-const mockPush = vi.fn()
+const { mockPush } = vi.hoisted(() => ({
+  mockPush: vi.fn()
+}))
 vi.mock('vue-router', () => ({
   useRouter: () => ({
     push: mockPush,

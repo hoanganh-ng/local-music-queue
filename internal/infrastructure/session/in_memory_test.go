@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"local-music-queue/internal/domain/entity"
 	"local-music-queue/internal/usecase/auth"
 	"sync"
 	"testing"
@@ -28,7 +29,7 @@ func TestInMemoryStore_CreateAndResolve(t *testing.T) {
 		t.Fatalf("failed to create session: %v", err)
 	}
 	if len(token) < 32 {
-		t.Errorf("token looks too short: %s", token)
+		t.Errorf("token looks too short: length %d", len(token))
 	}
 	if !expiresAt.Equal(clock.now.Add(10 * time.Minute)) {
 		t.Errorf("expected expiry %v, got %v", clock.now.Add(10*time.Minute), expiresAt)
@@ -98,12 +99,24 @@ func TestInMemoryStore_Concurrency(t *testing.T) {
 	var wg sync.WaitGroup
 	numWorkers := 100
 
-	// Concurrent creation
+	// Concurrent creation and resolution
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			_, _, _ = store.Create(ctx, id, time.Hour)
+			token, _, err := store.Create(ctx, id, time.Hour)
+			if err != nil {
+				t.Errorf("failed to create session: %v", err)
+				return
+			}
+			resolvedID, err := store.Resolve(ctx, token)
+			if err != nil {
+				t.Errorf("failed to resolve session: %v", err)
+				return
+			}
+			if resolvedID != id {
+				t.Errorf("expected user ID %d, got %d", id, resolvedID)
+			}
 		}(i)
 	}
 	wg.Wait()
@@ -115,4 +128,87 @@ func TestInMemoryStore_Concurrency(t *testing.T) {
 	if size != numWorkers {
 		t.Errorf("expected %d sessions, got %d", numWorkers, size)
 	}
+}
+
+type mockUserRepoForConcurrency struct {
+	mu   sync.Mutex
+	user *entity.User
+}
+
+func (m *mockUserRepoForConcurrency) CreateUser(ctx context.Context, user *entity.User) error {
+	return nil
+}
+
+func (m *mockUserRepoForConcurrency) GetUserByEmail(ctx context.Context, email string) (*entity.User, error) {
+	return m.user, nil
+}
+
+func (m *mockUserRepoForConcurrency) GetUserByID(ctx context.Context, id int) (*entity.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.user, nil
+}
+
+func (m *mockUserRepoForConcurrency) UpdateUser(ctx context.Context, user *entity.User) error {
+	return nil
+}
+
+func (m *mockUserRepoForConcurrency) DecrementPriority(ctx context.Context, userID int) error {
+	return nil
+}
+
+func (m *mockUserRepoForConcurrency) IncrementPriority(ctx context.Context, userID int) error {
+	return nil
+}
+
+func (m *mockUserRepoForConcurrency) RecordSession(ctx context.Context, userID int, sessionDate time.Time) error {
+	return nil
+}
+
+func (m *mockUserRepoForConcurrency) GetLastSessionDate(ctx context.Context, userID int) (*time.Time, error) {
+	return nil, nil
+}
+
+func (m *mockUserRepoForConcurrency) LogPriorityTransaction(ctx context.Context, userID int, songID, songTitle, txType string, amount, balanceAfter int) error {
+	return nil
+}
+
+func TestResolveSession_ConcreteConcurrency(t *testing.T) {
+	clock := &testClock{now: time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)}
+	store := NewInMemoryStore(clock)
+
+	user := &entity.User{
+		ID:          42,
+		Email:       "test@example.com",
+		DisplayName: "Test User",
+		Role:        entity.RoleGuest,
+	}
+	userRepo := &mockUserRepoForConcurrency{user: user}
+
+	interactor := auth.NewInteractor(userRepo, "client-id", nil, nil, store, clock)
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	numWorkers := 100
+
+	// Concurrently call CreateSession and ResolveSession
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			token, _, err := interactor.CreateSession(ctx, user.ID)
+			if err != nil {
+				t.Errorf("failed to create session: %v", err)
+				return
+			}
+			resolved, err := interactor.ResolveSession(ctx, token)
+			if err != nil {
+				t.Errorf("failed to resolve session: %v", err)
+				return
+			}
+			if resolved.ID != user.ID {
+				t.Errorf("expected user ID %d, got %d", user.ID, resolved.ID)
+			}
+		}(i)
+	}
+	wg.Wait()
 }

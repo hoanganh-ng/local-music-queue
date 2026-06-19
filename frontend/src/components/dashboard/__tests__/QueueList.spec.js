@@ -3,14 +3,18 @@ import { mount } from '@vue/test-utils'
 import QueueList from '../QueueList.vue'
 import { globalStore } from '../../../store'
 
-const mockPush = vi.fn()
+const { mockPush } = vi.hoisted(() => ({
+  mockPush: vi.fn()
+}))
 vi.mock('vue-router', () => ({
   useRouter: () => ({
     push: mockPush,
   })
 }))
 
-const mockRemoveSong = vi.fn()
+const { mockRemoveSong } = vi.hoisted(() => ({
+  mockRemoveSong: vi.fn()
+}))
 vi.mock('../../../services/api', () => ({
   api: {
     removeSong: (...args) => mockRemoveSong(...args),
@@ -226,24 +230,37 @@ describe('QueueList', () => {
 
   it('successful removal does not mutate queue state optimistically', async () => {
     globalStore.setUser({ id: 10, role: 'guest', display_name: 'Guest1' })
-    const initialQueue = [
-      { id: 101, title: 'Song 1', added_by_id: 10, added_by: 'Guest1' }
-    ]
-    globalStore.updateQueueState({ queue: initialQueue, current_index: 0 })
+    const currentSong = { id: 100, title: 'Current Song', added_by_id: 20, added_by: 'Guest2' }
+    const upcomingSong = { id: 101, title: 'Upcoming Song', added_by_id: 10, added_by: 'Guest1' }
+    globalStore.updateQueueState({
+      songs: [currentSong, upcomingSong],
+      current_index: 0,
+      status: 'playing'
+    })
 
     const wrapper = mount(QueueList, {
       props: {
-        queue: initialQueue,
-        currentIndex: 0,
+        queue: globalStore.queueState.queue,
+        currentIndex: globalStore.queueState.current_index,
         canControl: false
       }
     })
 
     mockRemoveSong.mockResolvedValueOnce(null)
 
-    await wrapper.find('.remove-btn').trigger('click')
+    const removeBtn = wrapper.find('.remove-btn')
+    expect(removeBtn.exists()).toBe(true)
+    await removeBtn.trigger('click')
+
+    expect(mockRemoveSong).toHaveBeenCalledWith(1, 'Guest1')
 
     expect(globalStore.queueState.queue).toHaveLength(1)
     expect(globalStore.queueState.queue[0].id).toBe(101)
+    expect(globalStore.queueState.songs).toHaveLength(2)
+
+    globalStore.removeSong(1)
+    expect(globalStore.queueState.queue).toHaveLength(0)
+    expect(globalStore.queueState.songs).toHaveLength(1)
+    expect(globalStore.queueState.songs[0].id).toBe(100)
   })
 })

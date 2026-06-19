@@ -7,8 +7,8 @@ In progress, awaiting Architect review and Product Owner approval.
 The goal of Sprint 003 is to solve GitHub Issue #7 by allowing authenticated guest users to remove their own upcoming songs from the queue, while ensuring hosts and admins retain complete administrative removal authority.
 Security and permissions must be enforced strictly on the backend using server-issued session identity rather than trusting client-supplied metadata or frontend states.
 
-## Current vs. Desired Behavior
-- **Current Behavior:** The `POST /api/queue/remove` endpoint is completely unprotected. It accepts a payload containing `"index"` and `"requested_by"` and performs removal without verifying authentication, ownership, or authority. Client-supplied role and user parameters are trusted blindly.
+## Pre-Sprint vs. Desired Behavior
+- **Pre-Sprint Behavior:** The `POST /api/queue/remove` endpoint is completely unprotected. It accepts a payload containing `"index"` and `"requested_by"` and performs removal without verifying authentication, ownership, or authority. Client-supplied role and user parameters are trusted blindly.
 - **Desired Behavior:** Guest users can only remove upcoming songs they added themselves. Host and admin users can remove any song in the queue. Authenticated session tokens must verify the caller's identity.
 
 ## Required Context
@@ -70,8 +70,12 @@ The endpoint `POST /api/queue/remove` requires:
 - **Other Endpoints Unprotected:** Backend security relies on per-request session tokens only for queue removal. Other playback controls (e.g., skip, play/pause) remain client-trusted.
 
 ## Verification Results
-- `go test ./internal/usecase/auth ./internal/usecase/queue ./internal/delivery/http ./internal/infrastructure/session` - PASS
-- `go test ./...` - BLOCKED (Pre-existing environmental blocker: `pattern ./...: open letsencrypt-backend/accounts: permission denied`).
-- `go vet ./...` - BLOCKED (Same pre-existing environmental blocker).
-- `git diff --check` - PASS
+- `go test -count=1 ./internal/usecase/auth ./internal/usecase/queue ./internal/delivery/http ./internal/infrastructure/session` - PASS
+- `go test ./...` - BLOCKED (Pre-existing environmental blocker: `open letsencrypt-backend/accounts: permission denied`)
+- `go test -race ./...` - BLOCKED (Pre-existing environmental blocker: `open letsencrypt-backend/accounts: permission denied`)
+- `go vet ./...` - BLOCKED (Pre-existing environmental blocker: `open letsencrypt-backend/accounts: permission denied`)
+- `cd frontend && npm run test:unit -- --run` - BLOCKED (Environmental: `npm: command not found`)
+- `cd frontend && npm run build` - BLOCKED (Environmental: `npm: command not found`)
 - `docker compose config` - PASS
+- `git diff --check` - PASS
+- `git status --short --untracked-files=all` - PASS
