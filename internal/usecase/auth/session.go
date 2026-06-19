@@ -2,7 +2,13 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"time"
+)
+
+var (
+	ErrSessionInvalid = errors.New("invalid session token")
+	ErrSessionExpired = errors.New("expired session token")
 )
 
 // Clock defines an interface to retrieve the current time.

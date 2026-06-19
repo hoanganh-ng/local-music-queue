@@ -45,6 +45,11 @@ func NewInteractor(userRepo repository.UserRepository, clientID string, hostEmai
 	}
 }
 
+// GetSessionStore returns the configured session store.
+func (i *Interactor) GetSessionStore() SessionStore {
+	return i.sessionStore
+}
+
 // CreateSession creates a new session for the user ID with a 12-hour TTL.
 func (i *Interactor) CreateSession(ctx context.Context, userID int) (string, time.Time, error) {
 	return i.sessionStore.Create(ctx, userID, 12*time.Hour)
@@ -63,6 +68,11 @@ func (i *Interactor) ResolveSession(ctx context.Context, token string) (*entity.
 	}
 
 	return user, nil
+}
+
+// GetUserByID loads a user by ID from the repository.
+func (i *Interactor) GetUserByID(ctx context.Context, id int) (*entity.User, error) {
+	return i.userRepo.GetUserByID(ctx, id)
 }
 
 // VerifyGoogleToken verifies the Google ID token and returns user info.

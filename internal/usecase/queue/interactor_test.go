@@ -580,8 +580,9 @@ func TestRemoveSong_Usecase(t *testing.T) {
 		}
 	})
 
-	t.Run("Host removes current song", func(t *testing.T) {
+	t.Run("Host removes current song preserving CurrentIndex, Status, and Elapsed semantics", func(t *testing.T) {
 		_, repo, interactor := setupQueue()
+		repo.queue.Elapsed = 45 // Set dummy elapsed to check if it resets
 		res, err := interactor.RemoveSong(ctx, host, 1)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -591,6 +592,12 @@ func TestRemoveSong_Usecase(t *testing.T) {
 		}
 		if repo.queue.CurrentIndex != 1 {
 			t.Errorf("expected CurrentIndex to be 1, got %d", repo.queue.CurrentIndex)
+		}
+		if repo.queue.Status != entity.StatusPlaying {
+			t.Errorf("expected Status to be StatusPlaying, got %s", repo.queue.Status)
+		}
+		if repo.queue.Elapsed != 0 {
+			t.Errorf("expected Elapsed to reset to 0, got %d", repo.queue.Elapsed)
 		}
 	})
 

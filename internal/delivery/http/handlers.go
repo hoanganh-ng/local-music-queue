@@ -16,16 +16,21 @@ import (
 	"time"
 )
 
+type Broadcaster interface {
+	Broadcast(eventType string, data interface{})
+	ConnectedCount() int
+}
+
 type Handlers struct {
 	queue    *queue.Interactor
 	auth     *auth.Interactor
 	activity *activity.Interactor
 	priority *priority.Interactor
 	vote     *vote.Interactor
-	hub      *ws.Hub
+	hub      Broadcaster
 }
 
-func NewHandlers(q *queue.Interactor, a *auth.Interactor, act *activity.Interactor, p *priority.Interactor, v *vote.Interactor, hub *ws.Hub) *Handlers {
+func NewHandlers(q *queue.Interactor, a *auth.Interactor, act *activity.Interactor, p *priority.Interactor, v *vote.Interactor, hub Broadcaster) *Handlers {
 	return &Handlers{
 		queue:    q,
 		auth:     a,
@@ -64,7 +69,16 @@ func (h *Handlers) HandleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reload user to get updated priority balance
-	user, _ = h.auth.LoginWithGoogle(r.Context(), req.IDToken)
+	var reloadErr error
+	user, reloadErr = h.auth.GetUserByID(r.Context(), user.ID)
+	if reloadErr != nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	if user == nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
 
 	// Create session token
 	token, expiresAt, err := h.auth.CreateSession(r.Context(), user.ID)
@@ -363,7 +377,7 @@ func (h *Handlers) HandlePrevSong(w http.ResponseWriter, r *http.Request) {
 }
 
 type RemoveSongRequest struct {
-	Index       int    `json:"index"`
+	Index       *int   `json:"index"`
 	RequestedBy string `json:"requested_by"`
 }
 
@@ -380,25 +394,37 @@ func extractToken(r *http.Request) string {
 }
 
 func (h *Handlers) HandleRemoveSong(w http.ResponseWriter, r *http.Request) {
-	var req RemoveSongRequest
+	var req *RemoveSongRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		http.Error(w, "invalid request: malformed JSON", http.StatusBadRequest)
+		return
+	}
+	if req == nil {
+		http.Error(w, "invalid request: body is null", http.StatusBadRequest)
+		return
+	}
+	if req.Index == nil {
+		http.Error(w, "invalid request: missing index", http.StatusBadRequest)
 		return
 	}
 
 	token := extractToken(r)
 	if token == "" {
-		http.Error(w, "missing or malformed Authorization header", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	user, err := h.auth.ResolveSession(r.Context(), token)
 	if err != nil {
-		http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+		if errors.Is(err, auth.ErrSessionInvalid) || errors.Is(err, auth.ErrSessionExpired) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
-	res, err := h.queue.RemoveSong(r.Context(), user, req.Index)
+	res, err := h.queue.RemoveSong(r.Context(), user, *req.Index)
 	if err != nil {
 		if errors.Is(err, queue.ErrInvalidIndex) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -408,7 +434,7 @@ func (h *Handlers) HandleRemoveSong(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 

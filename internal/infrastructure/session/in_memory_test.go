@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"local-music-queue/internal/usecase/auth"
 	"sync"
 	"testing"
 	"time"
@@ -42,17 +43,17 @@ func TestInMemoryStore_CreateAndResolve(t *testing.T) {
 		t.Errorf("expected user ID 42, got %d", userID)
 	}
 
-	// 4. Expired token is rejected.
-	clock.now = clock.now.Add(11 * time.Minute)
+	// 4. Expired token is rejected (equal to expiresAt is treated as expired)
+	clock.now = clock.now.Add(10 * time.Minute)
 	_, err = store.Resolve(ctx, token)
-	if err == nil || (!errors.Is(err, ErrSessionExpired) && err.Error() != "session expired") {
-		t.Errorf("expected expired error, got %v", err)
+	if err == nil || !errors.Is(err, auth.ErrSessionExpired) {
+		t.Errorf("expected expired error at expiresAt boundary, got %v", err)
 	}
 
 	// 6. Unknown token is rejected.
 	_, err = store.Resolve(ctx, "unknown-token")
-	if err == nil || (!errors.Is(err, ErrSessionNotFound) && err.Error() != "session not found") {
-		t.Errorf("expected not found error, got %v", err)
+	if err == nil || !errors.Is(err, auth.ErrSessionInvalid) {
+		t.Errorf("expected invalid session error, got %v", err)
 	}
 }
 

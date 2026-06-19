@@ -4,16 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"errors"
 	"local-music-queue/internal/usecase/auth"
 	"sync"
 	"time"
 )
 
-var (
-	ErrSessionExpired  = errors.New("session expired")
-	ErrSessionNotFound = errors.New("session not found")
-)
+
 
 type sessionData struct {
 	userID    int
@@ -69,11 +65,11 @@ func (s *InMemoryStore) Resolve(ctx context.Context, token string) (int, error) 
 	s.pruneExpired()
 
 	if !ok {
-		return 0, ErrSessionNotFound
+		return 0, auth.ErrSessionInvalid
 	}
 
-	if s.clock.Now().After(data.expiresAt) {
-		return 0, ErrSessionExpired
+	if !s.clock.Now().Before(data.expiresAt) {
+		return 0, auth.ErrSessionExpired
 	}
 
 	return data.userID, nil
@@ -84,7 +80,7 @@ func (s *InMemoryStore) Resolve(ctx context.Context, token string) (int, error) 
 func (s *InMemoryStore) pruneExpired() {
 	now := s.clock.Now()
 	for token, data := range s.sessions {
-		if now.After(data.expiresAt) {
+		if !now.Before(data.expiresAt) {
 			delete(s.sessions, token)
 		}
 	}

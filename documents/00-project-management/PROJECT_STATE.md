@@ -1,8 +1,8 @@
-# Project State Baseline (Sprint 001)
+# Project State Baseline (Sprint 003 Active)
 
-**Baseline Date:** 2026-06-17
+**Baseline Date:** 2026-06-19
 **Branch:** dev
-**Inspected Commit:** `0131b44ff1ac6b263cebef6d2526196042c5560f`
+**Baseline Commit:** `0131b44ff1ac6b263cebef6d2526196042c5560f` (with Sprint 003 Trusted Removal applied)
 
 ## Source-Priority Rule
 This `PROJECT_STATE.md` document is the authoritative documentation snapshot for the inspected commit. If any other documentation conflicts with this document, this document is correct regarding the documented state of the codebase. However, if conflicts are discovered between this document and the actual implementation or tests, the implementation and tests themselves remain the ultimate source of truth.
@@ -67,7 +67,7 @@ SQLite with 7 tables, index, trigger, and single-row queue JSON storage.
 
 ## Authentication & Authorization
 - **Login Verification:** Verifies Google OAuth token audience and `email_verified` fields. Hard-coded allowed domain check. Also logs configured emails (Host/Admin emails) on startup.
-- **Identity Management:** Server-issued session tokens (stored in memory) are used to authenticate requests for song removal (`POST /api/queue/remove`). For other endpoints, there remains an absence of server sessions or per-request authenticated identity, where roles and identity are client-supplied.
+- **Identity Management:** Server-issued session tokens (stored in memory) are used to authenticate requests for song removal (`POST /api/queue/remove`). Sessions are transient and stored strictly in-memory; they are lost upon server restart and are bound to a single-process/single-instance scope. For other endpoints, there remains an absence of server sessions or per-request authenticated identity, where roles and identity are client-supplied.
 - **Authorization Enforcement:** Backend authorization checks are enforced on song removal (`POST /api/queue/remove`). There is an absence of backend authorization checks on other playback operations (e.g., skip, clear queue) and auto-queue toggling.
 - **WebSocket Caveats:** Accepts any origin without validation. Also uses an insecure query parameter `user_id` for connection identification.
 
@@ -86,17 +86,14 @@ SQLite with 7 tables, index, trigger, and single-row queue JSON storage.
 ### Static Inspection
 - `frontend/package.json` exposes Vitest through `test:unit`.
 - The non-watch command is `npm run test:unit -- --run`.
-- `TestLoadDefaults` expects HostPIN 6666.
-- `config.Load` defaults HostPIN to 9512.
-- Therefore, that assertion is stale and expected to fail in a clean environment.
 - No frontend E2E script was found.
 
 ### Command Execution
 *(No commands were executed during this inspection; exact command output must be included when claiming tests were run).*
 
 ## Prioritized Known-Risk Register
-1. **Critical:** Absence of JWT/server session/per-request identity allowing trivial spoofing of identity/roles (client-supplied `user_id`/`UserRole`).
-2. **Critical:** Lack of backend authorization checks on queue operations and auto-queue configuration.
+1. **Critical:** Absence of JWT/server session/per-request identity allowing trivial spoofing of identity/roles on most endpoints, with the song removal endpoint (`POST /api/queue/remove`) as the explicit exception.
+2. **Critical:** Lack of backend authorization checks on most queue operations (except song removal) and auto-queue configuration.
 3. **High:** In-memory voting state is lost on restart.
 4. **Medium:** Stale backend tests (e.g., `TestLoadDefaults`).
 5. **High:** WebSocket vulnerabilities (origin not validated, `user_id` via query string).

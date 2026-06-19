@@ -3,7 +3,9 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"local-music-queue/internal/domain/entity"
+	"sync"
 	"testing"
 	"time"
 )
@@ -195,3 +197,112 @@ func TestIsAdminEmail(t *testing.T) {
 // Note: Testing LoginWithGoogle and VerifyGoogleToken would require mocking HTTP calls
 // to Google's tokeninfo endpoint, which is beyond the scope of unit tests.
 // These should be tested with integration tests or by mocking the HTTP client.
+
+func TestResolveSession_RepositoryFailure(t *testing.T) {
+	repo := newMockUserRepo()
+	repo.getErr = errors.New("db error")
+	clock := &mockClock{now: time.Now()}
+	store := &mockSessionStore{sessions: make(map[string]int), token: "test-token"}
+	interactor := NewInteractor(repo, "client-id", nil, nil, store, clock)
+
+	store.sessions["test-token"] = 1
+
+	_, err := interactor.ResolveSession(context.Background(), "test-token")
+	if err == nil {
+		t.Error("expected error, got nil")
+	}
+	if !errors.Is(err, repo.getErr) && err.Error() != "db error" {
+		t.Errorf("expected db error, got %v", err)
+	}
+}
+
+func TestResolveSession_PersistedRole(t *testing.T) {
+	repo := newMockUserRepo()
+	guest := &entity.User{
+		Email: "guest@example.com",
+		Role:  entity.RoleGuest,
+	}
+	_ = repo.CreateUser(context.Background(), guest) // ID will be 1
+
+	// Now change role in repository to Host
+	guest.Role = entity.RoleHost
+	_ = repo.UpdateUser(context.Background(), guest)
+
+	clock := &mockClock{now: time.Now()}
+	store := &mockSessionStore{sessions: make(map[string]int), token: "test-token"}
+	interactor := NewInteractor(repo, "client-id", nil, nil, store, clock)
+
+	store.sessions["test-token"] = guest.ID
+
+	resolved, err := interactor.ResolveSession(context.Background(), "test-token")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resolved.Role != entity.RoleHost {
+		t.Errorf("expected role Host, got %s", resolved.Role)
+	}
+}
+
+type concurrentMockSessionStore struct {
+	mu           sync.Mutex
+	sessions     map[string]int
+	tokenCounter int
+}
+
+func (s *concurrentMockSessionStore) Create(ctx context.Context, userID int, ttl time.Duration) (string, time.Time, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tokenCounter++
+	token := fmt.Sprintf("token-%d", s.tokenCounter)
+	s.sessions[token] = userID
+	return token, time.Now().Add(ttl), nil
+}
+
+func (s *concurrentMockSessionStore) Resolve(ctx context.Context, token string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	userID, ok := s.sessions[token]
+	if !ok {
+		return 0, ErrSessionInvalid
+	}
+	return userID, nil
+}
+
+func TestResolveSession_Concurrency(t *testing.T) {
+	repo := newMockUserRepo()
+	user := &entity.User{
+		Email: "user@example.com",
+		Role:  entity.RoleGuest,
+	}
+	_ = repo.CreateUser(context.Background(), user)
+
+	clock := &mockClock{now: time.Now()}
+	store := &concurrentMockSessionStore{sessions: make(map[string]int)}
+	interactor := NewInteractor(repo, "client-id", nil, nil, store, clock)
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	numWorkers := 100
+
+	// Concurrently call CreateSession and ResolveSession
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			token, _, err := interactor.CreateSession(ctx, user.ID)
+			if err != nil {
+				t.Errorf("failed to create session: %v", err)
+				return
+			}
+			resolved, err := interactor.ResolveSession(ctx, token)
+			if err != nil {
+				t.Errorf("failed to resolve session: %v", err)
+				return
+			}
+			if resolved.ID != user.ID {
+				t.Errorf("expected user ID %d, got %d", user.ID, resolved.ID)
+			}
+		}(i)
+	}
+	wg.Wait()
+}
