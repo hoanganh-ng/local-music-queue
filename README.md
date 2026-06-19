@@ -8,6 +8,7 @@ A local-network music queue application powered by **YouTube**. Perfect for part
 ![OAuth](https://img.shields.io/badge/Auth-Google%20OAuth-4285F4?style=flat-square&logo=google)
 
 ## 📌 Project State
+
 For the authoritative current state of the implementation, including security caveats and known risks, please refer directly to **[PROJECT_STATE.md](documents/00-project-management/PROJECT_STATE.md)**.
 
 ## ✨ Features
@@ -53,35 +54,47 @@ The project follows **Clean Architecture** principles with four distinct layers:
 ### Backend Setup
 
 1. From the project root:
+
    ```bash
    go mod download
    ```
+
 2. Create the local database directory:
+
    ```bash
    mkdir -p .localdb
    ```
+
 3. Configure environment variables (see [Configuration](#configuration))
 4. Run the server:
+
    ```bash
    go run cmd/server/main.go
    ```
+
    *Default port: 1111*
 
 ### Frontend Setup
 
 1. Navigate to the frontend directory:
+
    ```bash
    cd frontend
    ```
+
 2. Install dependencies:
+
    ```bash
    npm install
    ```
+
 3. Configure environment variables for API endpoint
 4. Start the development server:
+
    ```bash
    npm run dev
    ```
+
    *Default port: 5173*
 
 ### Docker Setup
@@ -93,8 +106,6 @@ Before startup, the three certificate values (`DUCKDNS_DOMAIN`, `DUCKDNS_TOKEN`,
 ```bash
 docker-compose up --build
 ```
-
-
 
 ## ⚙️ Configuration
 
