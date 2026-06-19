@@ -2,6 +2,14 @@
 
 This directory contains documentation for active and past sprints.
 
+## Sprint Index
+
+| Sprint | Title                              | Status   |
+|--------|------------------------------------|----------|
+| 001    | Authoritative Project Baseline     | Closed   |
+| 002    | Trustworthy Verification Baseline  | Closed   |
+| 003    | Trusted Owned-Song Removal         | Closed   |
+
 ## File Naming
 Sprint files must follow the format: `XXX-sprint-name.md` (e.g., `001-authoritative-project-baseline.md`).
 

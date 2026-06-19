@@ -1,10 +1,7 @@
 # Active Sprint
 
-The currently active sprint is:
-**[Sprint 003 - Trusted Owned-Song Removal](003-trusted-owned-song-removal.md)**
+**No active sprint.** Sprint 003 has been closed. No later sprint has been approved.
 
-**Goal:** Fix GitHub Issue #7 by allowing authenticated guests to remove their own upcoming songs while preserving host/admin removal authority.
+Work is currently pending Product Owner selection of the next sprint.
 
-**Status:** In progress.
-
-**Explicit Statement:** No later sprint is approved. Work is currently restricted solely to the scope defined in Sprint 003.
+**Explicit Statement:** No sprint is authorized for work until the Product Owner approves and activates a new sprint.
