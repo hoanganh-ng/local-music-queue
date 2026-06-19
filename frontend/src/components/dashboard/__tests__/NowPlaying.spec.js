@@ -34,10 +34,16 @@ beforeEach(() => {
     PlayerState: { PLAYING: 1, PAUSED: 2, ENDED: 0, BUFFERING: 3, CUED: 5, UNSTARTED: -1 },
     Player: vi.fn(function (_elId, opts) {
       capturedOnStateChange = opts.events.onStateChange
-      this.loadVideoById = vi.fn()
+      // Sprint 004 (identity-keyed): track the videoId the player currently
+      // believes is loaded so callbacks can identify which video generated
+      // them. Production code reads event.target.getVideoData()?.video_id;
+      // this fallback seam (`event.target.videoId`) supports the mock.
+      this.videoId = ''
+      this.getVideoData = () => ({ video_id: this.videoId })
+      this.loadVideoById = vi.fn((id) => { this.videoId = id })
       this.playVideo = vi.fn()
       this.pauseVideo = vi.fn()
-      this.stopVideo = vi.fn()
+      this.stopVideo = vi.fn(() => { this.videoId = '' })
       this.getCurrentTime = () => 0
       this.getVolume = () => 50
       this.setVolume = vi.fn()
@@ -73,6 +79,21 @@ function lastLoadCall(videoId) {
   return player.loadVideoById.mock.calls.find(c => c[0] === videoId)
 }
 
+// Drive a state-change callback as if the YT iframe fired it for the given
+// videoId. When `forVideoId` is null, reads the latest player's current
+// videoId. Uses both seams the production code understands: the real YT API
+// exposes getVideoData() with a snake_case `video_id`, while the mock also
+// exposes `videoId` directly on the target so tests can pin identity.
+function fireState(stateCode, forVideoId = null) {
+  const player = window.YT.Player.mock.results[window.YT.Player.mock.results.length - 1].value
+  const videoId = forVideoId !== null ? forVideoId : player.videoId
+  const target = {
+    getVideoData: () => ({ video_id: videoId }),
+    videoId: videoId,
+  }
+  capturedOnStateChange({ data: stateCode, target })
+}
+
 describe('NowPlaying — Sprint 004 host-player programmatic-load guard (generation-safe)', () => {
   it('cancel a pause debounce scheduled for song A when song B loads', async () => {
     const songA = { id: 'aaaaaaaaaaa', title: 'A', url: 'https://youtu.be/aaaaaaaaaaa', added_by: 'Alice' }
@@ -83,7 +104,7 @@ describe('NowPlaying — Sprint 004 host-player programmatic-load guard (generat
     expect(capturedOnStateChange).toBeTypeOf('function')
 
     // User pauses A — statusChangeTimeout is armed for setStatus('paused', ...).
-    capturedOnStateChange({ data: window.YT.PlayerState.PAUSED })
+    fireState(window.YT.PlayerState.PAUSED, 'aaaaaaaaaaa')
     // Before the 300 ms debounce fires, a new videoId arrives and the watcher
     // must cancel the pending statusChangeTimeout.
     await wrapper.setProps({ currentSong: songB })
@@ -111,7 +132,7 @@ describe('NowPlaying — Sprint 004 host-player programmatic-load guard (generat
     // B's late PLAYING arrives (e.g. its slow decode completes after C
     // swapped in). The generation must NOT match, so the guard stays armed
     // for C and no setStatus('playing') fires.
-    capturedOnStateChange({ data: window.YT.PlayerState.PLAYING })
+    fireState(window.YT.PlayerState.PLAYING, 'bbbbbbbbbbb')
     await vi.advanceTimersByTimeAsync(1000)
 
     // No status setStatus calls at all — even B's "playing" event was dropped.
@@ -130,9 +151,9 @@ describe('NowPlaying — Sprint 004 host-player programmatic-load guard (generat
     await wrapper.setProps({ currentSong: songB })
     await nextTick()
 
-    // A's ENDED arrives late (B is the current target). loadGeneration !==
-    // settledGeneration → ENDED must NOT advance the backend.
-    capturedOnStateChange({ data: window.YT.PlayerState.ENDED })
+    // A's ENDED arrives late (B is the current target). Identity mismatch
+    // (A's videoId ≠ B's expectedVideoId) → ENDED must NOT advance the backend.
+    fireState(window.YT.PlayerState.ENDED, 'aaaaaaaaaaa')
     await flushPromises()
     expect(mockSongEnded).not.toHaveBeenCalled()
   })
@@ -145,12 +166,12 @@ describe('NowPlaying — Sprint 004 host-player programmatic-load guard (generat
 
     // No load in progress: settledGeneration === loadGeneration from init.
     // A genuine PAUSED from host settling flow establishes settled state.
-    capturedOnStateChange({ data: window.YT.PlayerState.PAUSED })
+    fireState(window.YT.PlayerState.PAUSED, 'ddddddddddd')
     await vi.advanceTimersByTimeAsync(350)
     await flushPromises()
 
     // Now an ENDED is genuine end-of-media and must reach the backend.
-    capturedOnStateChange({ data: window.YT.PlayerState.ENDED })
+    fireState(window.YT.PlayerState.ENDED, 'ddddddddddd')
     await flushPromises()
     expect(mockSongEnded).toHaveBeenCalled()
   })
@@ -163,7 +184,7 @@ describe('NowPlaying — Sprint 004 host-player programmatic-load guard (generat
 
     // No load in progress: a genuine PAUSED from a real host click goes
     // through the 300 ms debounce and reaches the backend.
-    capturedOnStateChange({ data: window.YT.PlayerState.PAUSED })
+    fireState(window.YT.PlayerState.PAUSED, 'eeeeeeeeeee')
     await vi.advanceTimersByTimeAsync(350)
     await flushPromises()
     expect(mockSetStatus).toHaveBeenCalledWith('paused', 'HostUser')
@@ -176,15 +197,108 @@ describe('NowPlaying — Sprint 004 host-player programmatic-load guard (generat
     await nextTick()
 
     // Programmatic swap armed a guard. PLAYING matching props.status='playing'
-    // advances settledGeneration, releasing the guard for subsequent genuine
-    // events.
-    capturedOnStateChange({ data: window.YT.PlayerState.PLAYING })
+    // and matching the expected videoId advances settledGeneration, releasing
+    // the guard for subsequent genuine events.
+    fireState(window.YT.PlayerState.PLAYING, 'fffffffffff')
     await vi.advanceTimersByTimeAsync(100)
 
     // Now a genuine host pause must reach the backend.
-    capturedOnStateChange({ data: window.YT.PlayerState.PAUSED })
+    fireState(window.YT.PlayerState.PAUSED, 'fffffffffff')
     await vi.advanceTimersByTimeAsync(350)
     await flushPromises()
     expect(mockSetStatus).toHaveBeenCalledWith('paused', 'HostUser')
+  })
+
+  it('B then C: late PLAYING(B) and transient PAUSED(C) do not call setStatus or songEnded', async () => {
+    const songA = { id: 'aaaaaaaaaaa', title: 'A', url: 'https://youtu.be/aaaaaaaaaaa', added_by: 'Alice' }
+    const songB = { id: 'bbbbbbbbbbb', title: 'B', url: 'https://youtu.be/bbbbbbbbbbb', added_by: 'Alice' }
+    const songC = { id: 'ccccccccccc', title: 'C', url: 'https://youtu.be/ccccccccccc', added_by: 'Alice' }
+
+    const wrapper = mountHost(songA)
+    await nextTick()
+
+    // Load B, then C — neither settles.
+    await wrapper.setProps({ currentSong: songB })
+    await nextTick()
+    await wrapper.setProps({ currentSong: songC })
+    await nextTick()
+
+    // Late PLAYING for B (B's slow decode completed after C swapped in).
+    fireState(window.YT.PlayerState.PLAYING, 'bbbbbbbbbbb')
+    // Transient PAUSED for C arriving while C's PLAYING hasn't settled yet.
+    fireState(window.YT.PlayerState.PAUSED, 'ccccccccccc')
+
+    // Advance past the 300 ms debounce and the 1500 ms loading guard.
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(mockSetStatus).not.toHaveBeenCalled()
+    expect(mockSongEnded).not.toHaveBeenCalled()
+  })
+
+  it('matching PLAYING(C) settles; subsequent genuine PAUSED(C) reaches backend', async () => {
+    const songA = { id: 'aaaaaaaaaaa', title: 'A', url: 'https://youtu.be/aaaaaaaaaaa', added_by: 'Alice' }
+    const songC = { id: 'ccccccccccc', title: 'C', url: 'https://youtu.be/ccccccccccc', added_by: 'Alice' }
+
+    const wrapper = mountHost(songA)
+    await nextTick()
+    await wrapper.setProps({ currentSong: songC })
+    await nextTick()
+
+    // Matching PLAYING for C settles the current generation.
+    fireState(window.YT.PlayerState.PLAYING, 'ccccccccccc')
+    await vi.advanceTimersByTimeAsync(100)
+
+    // Now a genuine host PAUSED for C goes through the 300 ms debounce.
+    fireState(window.YT.PlayerState.PAUSED, 'ccccccccccc')
+    await vi.advanceTimersByTimeAsync(350)
+    await flushPromises()
+    expect(mockSetStatus).toHaveBeenCalledWith('paused', 'HostUser')
+  })
+
+  it('stale ENDED with wrong videoId does not call api.songEnded', async () => {
+    const songA = { id: 'aaaaaaaaaaa', title: 'A', url: 'https://youtu.be/aaaaaaaaaaa', added_by: 'Alice' }
+    const songB = { id: 'bbbbbbbbbbb', title: 'B', url: 'https://youtu.be/bbbbbbbbbbb', added_by: 'Alice' }
+
+    const wrapper = mountHost(songA)
+    await nextTick()
+    await wrapper.setProps({ currentSong: songB })
+    await nextTick()
+
+    // A's ENDED arrives late, reports A's videoId. Identity mismatch drops it.
+    fireState(window.YT.PlayerState.ENDED, 'aaaaaaaaaaa')
+    await flushPromises()
+    expect(mockSongEnded).not.toHaveBeenCalled()
+  })
+
+  it('matching ENDED for the current settled videoId calls api.songEnded', async () => {
+    const songD = { id: 'ddddddddddd', title: 'D', url: 'https://youtu.be/ddddddddddd', added_by: 'Alice' }
+
+    const wrapper = mountHost(songD)
+    await nextTick()
+
+    // Settle with a matching PLAYING first so loadGeneration === settledGeneration.
+    fireState(window.YT.PlayerState.PLAYING, 'ddddddddddd')
+    await vi.advanceTimersByTimeAsync(100)
+
+    // Now an ENDED with matching identity reaches the backend.
+    fireState(window.YT.PlayerState.ENDED, 'ddddddddddd')
+    await flushPromises()
+    expect(mockSongEnded).toHaveBeenCalled()
+  })
+
+  it('after unmount, ENDED and PAUSED do not trigger any API calls', async () => {
+    const songE = { id: 'eeeeeeeeeee', title: 'E', url: 'https://youtu.be/eeeeeeeeeee', added_by: 'Alice' }
+
+    const wrapper = mountHost(songE)
+    await nextTick()
+    wrapper.unmount()
+    await nextTick()
+
+    // Any callback arriving after unmount must be a no-op.
+    fireState(window.YT.PlayerState.ENDED, 'eeeeeeeeeee')
+    fireState(window.YT.PlayerState.PAUSED, 'eeeeeeeeeee')
+    await vi.advanceTimersByTimeAsync(500)
+    await flushPromises()
+    expect(mockSetStatus).not.toHaveBeenCalled()
+    expect(mockSongEnded).not.toHaveBeenCalled()
   })
 })

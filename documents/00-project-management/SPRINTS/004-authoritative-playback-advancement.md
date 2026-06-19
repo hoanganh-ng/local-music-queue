@@ -85,12 +85,20 @@ play/pause interactions.
   `Elapsed`. No schema, persistence, or migration change is required to build
   the authoritative snapshot.
 - `queue.Interactor.mu` is the single mutation lock for the queue. The
-  `autoqueue.Interactor.mu` serializes the single-flight `triggering` flag
-  AND the pre-fetch / post-fetch `cfg.Enabled` checks against `SetEnabled`.
+  `autoqueue.Interactor.mu` serializes the single-flight `triggering`
+  flag, the pre-fetch and post-fetch `cfg.Enabled` checks, AND the
+  queue-owned `addAutoQueueSong` insertion call against `SetEnabled`.
+  Holding `autoqueue.Interactor.mu` across the `addAutoQueueSong`
+  callback does NOT block on the queue mutation itself (which uses a
+  different lock inside the callback); it only serializes the
+  auto-queue decision against `SetEnabled`. A `SetEnabled(false)` that
+  lands after the post-fetch check has passed must wait for the
+  insertion to complete before it can run.
 - The yt-dlp `FetchRelated` call is the only slow operation in the
   auto-queue path and remains outside both the queue lock and the
-  auto-queue interactor's mutex. The WebSocket broadcaster also remains
-  outside both locks.
+  auto-queue interactor's mutex. The WebSocket broadcaster and the
+  history append run AFTER `autoqueue.Interactor.mu` is released (via
+  defer on the post-fetch critical section).
 
 ## REST Mappings
 - `POST /api/queue/add`
@@ -163,6 +171,12 @@ play/pause interactions.
     while `FetchRelated` is blocked; candidate dropped, no history, no
     activity, no broadcast; the slow fetch is verified to NOT be held
     under the auto-queue interactor's mutex.
+  - `TestCheckAndTrigger_SetEnabledBlockedDuringInsertion` —
+    `addAutoQueueSong` blocks during the locked insertion; a concurrent
+    `SetEnabled(false)` is verified to NOT complete until the insertion
+    returns; on release, the insertion commits and the disable lands
+    after. Linearization asserted deterministically via a 100 ms
+    goroutine-blocking check.
   - `TestCheckAndTrigger_LoadFailurePropagates` — load failure surfaced by
     the callback reaches `CheckAndTrigger` and is NOT collapsed into
     `ErrAutoQueueStale`.
@@ -189,6 +203,16 @@ play/pause interactions.
   - Genuine host pause after settlement calls `api.setStatus('paused', ...)`.
   - PLAYING matching `props.status` advances `settledGeneration` so
     subsequent genuine PAUSED reaches the backend.
+  - B then C: late PLAYING(B) and transient PAUSED(C) arriving after a B→C
+    load (with mismatched videoId identity) do NOT trigger `setStatus` or
+    `songEnded`.
+  - Matching PLAYING(C) settles the generation; subsequent genuine
+    PAUSED(C) reaches the backend via the 300 ms debounce.
+  - Stale ENDED reporting a previous video's videoId does NOT call
+    `api.songEnded`.
+  - Matching ENDED for the current settled videoId calls `api.songEnded`.
+  - After component unmount, ENDED and PAUSED callbacks trigger no
+    `setStatus` and no `songEnded`.
 
 ## Exclusions
 - No changes to authentication, voting, priority, SQLite schemas, yt-dlp
@@ -207,11 +231,25 @@ play/pause interactions.
   counter; both must hold the same `loadGeneration` semantics in their own
   state. This is acceptable for the Sprint 004 scope but is a known
   locality boundary.
+
+  In addition, the guard is keyed on a videoId-identity match: every
+  state-change callback reads `event.target.getVideoData()?.video_id`
+  (with a `event.target.videoId` fallback seam for the test mock) and
+  returns early unless it equals the component's `expectedVideoId`.
+  This prevents a stale PLAYING belonging to the previous load from
+  falsely clearing the current generation's guard. An `isUnmounted`
+  ref provides a hard kill-switch so any callback arriving after
+  `onUnmounted` is a no-op even before the identity check. The guard
+  is therefore keyed on BOTH a monotonic counter AND an exact-match
+  videoId identity — not "generation-safe" by counter alone.
 - **Auto-queue mid-fetch mutex:** the interactor's mutex serializes the
-  post-fetch re-check and `SetEnabled`. The slow `FetchRelated` is held
-  outside the mutex; a `SetEnabled` during the slow window is observed
-  before insertion. If a future caller needs `SetEnabled` to be
-  non-blocking, the serialization must be revisited.
+  post-fetch re-check, the queue-owned `addAutoQueueSong` insertion, AND
+  `SetEnabled`. The slow `FetchRelated` is held outside the mutex; a
+  `SetEnabled` that lands mid-fetch is observed before the post-fetch
+  check. A `SetEnabled` that lands AFTER the post-fetch check has
+  passed is forced to wait for the in-flight insertion to complete
+  (linearized after the insertion). If a future caller needs
+  `SetEnabled` to be non-blocking, the serialization must be revisited.
 - **Load-failure semantics:** callers that previously relied on
   `ErrAutoQueueStale` to absorb load failures must now distinguish the two.
   The HTTP delivery layer does not call auto-queue insertion directly, so

@@ -114,6 +114,14 @@ let settledGeneration = 0
 let loadingTimeout = null
 const LOADING_GUARD_MS = 1500
 
+// Track the videoId the component currently considers "live". Any state-change
+// callback whose reported videoId does not match this is a stale callback for
+// a previous load and must not affect the current transition (must NOT
+// settle, must NOT schedule setStatus, must NOT call songEnded).
+const expectedVideoId = ref(null)
+// Hard kill-switch: callbacks that arrive after unmount must do nothing.
+const isUnmounted = ref(false)
+
 // Helper to extract Video ID from URL
 const videoId = computed(() => {
   if (!props.currentSong || !props.currentSong.url) return null;
@@ -148,13 +156,20 @@ onUnmounted(() => {
   if (syncInterval) clearInterval(syncInterval)
   if (statusChangeTimeout) clearTimeout(statusChangeTimeout)
   if (loadingTimeout) clearTimeout(loadingTimeout)
+  // Hard kill-switch: any in-flight YT callback must be a no-op.
+  isUnmounted.value = true
   // Invalidate any in-flight load callbacks and clear the settled marker so
   // no later event handler can reach api.* through this component.
   loadGeneration++
   settledGeneration++
+  expectedVideoId.value = null
 })
 
 function initPlayer() {
+  // Sprint 004 (identity-keyed): seed expectedVideoId BEFORE constructing
+  // the player so any state-change callback that fires during the initial
+  // loadVideoById() passes the identity check.
+  expectedVideoId.value = videoId.value || null
   ytPlayer = new window.YT.Player('youtube-player', {
     height: '100%',
     width: '100%',
@@ -180,8 +195,23 @@ function initPlayer() {
 }
 
 function onPlayerStateChange(event) {
+  // Hard kill-switch: any callback arriving after unmount must do nothing.
+  if (isUnmounted.value) return
   // Prevent loop: skip if change came from prop watcher
   if (isUpdatingFromProp.value) return
+
+  // Identity-keyed guard: the player's current video data is the source of
+  // truth for which video this callback belongs to. Fall back to
+  // event.target.videoId for the mock seam. Mismatches are stale callbacks
+  // from a previous load and must not affect the current transition (must
+  // NOT settle, must NOT schedule setStatus, must NOT call songEnded).
+  const reportedVideoId =
+    event?.target?.getVideoData?.()?.video_id ??
+    event?.target?.videoId ??
+    null
+  if (reportedVideoId !== expectedVideoId.value) {
+    return
+  }
 
   const state = event.data
 
@@ -284,6 +314,10 @@ watch(() => videoId.value, (newId, oldId) => {
   if (props.isHost && ytPlayer && ytPlayer.loadVideoById) {
     if (newId) {
       if (newId !== oldId) {
+        // Sprint 004 (identity-keyed generation-safe): pin the expected
+        // current videoId BEFORE arming the generation so callbacks that
+        // arrive mid-swap can be filtered by their reported videoId.
+        expectedVideoId.value = newId
         // Sprint 004 (generation-safe): arm a fresh load generation. Any
         // callback from a previous load (older generation) cannot affect the
         // new song. Cancel any pending statusChangeTimeout so a stale PAUSED
@@ -309,6 +343,7 @@ watch(() => videoId.value, (newId, oldId) => {
       }
     } else {
       // No video to load: stopVideo also fires transient events; guard them.
+      expectedVideoId.value = null
       loadGeneration++
       if (statusChangeTimeout) {
         clearTimeout(statusChangeTimeout)

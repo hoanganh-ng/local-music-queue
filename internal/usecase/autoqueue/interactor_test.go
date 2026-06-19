@@ -505,6 +505,129 @@ func (b *blockingFetcher) FetchRelated(ctx context.Context, videoID string, excl
 	return b.song, nil
 }
 
+// blockingAddAutoQueueSongFunc wraps an AddAutoQueueSongFunc so the test can
+// stall the insertion at a controlled point and observe concurrent SetEnabled
+// callers. The wrapped function closes `entered` (signalling the test that
+// insertion has begun), then blocks on `release` (the test signals release to
+// let the callback complete). Mirrors blockingFetcher's pattern.
+func blockingAddAutoQueueSongFunc(inner AddAutoQueueSongFunc, entered, release chan struct{}) AddAutoQueueSongFunc {
+	return func(ctx context.Context, song *entity.Song, sourceID string) (*AddSongResult, error) {
+		close(entered)
+		<-release
+		return inner(ctx, song, sourceID)
+	}
+}
+
+// TestCheckAndTrigger_SetEnabledBlockedDuringInsertion asserts the
+// linearization the Sprint 004 hardening requires: once the post-fetch
+// "still enabled?" check passes and the queue-owned insertion begins,
+// SetEnabled(false) cannot complete until the insertion returns. The
+// opposite ordering (SetEnabled completes first) is covered by
+// TestCheckAndTrigger_DisabledMidFlight.
+func TestCheckAndTrigger_SetEnabledBlockedDuringInsertion(t *testing.T) {
+	autoQueueRepo := &mockAutoQueueRepo{
+		config:  &domain.AutoQueueConfig{Enabled: true, Strategy: domain.StrategyRelated},
+		history: []domain.PlayHistoryEntry{},
+	}
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "source", Title: "Source"})
+	queueRepo := &mockQueueRepo{queue: q}
+
+	fetcher := &mockFetcher{
+		song: &entity.Song{ID: "candidate", Title: "Candidate", AddedBy: entity.SystemUserID},
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	blocked := blockingAddAutoQueueSongFunc(testAddAutoQueueSong(queueRepo), entered, release)
+
+	interactor := NewInteractor(autoQueueRepo, queueRepo, fetcher)
+	interactor.SetAddAutoQueueSongFunc(blocked)
+
+	var broadcasts []string
+	var broadcastMu sync.Mutex
+	interactor.SetBroadcaster(func(eventType string, _ interface{}) {
+		broadcastMu.Lock()
+		defer broadcastMu.Unlock()
+		broadcasts = append(broadcasts, eventType)
+	})
+
+	triggerDone := make(chan error, 1)
+	go func() {
+		triggerDone <- interactor.CheckAndTrigger(context.Background())
+	}()
+
+	// Wait for insertion to begin.
+	<-entered
+
+	// Start SetEnabled(false) in another goroutine. It must block on i.mu
+	// because the insertion holds it.
+	setEnabledDone := make(chan error, 1)
+	go func() {
+		setEnabledDone <- interactor.SetEnabled(context.Background(), false)
+	}()
+
+	// Give SetEnabled a chance to acquire mu; assert it has not.
+	select {
+	case err := <-setEnabledDone:
+		t.Fatalf("SetEnabled completed before insertion released mu: err=%v", err)
+	case <-time.After(100 * time.Millisecond):
+		// Expected: SetEnabled is blocked.
+	}
+
+	// Confirm queue state has not been mutated by the still-running insertion.
+	if got := len(queueRepo.queue.Songs); got != 1 {
+		t.Errorf("queue mutated before insertion completed: %d songs (want 1)", got)
+	}
+
+	// Release insertion; it must complete BEFORE SetEnabled returns.
+	close(release)
+
+	select {
+	case err := <-triggerDone:
+		if err != nil {
+			t.Fatalf("CheckAndTrigger returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("CheckAndTrigger did not complete after insertion released")
+	}
+
+	select {
+	case err := <-setEnabledDone:
+		if err != nil {
+			t.Fatalf("SetEnabled returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SetEnabled did not complete after insertion returned")
+	}
+
+	// Insertion completed first; candidate is in queue, history appended,
+	// broadcast fired.
+	if got := len(queueRepo.queue.Songs); got != 2 {
+		t.Errorf("expected 2 songs after insertion, got %d", got)
+	}
+	if len(autoQueueRepo.history) != 1 {
+		t.Errorf("expected 1 history entry, got %d", len(autoQueueRepo.history))
+	}
+	broadcastMu.Lock()
+	defer broadcastMu.Unlock()
+	found := false
+	for _, e := range broadcasts {
+		if e == "auto_queue_added" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected auto_queue_added broadcast after insertion completed")
+	}
+
+	// And the disable DID land after insertion.
+	cfg, _ := interactor.GetConfig(context.Background())
+	if cfg.Enabled {
+		t.Error("expected Enabled=false after SetEnabled(false) completed")
+	}
+}
+
 // TestCheckAndTrigger_StaleDuringBlockedFetch covers Issue #8 case 3:
 // while FetchRelated is blocked, the queue advances such that the source song
 // is no longer current. The Sprint 004 contract requires the candidate be
