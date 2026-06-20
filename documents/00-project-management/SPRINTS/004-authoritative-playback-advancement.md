@@ -82,10 +82,16 @@ play/pause interactions.
     mutex so a concurrent `SetEnabled(false)` is not blocked on those
     downstream operations.
   - `NowPlaying.vue` arms a per-load `loadGeneration` counter. The guard
-    remains engaged until a stable PLAYING matching `props.status` arrives
-    for the current generation; the `statusChangeTimeout` debounce scheduled
-    for a previous song is cancelled when a new videoId arrives; an ENDED
-    callback for a non-settled generation must not advance the backend.
+    remains engaged until the shared settlement helper confirms the
+    component is still mounted, the expected generation is still current,
+    the player's current video still matches the expected videoId,
+    `player.getPlayerState()` reports `PLAYING`, and authoritative
+    `props.status` still expects `playing`; the 250 ms confirmation and
+    the 1.5-second safety path use the same helper. The
+    `statusChangeTimeout` debounce scheduled for a previous song is
+    cancelled when a new videoId arrives. ENDED is confirmed against the
+    current generation and current player state before it advances the
+    backend, and at most one `songEnded` request is issued per generation.
 
 ## Required Context
 - `entity.Queue` already exposes `Songs`, `CurrentIndex`, `Status`, and
@@ -148,17 +154,28 @@ play/pause interactions.
   when the payload carries authoritative fields; otherwise they apply the
   single approved `applyLegacyFirstSongFallback`.
 - `NowPlaying.vue` arms a per-load `loadGeneration` counter in the
-  `videoId` watcher. `settledGeneration` only advances when a
-  generation-keyed confirmation timer fires: at confirmation time the
-  component verifies the component is still mounted, the generation has
-  not changed, the player's currently loaded video (read from
-  `player.getVideoUrl()`) still matches the expected videoId, and
-  `player.getPlayerState()` still reports `PLAYING`. A `statusChangeTimeout`
-  armed for a previous song is cancelled on every accepted PLAYING/PAUSED
-  callback (cleared and nulled before any new timeout is scheduled), and
-  again when the watcher arms a new generation. An ENDED event is routed
-  to `api.songEnded()` only when `loadGeneration === settledGeneration`.
-  Genuine host play/pause still synchronizes via the existing
+  `videoId` watcher. `settledGeneration` only advances through the shared
+  generation-keyed settlement helper. At settlement time, whether invoked
+  by the normal 250 ms confirmation path or the 1.5-second safety path,
+  the component verifies the component is still mounted, the expected
+  generation is still current, the player's currently loaded video (read
+  from `player.getVideoUrl()`) still matches the expected videoId,
+  `player.getPlayerState()` still reports `PLAYING`, and `props.status`
+  still expects `playing`. If the safety path fires while the player is
+  still buffering, paused, unstarted, or on another video, the generation
+  remains guarded and later loading callbacks cannot send a backend pause.
+  A `statusChangeTimeout` armed for a previous song is cancelled on every
+  accepted PLAYING/PAUSED callback (cleared and nulled before any new
+  timeout is scheduled), and again when the watcher arms a new generation.
+  ENDED events are confirmed on a timer keyed to the current generation;
+  before calling `api.songEnded()`, the component verifies it is still
+  mounted, the generation is unchanged and settled, the player's current
+  video still matches the expected videoId, and `player.getPlayerState()`
+  still reports `ENDED`. Repeated ENDED callbacks while confirmation is
+  pending or after a request has already been issued for the same
+  generation are ignored. The ENDED confirmation and issued-request guard
+  are reset on every new video generation and on unmount. Genuine host
+  play/pause still synchronizes via the existing
   `isUpdatingFromProp` prop watcher (whose reset timer handle is now
   tracked, replaced safely on subsequent status changes, and cleared on
   unmount).
@@ -242,6 +259,10 @@ play/pause interactions.
     after B's late PLAYING armed a B-keyed confirmation).
   - Confirmation timer DOES settle when identity and state still match at
     fire time.
+  - Safety timeout does NOT settle when the current player is still
+    paused; a subsequent PAUSED remains guarded and does not call
+    `setStatus('paused', ...)`, then matching confirmed PLAYING settles
+    the generation and a later genuine PAUSED synchronizes once.
   - B then C: late PLAYING(B) and transient PAUSED(C) arriving after a B→C
     load (with mismatched videoId identity) do NOT trigger `setStatus` or
     `songEnded`.
@@ -249,7 +270,14 @@ play/pause interactions.
     PAUSED(C) reaches the backend via the 300 ms debounce.
   - Stale ENDED reporting a previous video's videoId does NOT call
     `api.songEnded`.
-  - Matching ENDED for the current settled videoId calls `api.songEnded`.
+  - Matching ENDED for the current settled videoId calls `api.songEnded`
+    after confirmation.
+  - ENDED callback does NOT call `api.songEnded` when the same current
+    player reports `PLAYING` at confirmation time.
+  - ENDED callback does NOT call `api.songEnded` when the generation
+    changes before confirmation.
+  - Repeated matching ENDED callbacks for one generation issue exactly one
+    `songEnded` request.
   - After component unmount, ENDED and PAUSED callbacks trigger no
     `setStatus` and no `songEnded`.
 
@@ -280,15 +308,22 @@ play/pause interactions.
   `getVideoUrl()` and `getPlayerState()` and tests mutate the single
   player's actual current video/state rather than supplying a fabricated
   callback identity. A stale callback that passes the initial identity
-  check is still rejected at the generation-keyed confirmation step
-  unless the player is still mounted, the generation has not changed,
-  the player's current video still matches, and `getPlayerState()` still
-  reports `PLAYING`. An `isUnmounted` ref provides a hard kill-switch so
+  check is still rejected at the generation-keyed settlement step unless
+  the player is still mounted, the expected generation has not changed,
+  the player's current video still matches, `getPlayerState()` still
+  reports `PLAYING`, and authoritative props still expect `playing`. The
+  normal confirmation timer and 1.5-second safety timer both use this same
+  helper, so the safety timer cannot settle a paused, buffering,
+  unstarted, or wrong-video load. ENDED callbacks use a separate
+  generation-keyed confirmation that re-checks settled generation, current
+  video identity, and `getPlayerState() === ENDED` before calling the
+  backend, with per-generation dedupe for pending and already-issued
+  requests. An `isUnmounted` ref provides a hard kill-switch so
   any callback arriving after `onUnmounted` is a no-op even before the
   identity check. The guard is therefore keyed on BOTH a monotonic
   counter AND an exact-match current-player identity, and the actual
-  player state at confirmation time — not "generation-safe" by counter
-  alone.
+  player state at settlement/confirmation time — not "generation-safe" by
+  counter alone.
 - **Auto-queue mid-fetch mutex:** the interactor's mutex serializes the
   post-fetch re-check, the queue-owned `addAutoQueueSong` insertion, AND
   `SetEnabled`. The slow `FetchRelated` is held outside the mutex; a
@@ -338,16 +373,22 @@ The second implementation pass addresses each:
    (`PAUSED with no recovery still synchronizes setStatus("paused")
    exactly once`) proves a no-recovery PAUSED still synchronizes
    exactly once.
-2. **Player-identity seam:** the production code now reads
+2. **Player-identity seam and host-player confirmations:** the production code now reads
    `player.getVideoUrl()` (parsed) for identity and
    `player.getPlayerState()` for state, with the mock implementing
    both. `event.target` is the single stable player reference; tests
    mutate the player's actual current video/state, not a fabricated
    per-callback identity. Settling a generation requires a
-   generation-keyed confirmation that re-checks mount, generation,
-   current video, and current state at fire time. ENDED is gated on
-   `loadGeneration === settledGeneration`; the confirmation step is
-   keyed to the generation at arm time and re-validated at fire time.
+   shared generation-keyed helper that re-checks mount, generation,
+   current video, current `PLAYING` state, and authoritative
+   `props.status === 'playing'` at fire time; the 250 ms confirmation
+   and 1.5-second safety path both use that helper. ENDED uses a
+   separate generation-keyed confirmation that requires the generation to
+   remain current and settled, the current player video to match the
+   expected videoId, and `getPlayerState() === ENDED` before calling
+   `api.songEnded()`. Pending and already-issued ENDED requests are
+   deduplicated per generation and reset on new video generations and
+   unmount.
 3. **Auto-queue mutex release:** `i.mu` is now released IMMEDIATELY
    after the `addAutoQueueSong` callback returns. The insertion error
    is inspected, the history entry is appended, and the broadcaster

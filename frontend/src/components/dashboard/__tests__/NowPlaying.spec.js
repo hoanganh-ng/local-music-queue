@@ -226,8 +226,10 @@ describe('NowPlaying — Sprint 004 host-player programmatic-load guard (generat
     await nextTick()
 
     // No load in progress: settledGeneration === loadGeneration from init.
-    // Now an ENDED on the current player reaches the backend.
+    // Now an ENDED on the current player reaches the backend after
+    // confirmation.
     fireState(window.YT.PlayerState.ENDED, (p) => { p.currentState = window.YT.PlayerState.ENDED })
+    await vi.advanceTimersByTimeAsync(300)
     await flushPromises()
     expect(mockSongEnded).toHaveBeenCalled()
   })
@@ -377,6 +379,48 @@ describe('NowPlaying — Sprint 004 host-player programmatic-load guard (generat
     expect(mockSetStatus).toHaveBeenCalledWith('paused', 'HostUser')
   })
 
+  it('safety timeout does not settle a still-paused load; later genuine PAUSED syncs only after confirmed PLAYING', async () => {
+    const songA = { id: 'aaaaaaaaaaa', title: 'A', url: 'https://youtu.be/aaaaaaaaaaa', added_by: 'Alice' }
+    const songB = { id: 'bbbbbbbbbbb', title: 'B', url: 'https://youtu.be/bbbbbbbbbbb', added_by: 'Alice' }
+
+    const wrapper = mountHost(songA)
+    await nextTick()
+
+    await wrapper.setProps({ currentSong: songB })
+    await nextTick()
+
+    // Do not emit PLAYING confirmation. The safety path must re-check the
+    // current player state and leave the load guarded while B is still paused.
+    latestPlayer().currentVideoId = 'bbbbbbbbbbb'
+    latestPlayer().currentState = window.YT.PlayerState.PAUSED
+    await vi.advanceTimersByTimeAsync(1600)
+
+    fireState(window.YT.PlayerState.PAUSED, (p) => {
+      p.currentVideoId = 'bbbbbbbbbbb'
+      p.currentState = window.YT.PlayerState.PAUSED
+    })
+    await vi.advanceTimersByTimeAsync(350)
+    await flushPromises()
+
+    expect(mockSetStatus).not.toHaveBeenCalled()
+
+    fireState(window.YT.PlayerState.PLAYING, (p) => {
+      p.currentVideoId = 'bbbbbbbbbbb'
+      p.currentState = window.YT.PlayerState.PLAYING
+    })
+    await vi.advanceTimersByTimeAsync(300)
+
+    fireState(window.YT.PlayerState.PAUSED, (p) => {
+      p.currentVideoId = 'bbbbbbbbbbb'
+      p.currentState = window.YT.PlayerState.PAUSED
+    })
+    await vi.advanceTimersByTimeAsync(350)
+    await flushPromises()
+
+    expect(mockSetStatus).toHaveBeenCalledTimes(1)
+    expect(mockSetStatus).toHaveBeenCalledWith('paused', 'HostUser')
+  })
+
   it('stale ENDED with wrong videoId does not call api.songEnded', async () => {
     const songA = { id: 'aaaaaaaaaaa', title: 'A', url: 'https://youtu.be/aaaaaaaaaaa', added_by: 'Alice' }
     const songB = { id: 'bbbbbbbbbbb', title: 'B', url: 'https://youtu.be/bbbbbbbbbbb', added_by: 'Alice' }
@@ -399,10 +443,63 @@ describe('NowPlaying — Sprint 004 host-player programmatic-load guard (generat
     await nextTick()
 
     // Initial mount is already settled (loadGeneration === settledGeneration).
-    // An ENDED with matching identity reaches the backend.
+    // An ENDED with matching identity reaches the backend after confirmation.
     fireState(window.YT.PlayerState.ENDED, (p) => { p.currentState = window.YT.PlayerState.ENDED })
+    await vi.advanceTimersByTimeAsync(300)
     await flushPromises()
     expect(mockSongEnded).toHaveBeenCalled()
+  })
+
+  it('ENDED callback does not call api.songEnded when player reports PLAYING at confirmation time', async () => {
+    const songD = { id: 'ddddddddddd', title: 'D', url: 'https://youtu.be/ddddddddddd', added_by: 'Alice' }
+
+    const wrapper = mountHost(songD)
+    await nextTick()
+
+    fireState(window.YT.PlayerState.ENDED, (p) => { p.currentState = window.YT.PlayerState.ENDED })
+    latestPlayer().currentState = window.YT.PlayerState.PLAYING
+
+    await vi.advanceTimersByTimeAsync(300)
+    await flushPromises()
+
+    expect(mockSongEnded).not.toHaveBeenCalled()
+  })
+
+  it('ENDED callback does not call api.songEnded when generation changes before confirmation', async () => {
+    const songA = { id: 'aaaaaaaaaaa', title: 'A', url: 'https://youtu.be/aaaaaaaaaaa', added_by: 'Alice' }
+    const songB = { id: 'bbbbbbbbbbb', title: 'B', url: 'https://youtu.be/bbbbbbbbbbb', added_by: 'Alice' }
+
+    const wrapper = mountHost(songA)
+    await nextTick()
+
+    fireState(window.YT.PlayerState.ENDED, (p) => { p.currentState = window.YT.PlayerState.ENDED })
+    await wrapper.setProps({ currentSong: songB })
+    await nextTick()
+
+    await vi.advanceTimersByTimeAsync(300)
+    await flushPromises()
+
+    expect(mockSongEnded).not.toHaveBeenCalled()
+  })
+
+  it('repeated matching ENDED callbacks for one generation issue exactly one songEnded request', async () => {
+    const songD = { id: 'ddddddddddd', title: 'D', url: 'https://youtu.be/ddddddddddd', added_by: 'Alice' }
+
+    const wrapper = mountHost(songD)
+    await nextTick()
+
+    fireState(window.YT.PlayerState.ENDED, (p) => { p.currentState = window.YT.PlayerState.ENDED })
+    fireState(window.YT.PlayerState.ENDED, (p) => { p.currentState = window.YT.PlayerState.ENDED })
+    fireState(window.YT.PlayerState.ENDED, (p) => { p.currentState = window.YT.PlayerState.ENDED })
+
+    await vi.advanceTimersByTimeAsync(300)
+    await flushPromises()
+
+    fireState(window.YT.PlayerState.ENDED, (p) => { p.currentState = window.YT.PlayerState.ENDED })
+    await vi.advanceTimersByTimeAsync(300)
+    await flushPromises()
+
+    expect(mockSongEnded).toHaveBeenCalledTimes(1)
   })
 
   it('after unmount, ENDED and PAUSED do not trigger any API calls', async () => {

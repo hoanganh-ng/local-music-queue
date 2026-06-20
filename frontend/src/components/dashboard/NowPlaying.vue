@@ -115,8 +115,12 @@ let settledGeneration = 0
 let loadingTimeout = null
 let settleConfirmationTimer = null
 let settleConfirmationGeneration = 0
+let endConfirmationTimer = null
+let endConfirmationGeneration = null
+let songEndedIssuedGeneration = null
 const LOADING_GUARD_MS = 1500
 const SETTLE_CONFIRM_MS = 250
+const END_CONFIRM_MS = 250
 
 // Track the videoId the component currently considers "live". Any state-change
 // callback whose reported videoId does not match this is a stale callback for
@@ -164,6 +168,10 @@ onUnmounted(() => {
   loadingTimeout = null
   if (settleConfirmationTimer) clearTimeout(settleConfirmationTimer)
   settleConfirmationTimer = null
+  if (endConfirmationTimer) clearTimeout(endConfirmationTimer)
+  endConfirmationTimer = null
+  endConfirmationGeneration = null
+  songEndedIssuedGeneration = null
   if (isUpdatingFromPropResetTimer) clearTimeout(isUpdatingFromPropResetTimer)
   isUpdatingFromPropResetTimer = null
   isUpdatingFromProp.value = false
@@ -231,6 +239,67 @@ function readPlayerState() {
   }
 }
 
+function trySettleGeneration(expectedGeneration) {
+  if (isUnmounted.value) return false
+  if (expectedGeneration !== loadGeneration) return false
+  if (readPlayerVideoId() !== expectedVideoId.value) return false
+  if (readPlayerState() !== window.YT.PlayerState.PLAYING) return false
+  if (props.status !== 'playing') return false
+
+  settledGeneration = expectedGeneration
+  if (loadingTimeout) {
+    clearTimeout(loadingTimeout)
+    loadingTimeout = null
+  }
+  return true
+}
+
+function clearEndConfirmation() {
+  if (endConfirmationTimer) {
+    clearTimeout(endConfirmationTimer)
+    endConfirmationTimer = null
+  }
+  endConfirmationGeneration = null
+}
+
+function resetEndGuardsForNewGeneration() {
+  clearEndConfirmation()
+  songEndedIssuedGeneration = null
+}
+
+function confirmSongEnded(expectedGeneration) {
+  endConfirmationTimer = null
+
+  if (isUnmounted.value) return
+  if (expectedGeneration !== loadGeneration) return
+  if (expectedGeneration !== settledGeneration) return
+  if (endConfirmationGeneration !== expectedGeneration) return
+  endConfirmationGeneration = null
+  if (songEndedIssuedGeneration === expectedGeneration) return
+  if (readPlayerVideoId() !== expectedVideoId.value) return
+  if (readPlayerState() !== window.YT.PlayerState.ENDED) return
+
+  songEndedIssuedGeneration = expectedGeneration
+  api.songEnded()
+    .then(() => {
+      // Backend will broadcast status change via WebSocket
+      // The prop watcher will update the player state
+    })
+    .catch(err => console.error('Song ended call failed:', err))
+}
+
+function scheduleSongEndedConfirmation(expectedGeneration) {
+  if (expectedGeneration !== settledGeneration) return
+  if (endConfirmationGeneration === expectedGeneration) return
+  if (songEndedIssuedGeneration === expectedGeneration) return
+
+  clearEndConfirmation()
+  endConfirmationGeneration = expectedGeneration
+  endConfirmationTimer = setTimeout(() => {
+    confirmSongEnded(expectedGeneration)
+  }, END_CONFIRM_MS)
+}
+
 function onPlayerStateChange(event) {
   // Hard kill-switch: any callback arriving after unmount must do nothing.
   if (isUnmounted.value) return
@@ -251,20 +320,7 @@ function onPlayerStateChange(event) {
   const state = event.data
 
   if (state === window.YT.PlayerState.ENDED) {
-    // Sprint 004 (identity-confirmed): only treat ENDED as genuine
-    // end-of-media when the player's currently loaded video still matches
-    // the expected videoId AND the player still reports ENDED when
-    // confirmed. A stale callback can pass the initial check but must not
-    // settle the transition unless the actual current player remains on
-    // the expected video in the expected state.
-    if (loadGeneration === settledGeneration) {
-      api.songEnded()
-        .then(() => {
-          // Backend will broadcast status change via WebSocket
-          // The prop watcher will update the player state
-        })
-        .catch(err => console.error('Song ended call failed:', err))
-    }
+    scheduleSongEndedConfirmation(loadGeneration)
     return
   }
 
@@ -289,15 +345,7 @@ function onPlayerStateChange(event) {
       settleConfirmationGeneration = loadGeneration
       settleConfirmationTimer = setTimeout(() => {
         settleConfirmationTimer = null
-        if (isUnmounted.value) return
-        if (settleConfirmationGeneration !== loadGeneration) return
-        if (readPlayerVideoId() !== expectedVideoId.value) return
-        if (readPlayerState() !== window.YT.PlayerState.PLAYING) return
-        settledGeneration = loadGeneration
-        if (loadingTimeout) {
-          clearTimeout(loadingTimeout)
-          loadingTimeout = null
-        }
+        trySettleGeneration(settleConfirmationGeneration)
       }, SETTLE_CONFIRM_MS)
     }
     return
@@ -394,14 +442,11 @@ watch(() => videoId.value, (newId, oldId) => {
           clearTimeout(settleConfirmationTimer)
           settleConfirmationTimer = null
         }
+        resetEndGuardsForNewGeneration()
         if (loadingTimeout) clearTimeout(loadingTimeout)
+        const expectedGeneration = loadGeneration
         loadingTimeout = setTimeout(() => {
-          // Safety: if no matching PLAYING settled within the guard window,
-          // advance settledGeneration so further callbacks are evaluated
-          // against the current state instead of being silently dropped.
-          if (loadGeneration > settledGeneration) {
-            settledGeneration = loadGeneration
-          }
+          trySettleGeneration(expectedGeneration)
           loadingTimeout = null
         }, LOADING_GUARD_MS)
 
@@ -420,11 +465,11 @@ watch(() => videoId.value, (newId, oldId) => {
         clearTimeout(settleConfirmationTimer)
         settleConfirmationTimer = null
       }
+      resetEndGuardsForNewGeneration()
       if (loadingTimeout) clearTimeout(loadingTimeout)
+      const expectedGeneration = loadGeneration
       loadingTimeout = setTimeout(() => {
-        if (loadGeneration > settledGeneration) {
-          settledGeneration = loadGeneration
-        }
+        trySettleGeneration(expectedGeneration)
         loadingTimeout = null
       }, LOADING_GUARD_MS)
       ytPlayer.stopVideo()
