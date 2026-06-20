@@ -13,6 +13,8 @@ vi.mock('../../store', () => ({
     updateQueueState: vi.fn(),
     addSong: vi.fn((song) => { liveQueueState.songs.push(song) }),
     addActivity: vi.fn(),
+    upsertVoteSession: vi.fn(),
+    removeVoteSession: vi.fn(),
     updateCurrentIndex: vi.fn((idx, song) => {
       liveQueueState.current_index = idx
       liveQueueState.current_song = song
@@ -34,6 +36,7 @@ describe('WebSocketClient', () => {
     liveQueueState.current_index = -1
     liveQueueState.current_song = null
     liveQueueState.elapsed = 0
+    wsClient.callbacks.voteEvent = []
   })
 
   it('should handle queue_updated message', () => {
@@ -181,5 +184,118 @@ describe('WebSocketClient', () => {
     expect(globalStore.updateCurrentIndex).not.toHaveBeenCalled()
     expect(globalStore.updatePlaybackStatus).not.toHaveBeenCalled()
     expect(globalStore.updateElapsed).not.toHaveBeenCalled()
+  })
+
+  // --- Sprint 005 ---
+
+  it('vote_updated updates the store and notifies vote event subscribers', () => {
+    const callback = vi.fn()
+    const unsubscribe = wsClient.onVoteEvent(callback)
+    const session = {
+      id: 'skip:song-1',
+      created_at: '2026-06-20T10:00:00Z',
+      voted_by: { 1: true },
+    }
+    const activity = {
+      timestamp: '2026-06-20T10:00:01Z',
+      description: 'Alice voted to skip "Song One" (1/2)',
+    }
+
+    wsClient.handleMessage({
+      type: 'vote_updated',
+      data: { session, activity },
+    })
+
+    expect(globalStore.upsertVoteSession).toHaveBeenCalledWith(session)
+    expect(globalStore.addActivity).toHaveBeenCalledWith(activity)
+    expect(callback).toHaveBeenCalledWith({
+      type: 'vote_updated',
+      data: { session, activity },
+    })
+
+    unsubscribe()
+  })
+
+  it('vote_resolved updates the store and notifies vote event subscribers', () => {
+    const callback = vi.fn()
+    const unsubscribe = wsClient.onVoteEvent(callback)
+    const activity = {
+      timestamp: '2026-06-20T10:00:02Z',
+      description: 'vote to skip "Song One" passed',
+    }
+
+    wsClient.handleMessage({
+      type: 'vote_resolved',
+      data: {
+        session_id: 'skip:song-1',
+        outcome: 'passed',
+        activity,
+      },
+    })
+
+    expect(globalStore.removeVoteSession).toHaveBeenCalledWith('skip:song-1')
+    expect(globalStore.addActivity).toHaveBeenCalledWith(activity)
+    expect(callback).toHaveBeenCalledWith({
+      type: 'vote_resolved',
+      data: {
+        session_id: 'skip:song-1',
+        outcome: 'passed',
+        activity,
+      },
+    })
+
+    unsubscribe()
+  })
+
+  it('isolates vote event subscriber errors from message handling and other subscribers', () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const throwingCallback = vi.fn(() => {
+      throw new Error('subscriber failed')
+    })
+    const healthyCallback = vi.fn()
+    const unsubscribeThrowing = wsClient.onVoteEvent(throwingCallback)
+    const unsubscribeHealthy = wsClient.onVoteEvent(healthyCallback)
+
+    const session = {
+      id: 'skip:song-1',
+      created_at: '2026-06-20T10:00:00Z',
+      voted_by: { 1: true },
+    }
+    wsClient.handleMessage({
+      type: 'vote_updated',
+      data: {
+        session,
+        activity: { description: 'Alice voted to skip "Song One" (1/2)' },
+      },
+    })
+
+    expect(globalStore.upsertVoteSession).toHaveBeenCalledWith(session)
+    expect(throwingCallback).toHaveBeenCalled()
+    expect(healthyCallback).toHaveBeenCalled()
+    expect(consoleSpy).toHaveBeenCalledWith('Error in voteEvent callback:', expect.any(Error))
+
+    unsubscribeThrowing()
+    unsubscribeHealthy()
+    consoleSpy.mockRestore()
+  })
+
+  it('onVoteEvent returns an unsubscribe function', () => {
+    const callback = vi.fn()
+    const unsubscribe = wsClient.onVoteEvent(callback)
+    unsubscribe()
+
+    wsClient.handleMessage({
+      type: 'vote_updated',
+      data: {
+        session: {
+          id: 'skip:song-1',
+          created_at: '2026-06-20T10:00:00Z',
+          voted_by: { 1: true },
+        },
+        activity: { description: 'Alice voted to skip "Song One" (1/2)' },
+      },
+    })
+
+    expect(callback).not.toHaveBeenCalled()
   })
 })

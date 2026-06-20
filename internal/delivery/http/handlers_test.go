@@ -909,6 +909,41 @@ func TestHandleRemoveSong_HTTP(t *testing.T) {
 	})
 }
 
+func TestHandleVoteSkip_LiveUpdateIsNotInitialSync(t *testing.T) {
+	tc := newTestContext(t)
+	tc.broadcaster.connectedCount = 3
+
+	body, _ := json.Marshal(VoteSkipRequest{
+		UserID:   tc.guestUser.ID,
+		UserRole: string(entity.RoleGuest),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/vote/skip", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	tc.handlers.HandleVoteSkip(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 No Content, got %d", rr.Code)
+	}
+	if len(tc.broadcaster.broadcasts) != 1 {
+		t.Fatalf("expected 1 broadcast, got %d", len(tc.broadcaster.broadcasts))
+	}
+	broadcast := tc.broadcaster.broadcasts[0]
+	if broadcast.eventType != ws.EventVoteUpdated {
+		t.Fatalf("expected %q broadcast, got %q", ws.EventVoteUpdated, broadcast.eventType)
+	}
+	data, ok := broadcast.data.(ws.VoteUpdatedData)
+	if !ok {
+		t.Fatalf("expected VoteUpdatedData, got %T", broadcast.data)
+	}
+	if data.InitialSync {
+		t.Fatal("expected live vote update to omit initial_sync")
+	}
+	if data.Session == nil || data.Session.ID != "skip:vid0" {
+		t.Fatalf("expected live skip session for vid0, got %#v", data.Session)
+	}
+}
+
 func TestHandleGoogleLogin_HTTP(t *testing.T) {
 	h, userRepo, sessionStore := newTestHandlersWithStore(t)
 

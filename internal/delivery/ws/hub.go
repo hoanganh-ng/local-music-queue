@@ -182,6 +182,7 @@ func (h *Hub) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 					User:        "System",
 					Description: "Active vote session",
 				},
+				InitialSync: true,
 			})
 		}
 	}

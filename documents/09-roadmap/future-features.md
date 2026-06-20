@@ -272,6 +272,7 @@ Token Packages:
 
 ### 11. Song Voting System
 **Status**: ❌ Not Implemented
+**Scope Note**: This is a future upvote/downvote queue-ranking concept. It is distinct from the implemented community skip/priority vote sessions and their in-app notifications.
 
 **Proposed Features**:
 - Upvote/downvote songs in queue

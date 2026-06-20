@@ -55,7 +55,8 @@ class WebSocketClient {
     this.isConnecting = false
     this.lastSeqNum = 0
     this.callbacks = {
-      songAdded: []
+      songAdded: [],
+      voteEvent: []
     }
   }
 
@@ -67,6 +68,26 @@ class WebSocketClient {
         this.callbacks.songAdded.splice(index, 1)
       }
     }
+  }
+
+  onVoteEvent(callback) {
+    this.callbacks.voteEvent.push(callback)
+    return () => {
+      const index = this.callbacks.voteEvent.indexOf(callback)
+      if (index > -1) {
+        this.callbacks.voteEvent.splice(index, 1)
+      }
+    }
+  }
+
+  notifyVoteEvent(type, data) {
+    this.callbacks.voteEvent.forEach(cb => {
+      try {
+        cb({ type, data })
+      } catch (e) {
+        console.error('Error in voteEvent callback:', e)
+      }
+    })
   }
 
   connect() {
@@ -217,11 +238,13 @@ class WebSocketClient {
       case 'vote_updated':
         globalStore.upsertVoteSession(message.data.session)
         globalStore.addActivity(message.data.activity)
+        this.notifyVoteEvent(message.type, message.data)
         break
       case 'vote_resolved':
         console.log(`Vote resolved (${message.data.outcome}):`, message.data.session_id)
         globalStore.removeVoteSession(message.data.session_id)
         globalStore.addActivity(message.data.activity)
+        this.notifyVoteEvent(message.type, message.data)
         break
       case 'auto_queue_added':
         if (message.data.song && message.data.song.id) {

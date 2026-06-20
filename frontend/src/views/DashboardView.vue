@@ -119,6 +119,57 @@ const connectionBadgeClass = computed(() => `connection-${globalStore.connection
 const submitFormRef = ref(null)
 const autoQueueEnabled = ref(false)
 let unsubscribeSongAdded = null
+let unsubscribeVoteEvent = null
+const shownVoteNotifications = new Set()
+
+function voteCount(session) {
+  return Object.keys(session?.voted_by || {}).length
+}
+
+function voteNotificationKey(event) {
+  const data = event.data || {}
+  if (event.type === 'vote_updated') {
+    const session = data.session || {}
+    return [
+      event.type,
+      session.id,
+      session.created_at,
+      voteCount(session),
+    ].join('|')
+  }
+
+  return [
+    event.type,
+    data.session_id,
+    data.outcome,
+    data.activity?.timestamp,
+  ].join('|')
+}
+
+function handleVoteEvent(event) {
+  const data = event.data || {}
+  if (event.type === 'vote_updated' && data.initial_sync === true) {
+    return
+  }
+
+  const description = data.activity?.description
+  if (!description) {
+    return
+  }
+
+  const key = voteNotificationKey(event)
+  if (shownVoteNotifications.has(key)) {
+    return
+  }
+  shownVoteNotifications.add(key)
+
+  if (event.type === 'vote_resolved' && data.outcome === 'passed') {
+    toast.success(description)
+    return
+  }
+
+  toast.info(description)
+}
 
 onMounted(async () => {
   // Connect WebSocket
@@ -129,6 +180,8 @@ onMounted(async () => {
       submitFormRef.value.handleSongAdded(song)
     }
   })
+
+  unsubscribeVoteEvent = wsClient.onVoteEvent(handleVoteEvent)
 
   // Fetch initial queue state
   try {
@@ -160,6 +213,9 @@ watch(() => globalStore.autoQueueConfig.enabled, (newEnabled) => {
 onUnmounted(() => {
   if (unsubscribeSongAdded) {
     unsubscribeSongAdded()
+  }
+  if (unsubscribeVoteEvent) {
+    unsubscribeVoteEvent()
   }
   wsClient.disconnect()
 })

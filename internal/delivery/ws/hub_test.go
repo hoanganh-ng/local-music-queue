@@ -1,7 +1,9 @@
 package ws
 
 import (
+	"context"
 	"encoding/json"
+	"local-music-queue/internal/domain/entity"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,6 +32,18 @@ func dialWS(t *testing.T, server *httptest.Server) *websocket.Conn {
 		t.Fatalf("failed to dial WebSocket: %v", err)
 	}
 	return conn
+}
+
+type fakeVoteExpiryRunner struct {
+	sessions []*entity.VoteSession
+}
+
+func (f *fakeVoteExpiryRunner) ExpireOldSessions(ctx context.Context) []entity.ExpiredSession {
+	return nil
+}
+
+func (f *fakeVoteExpiryRunner) GetActiveSessions() []*entity.VoteSession {
+	return f.sessions
 }
 
 func TestHub_RegisterAndBroadcast(t *testing.T) {
@@ -69,6 +83,63 @@ func TestHub_RegisterAndBroadcast(t *testing.T) {
 	}
 	if received.SeqNum != 1 {
 		t.Errorf("expected seq_num 1, got %d", received.SeqNum)
+	}
+}
+
+func TestHub_RegisterHandler_MarksActiveVoteReplayInitialSync(t *testing.T) {
+	hub := NewHub(nil)
+	createdAt := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	hub.SetVoteInteractor(&fakeVoteExpiryRunner{
+		sessions: []*entity.VoteSession{
+			{
+				ID:        "skip:song-1",
+				Type:      entity.VoteTypeSkip,
+				SongID:    "song-1",
+				SongTitle: "Song One",
+				SongIndex: 0,
+				VotedBy:   map[int]bool{1: true},
+				Threshold: 2,
+				CreatedAt: createdAt,
+				ExpiresAt: createdAt.Add(30 * time.Second),
+			},
+		},
+	})
+	go hub.Run()
+
+	server := httptest.NewServer(http.HandlerFunc(hub.RegisterHandler))
+	defer server.Close()
+
+	conn := dialWS(t, server)
+	defer conn.Close()
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("failed to read active vote replay: %v", err)
+	}
+
+	var received struct {
+		Type string `json:"type"`
+		Data struct {
+			Session     *entity.VoteSession `json:"session"`
+			InitialSync bool                `json:"initial_sync"`
+		} `json:"data"`
+		SeqNum int64 `json:"seq_num"`
+	}
+	if err := json.Unmarshal(data, &received); err != nil {
+		t.Fatalf("failed to unmarshal replay: %v", err)
+	}
+	if received.Type != EventVoteUpdated {
+		t.Fatalf("expected %q replay, got %q", EventVoteUpdated, received.Type)
+	}
+	if received.Data.Session == nil || received.Data.Session.ID != "skip:song-1" {
+		t.Fatalf("expected replayed session skip:song-1, got %#v", received.Data.Session)
+	}
+	if !received.Data.InitialSync {
+		t.Fatal("expected active vote replay to be marked initial_sync")
+	}
+	if received.SeqNum != 0 {
+		t.Errorf("expected replay to preserve current seq_num 0, got %d", received.SeqNum)
 	}
 }
 

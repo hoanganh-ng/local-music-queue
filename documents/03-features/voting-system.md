@@ -123,6 +123,7 @@ All connected clients see:
 - Countdown timer ticking down
 - Immediate feedback when vote passes or expires
 - Activity feed entries for all vote actions
+- Accessible in-app notifications for live vote updates and vote resolutions
 
 ## API Endpoints
 
@@ -170,6 +171,10 @@ Content-Type: application/json
 ### vote_updated
 
 Broadcast after every vote cast to show live progress.
+When active sessions are replayed to a newly connected or reconnected client,
+the payload includes `"initial_sync": true` so the frontend can restore vote
+state without showing stale notifications. Ordinary live vote updates omit this
+field.
 
 ```json
 {
@@ -199,9 +204,24 @@ Broadcast after every vote cast to show live progress.
 }
 ```
 
+Bootstrap replay variant:
+
+```json
+{
+  "type": "vote_updated",
+  "data": {
+    "session": "...",
+    "activity": "...",
+    "initial_sync": true
+  }
+}
+```
+
 ### vote_resolved
 
 Broadcast when a vote passes or expires.
+The dashboard shows the activity description as an in-app notification: passed
+votes use success styling, and expired votes use info styling.
 
 ```json
 {
@@ -303,8 +323,9 @@ This ensures:
 
 When a client connects via WebSocket:
 1. Receives full queue state
-2. Receives all active vote sessions as individual `vote_updated` events
+2. Receives all active vote sessions as individual `vote_updated` events marked with `initial_sync: true`
 3. Can immediately see and participate in ongoing votes
+4. Suppresses notification toasts for those replayed active sessions
 
 ## Constraints
 
@@ -328,5 +349,4 @@ Potential improvements for future versions:
 - **Vote Cancellation**: Allow users to retract their vote
 - **Vote History**: Persist vote outcomes for analytics
 - **Threshold Modes**: Support different voting thresholds (simple majority, supermajority, unanimous)
-- **Vote Notifications**: Push notifications when votes are close to passing
 - **Vote Cooldown**: Prevent spam by limiting vote frequency per user

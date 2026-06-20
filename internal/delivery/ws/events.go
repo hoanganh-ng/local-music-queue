@@ -6,21 +6,21 @@ import (
 
 // Event type constants
 const (
-	EventFullSync              = "full_sync"
-	EventUserJoined            = "user_joined"
-	EventSongAdded             = "song_added"
-	EventSongSkipped           = "song_skipped"
-	EventStatusChanged         = "status_changed"
-	EventElapsedSync           = "elapsed_sync"
-	EventSongPrevious          = "song_previous"
-	EventSongRemoved           = "song_removed"
-	EventQueueCleared          = "queue_cleared"
-	EventVolumeChanged         = "volume_changed"
-	EventSongPrioritized       = "song_prioritized"
+	EventFullSync               = "full_sync"
+	EventUserJoined             = "user_joined"
+	EventSongAdded              = "song_added"
+	EventSongSkipped            = "song_skipped"
+	EventStatusChanged          = "status_changed"
+	EventElapsedSync            = "elapsed_sync"
+	EventSongPrevious           = "song_previous"
+	EventSongRemoved            = "song_removed"
+	EventQueueCleared           = "queue_cleared"
+	EventVolumeChanged          = "volume_changed"
+	EventSongPrioritized        = "song_prioritized"
 	EventPriorityBalanceUpdated = "priority_balance_updated"
-	EventVoteUpdated           = "vote_updated"
-	EventVoteResolved          = "vote_resolved"
-	EventAutoQueueAdded        = "auto_queue_added"
+	EventVoteUpdated            = "vote_updated"
+	EventVoteResolved           = "vote_resolved"
+	EventAutoQueueAdded         = "auto_queue_added"
 	EventAutoQueueConfigChanged = "auto_queue_config_changed"
 )
 
@@ -84,10 +84,10 @@ type SongPreviousData struct {
 
 // SongRemovedData contains info about removed song
 type SongRemovedData struct {
-	RemovedIndex int             `json:"removed_index"`
-	NewIndex     int             `json:"new_index"`
+	RemovedIndex int                   `json:"removed_index"`
+	NewIndex     int                   `json:"new_index"`
 	Status       entity.PlaybackStatus `json:"status"`
-	Activity     entity.Activity `json:"activity"`
+	Activity     entity.Activity       `json:"activity"`
 }
 
 // QueueClearedData signals queue has been cleared
@@ -120,8 +120,9 @@ type PriorityBalanceUpdatedData struct {
 // VoteUpdatedData is broadcast after every vote cast so clients can
 // show live vote counts without polling.
 type VoteUpdatedData struct {
-	Session  *entity.VoteSession `json:"session"`
-	Activity entity.Activity     `json:"activity"`
+	Session     *entity.VoteSession `json:"session"`
+	Activity    entity.Activity     `json:"activity"`
+	InitialSync bool                `json:"initial_sync,omitempty"`
 }
 
 // VoteResolvedData is broadcast when a session passes or expires.

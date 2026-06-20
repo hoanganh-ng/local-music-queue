@@ -71,6 +71,16 @@ This document tracks all features that have been implemented in Local Music Queu
 
 ---
 
+### Community Voting
+- ✅ **Skip and Priority Votes**
+  - Guests and Admins can vote to skip the current song or prioritize an upcoming song
+  - Active vote sessions use live WebSocket updates and 30-second expiry
+  - Vote outcomes are broadcast as `vote_resolved`
+  - Live vote updates and passed/expired outcomes show in-app toast notifications
+  - Active vote sessions replayed during WebSocket bootstrap are marked as initial sync and do not show stale notifications
+
+---
+
 ### Real-Time Updates
 - ✅ **WebSocket Communication**
   - Bidirectional real-time updates

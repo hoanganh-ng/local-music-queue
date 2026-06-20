@@ -1,5 +1,5 @@
 # Active Sprint
 
-**Sprint 004 — Authoritative Playback Advancement** is the active sprint. Implementation is complete and awaiting Architect review; the sprint has not been advanced or closed by the implementer.
+**Sprint 005 — In-App Vote Event Notifications** is the active sprint.
 
-See [004-authoritative-playback-advancement.md](./004-authoritative-playback-advancement.md).
+See [005-in-app-vote-event-notifications.md](./005-in-app-vote-event-notifications.md).
