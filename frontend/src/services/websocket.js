@@ -48,6 +48,10 @@ function applyLegacyFirstSongFallback(song) {
   }
 }
 
+function isUsableObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
 class WebSocketClient {
   constructor() {
     this.ws = null
@@ -237,13 +241,17 @@ class WebSocketClient {
         break
       case 'vote_updated':
         globalStore.upsertVoteSession(message.data.session)
-        globalStore.addActivity(message.data.activity)
+        if (isUsableObject(message.data.activity)) {
+          globalStore.addActivity(message.data.activity)
+        }
         this.notifyVoteEvent(message.type, message.data)
         break
       case 'vote_resolved':
         console.log(`Vote resolved (${message.data.outcome}):`, message.data.session_id)
         globalStore.removeVoteSession(message.data.session_id)
-        globalStore.addActivity(message.data.activity)
+        if (isUsableObject(message.data.activity)) {
+          globalStore.addActivity(message.data.activity)
+        }
         this.notifyVoteEvent(message.type, message.data)
         break
       case 'auto_queue_added':

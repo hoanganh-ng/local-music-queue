@@ -216,6 +216,32 @@ describe('WebSocketClient', () => {
     unsubscribe()
   })
 
+  it('vote_updated without activity still upserts and notifies subscribers', () => {
+    const callback = vi.fn()
+    const unsubscribe = wsClient.onVoteEvent(callback)
+    const session = {
+      id: 'skip:song-1',
+      created_at: '2026-06-20T10:00:00Z',
+      voted_by: { 1: true },
+    }
+
+    expect(() => {
+      wsClient.handleMessage({
+        type: 'vote_updated',
+        data: { session },
+      })
+    }).not.toThrow()
+
+    expect(globalStore.upsertVoteSession).toHaveBeenCalledWith(session)
+    expect(globalStore.addActivity).not.toHaveBeenCalled()
+    expect(callback).toHaveBeenCalledWith({
+      type: 'vote_updated',
+      data: { session },
+    })
+
+    unsubscribe()
+  })
+
   it('vote_resolved updates the store and notifies vote event subscribers', () => {
     const callback = vi.fn()
     const unsubscribe = wsClient.onVoteEvent(callback)
@@ -245,6 +271,35 @@ describe('WebSocketClient', () => {
     })
 
     unsubscribe()
+  })
+
+  it('vote_resolved without activity still removes and notifies subscribers', () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const callback = vi.fn()
+    const unsubscribe = wsClient.onVoteEvent(callback)
+
+    expect(() => {
+      wsClient.handleMessage({
+        type: 'vote_resolved',
+        data: {
+          session_id: 'skip:song-1',
+          outcome: 'expired',
+        },
+      })
+    }).not.toThrow()
+
+    expect(globalStore.removeVoteSession).toHaveBeenCalledWith('skip:song-1')
+    expect(globalStore.addActivity).not.toHaveBeenCalled()
+    expect(callback).toHaveBeenCalledWith({
+      type: 'vote_resolved',
+      data: {
+        session_id: 'skip:song-1',
+        outcome: 'expired',
+      },
+    })
+
+    unsubscribe()
+    consoleSpy.mockRestore()
   })
 
   it('isolates vote event subscriber errors from message handling and other subscribers', () => {

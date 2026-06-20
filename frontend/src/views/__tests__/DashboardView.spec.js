@@ -125,6 +125,27 @@ describe('DashboardView', () => {
     expect(mockToast.success).not.toHaveBeenCalled()
   })
 
+  it('ignores vote events without an activity description', () => {
+    expect(() => {
+      shallowMount(DashboardView)
+
+      wsMockState.voteEventCallback({
+        type: 'vote_updated',
+        data: {
+          session: {
+            id: 'skip:song-1',
+            created_at: '2026-06-20T10:00:00Z',
+            voted_by: { 1: true },
+          },
+        },
+      })
+    }).not.toThrow()
+
+    expect(mockToast.info).not.toHaveBeenCalled()
+    expect(mockToast.success).not.toHaveBeenCalled()
+    expect(mockToast.error).not.toHaveBeenCalled()
+  })
+
   it('maps passed vote resolutions to success and expired resolutions to info', () => {
     shallowMount(DashboardView)
 

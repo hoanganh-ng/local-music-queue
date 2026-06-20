@@ -32,28 +32,37 @@ Add accessible in-app toast notifications for live `vote_updated` and `vote_reso
 - Vote update dedupe uses event type, session ID, session creation time, and vote count.
 - Vote resolution dedupe uses event type, session ID, outcome, and activity timestamp.
 
+## Deferred Future Work
+
+- Browser/device push notifications.
+- User notification preferences.
+- Optional notification sounds and vibration.
+
 ## Verification
 
-- `go test -count=1 ./internal/delivery/ws ./internal/delivery/http` — PASS
-  - `ok local-music-queue/internal/delivery/ws 0.866s`
-  - `ok local-music-queue/internal/delivery/http 0.970s`
-- `npm run test:unit -- --run src/services/__tests__/websocket.spec.js src/views/__tests__/DashboardView.spec.js` — PASS
-  - 2 test files passed, 18 tests passed
-- `go test -count=1 ./...` — BLOCKED by local environment / pre-existing test fixture dependency
-  - `cmd/server` failed because `yt-dlp` was unavailable:
-    - `TestAPIIntegration`: `yt-dlp executable not found at : exec: "": executable file not found in $PATH`
-    - `TestSetupApp`: `yt-dlp executable not found at /home/vi0l3tsc0rpi0n/linux-softwares/yt-dlp`
-  - Other packages passed.
-- `go test -race -count=1 ./...` — BLOCKED by the same local `yt-dlp` dependency in `cmd/server`
-  - Other packages passed.
-- `go vet ./...` — PASS
-- `go test -race -count=1 ./internal/delivery/ws ./internal/delivery/http` — PASS
-  - `ok local-music-queue/internal/delivery/ws 1.889s`
-  - `ok local-music-queue/internal/delivery/http 3.379s`
-- `npm run test:unit -- --run` — PASS
-  - 9 test files passed, 61 tests passed
-- `npm run build` — PASS
+- Branch: `dev`
+- Review-fix base commit: `31706d7d0e973a6627194529cd188baa0a509f8e`
+- Current HEAD during verification: `31706d7d0e973a6627194529cd188baa0a509f8e`
+- `go test -count=1 ./internal/delivery/ws ./internal/delivery/http ./internal/usecase/vote` — PASS
+  - `ok local-music-queue/internal/delivery/ws 0.867s`
+  - `ok local-music-queue/internal/delivery/http 1.099s`
+  - `ok local-music-queue/internal/usecase/vote 0.004s`
+- `go test -race -count=1 ./internal/delivery/ws ./internal/delivery/http ./internal/usecase/vote` — PASS
+  - `ok local-music-queue/internal/delivery/ws 1.888s`
+  - `ok local-music-queue/internal/delivery/http 3.204s`
+  - `ok local-music-queue/internal/usecase/vote 1.019s`
+- `cd frontend && npm run test:unit -- --run src/services/__tests__/websocket.spec.js src/views/__tests__/DashboardView.spec.js` — PASS
+  - 2 test files passed, 21 tests passed
+- `cd frontend && npm run test:unit -- --run` — PASS
+  - 9 test files passed, 64 tests passed
+- `cd frontend && npm run build` — PASS
   - Vite production build completed successfully.
+- `go vet ./...` — PASS
 - `git diff --check` — PASS
+  - No output.
 - `git status --short --branch` — PASS
-  - Working tree contains only Sprint 005 implementation/documentation changes; no commits were made.
+  - `## dev...origin/dev`
+  - ` M documents/00-project-management/SPRINTS/005-in-app-vote-event-notifications.md`
+  - ` M frontend/src/services/__tests__/websocket.spec.js`
+  - ` M frontend/src/services/websocket.js`
+  - ` M frontend/src/views/__tests__/DashboardView.spec.js`
