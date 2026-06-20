@@ -103,6 +103,7 @@ let ytPlayer = null
 const showPlayer = ref(true)
 let syncInterval = null
 const isUpdatingFromProp = ref(false)
+let isUpdatingFromPropResetTimer = null
 let statusChangeTimeout = null
 // Sprint 004 (generation-safe transitions): every videoId change arms a fresh
 // monotonic `loadGeneration`. A callback (PAUSED/BUFFERING/PLAYING/ENDED) that
@@ -112,7 +113,10 @@ let statusChangeTimeout = null
 let loadGeneration = 0
 let settledGeneration = 0
 let loadingTimeout = null
+let settleConfirmationTimer = null
+let settleConfirmationGeneration = 0
 const LOADING_GUARD_MS = 1500
+const SETTLE_CONFIRM_MS = 250
 
 // Track the videoId the component currently considers "live". Any state-change
 // callback whose reported videoId does not match this is a stale callback for
@@ -155,7 +159,14 @@ onMounted(() => {
 onUnmounted(() => {
   if (syncInterval) clearInterval(syncInterval)
   if (statusChangeTimeout) clearTimeout(statusChangeTimeout)
+  statusChangeTimeout = null
   if (loadingTimeout) clearTimeout(loadingTimeout)
+  loadingTimeout = null
+  if (settleConfirmationTimer) clearTimeout(settleConfirmationTimer)
+  settleConfirmationTimer = null
+  if (isUpdatingFromPropResetTimer) clearTimeout(isUpdatingFromPropResetTimer)
+  isUpdatingFromPropResetTimer = null
+  isUpdatingFromProp.value = false
   // Hard kill-switch: any in-flight YT callback must be a no-op.
   isUnmounted.value = true
   // Invalidate any in-flight load callbacks and clear the settled marker so
@@ -194,32 +205,58 @@ function initPlayer() {
   }, 5000)
 }
 
+// Read the player's currently loaded videoId by parsing getVideoUrl(). This
+// is the authoritative seam for the real YouTube IFrame API: event.target
+// identifies the player, not an arbitrary historical video event, and the
+// player's own state is the only stable source of "which video is loaded
+// right now". The mock player implements getVideoUrl/getPlayerState.
+function readPlayerVideoId() {
+  if (!ytPlayer) return null
+  if (typeof ytPlayer.getVideoUrl !== 'function') return null
+  try {
+    const url = ytPlayer.getVideoUrl() || ''
+    const match = url.match(/(?:v=|\/)([0-9A-Za-z_-]{11})/)
+    return match ? match[1] : null
+  } catch (_) {
+    return null
+  }
+}
+
+function readPlayerState() {
+  if (!ytPlayer || typeof ytPlayer.getPlayerState !== 'function') return null
+  try {
+    return ytPlayer.getPlayerState()
+  } catch (_) {
+    return null
+  }
+}
+
 function onPlayerStateChange(event) {
   // Hard kill-switch: any callback arriving after unmount must do nothing.
   if (isUnmounted.value) return
   // Prevent loop: skip if change came from prop watcher
   if (isUpdatingFromProp.value) return
 
-  // Identity-keyed guard: the player's current video data is the source of
-  // truth for which video this callback belongs to. Fall back to
-  // event.target.videoId for the mock seam. Mismatches are stale callbacks
-  // from a previous load and must not affect the current transition (must
-  // NOT settle, must NOT schedule setStatus, must NOT call songEnded).
-  const reportedVideoId =
-    event?.target?.getVideoData?.()?.video_id ??
-    event?.target?.videoId ??
-    null
-  if (reportedVideoId !== expectedVideoId.value) {
+  // Sprint 004 (identity-keyed): the player's currently loaded video is the
+  // source of truth for which video this callback belongs to. event.target
+  // identifies the player itself, not a per-event video — we must read the
+  // player's current video via getVideoUrl(), not a synthetic per-callback
+  // videoId. Mismatches are stale callbacks for a previous load and must NOT
+  // settle, must NOT schedule setStatus, must NOT call songEnded.
+  const playerCurrentVideoId = readPlayerVideoId()
+  if (playerCurrentVideoId !== expectedVideoId.value) {
     return
   }
 
   const state = event.data
 
   if (state === window.YT.PlayerState.ENDED) {
-    // Sprint 004 (generation-safe): only treat ENDED as genuine end-of-media
-    // when it matches the currently settled generation. An ENDED arriving while
-    // a newer videoId has been swapped in (or during the swap itself) belongs
-    // to the previous video and must NOT advance the backend.
+    // Sprint 004 (identity-confirmed): only treat ENDED as genuine
+    // end-of-media when the player's currently loaded video still matches
+    // the expected videoId AND the player still reports ENDED when
+    // confirmed. A stale callback can pass the initial check but must not
+    // settle the transition unless the actual current player remains on
+    // the expected video in the expected state.
     if (loadGeneration === settledGeneration) {
       api.songEnded()
         .then(() => {
@@ -231,21 +268,37 @@ function onPlayerStateChange(event) {
     return
   }
 
-  // Sprint 004 (generation-safe): while a programmatic loadVideoById is
-  // settling, the YT API fires transient PAUSED/BUFFERING/PLAYING events that
-  // do not reflect host intent. Suppress the backend status call for those.
-  // The settledGeneration is only advanced on a stable PLAYING matching
-  // props.status, so an older-generation late PLAYING cannot clear the guard.
+  // Sprint 004 (identity-confirmed generation-safe): while a programmatic
+  // loadVideoById is settling, the YT API fires transient
+  // PAUSED/BUFFERING/PLAYING events that do not reflect host intent. A
+  // matching PLAYING (state + props.status + expected videoId) arms a
+  // short confirmation. Settled generation only advances at confirmation
+  // time when the player is still mounted, the generation has not changed,
+  // the player's currently loaded video still matches, and the player
+  // still reports PLAYING.
   if (loadGeneration !== settledGeneration) {
     if (
       state === window.YT.PlayerState.PLAYING &&
       props.status === 'playing'
     ) {
-      settledGeneration = loadGeneration
-      if (loadingTimeout) {
-        clearTimeout(loadingTimeout)
-        loadingTimeout = null
-      }
+      // Arm a generation-keyed confirmation. A stale callback that
+      // arrived after the load moved on cannot settle the transition
+      // because the confirmation will re-check identity, state, and
+      // generation at fire time.
+      if (settleConfirmationTimer) clearTimeout(settleConfirmationTimer)
+      settleConfirmationGeneration = loadGeneration
+      settleConfirmationTimer = setTimeout(() => {
+        settleConfirmationTimer = null
+        if (isUnmounted.value) return
+        if (settleConfirmationGeneration !== loadGeneration) return
+        if (readPlayerVideoId() !== expectedVideoId.value) return
+        if (readPlayerState() !== window.YT.PlayerState.PLAYING) return
+        settledGeneration = loadGeneration
+        if (loadingTimeout) {
+          clearTimeout(loadingTimeout)
+          loadingTimeout = null
+        }
+      }, SETTLE_CONFIRM_MS)
     }
     return
   }
@@ -259,10 +312,19 @@ function onPlayerStateChange(event) {
     return
   }
 
-  // Debounce status changes
-  if (newStatus && newStatus !== props.status) {
-    if (statusChangeTimeout) clearTimeout(statusChangeTimeout)
+  // Sprint 004 (cancel-on-every-transition): clear and null any existing
+  // statusChangeTimeout FIRST for every accepted PLAYING/PAUSED callback,
+  // then schedule a new timeout only when the new player state differs
+  // from props.status. This ensures that a sequence of transient state
+  // changes during a programmatic load cannot strand a stale paused
+  // debounce that would later fire against the new song.
+  if (statusChangeTimeout) {
+    clearTimeout(statusChangeTimeout)
+    statusChangeTimeout = null
+  }
+  if (newStatus !== props.status) {
     statusChangeTimeout = setTimeout(() => {
+      statusChangeTimeout = null
       api.setStatus(newStatus, globalStore.currentUser.display_name)
         .catch(err => console.error('Status sync failed:', err))
     }, 300)
@@ -321,11 +383,16 @@ watch(() => videoId.value, (newId, oldId) => {
         // Sprint 004 (generation-safe): arm a fresh load generation. Any
         // callback from a previous load (older generation) cannot affect the
         // new song. Cancel any pending statusChangeTimeout so a stale PAUSED
-        // debounce cannot fire after a new load begins.
+        // debounce cannot fire after a new load begins. Cancel any pending
+        // settle confirmation keyed to the previous generation.
         loadGeneration++
         if (statusChangeTimeout) {
           clearTimeout(statusChangeTimeout)
           statusChangeTimeout = null
+        }
+        if (settleConfirmationTimer) {
+          clearTimeout(settleConfirmationTimer)
+          settleConfirmationTimer = null
         }
         if (loadingTimeout) clearTimeout(loadingTimeout)
         loadingTimeout = setTimeout(() => {
@@ -348,6 +415,10 @@ watch(() => videoId.value, (newId, oldId) => {
       if (statusChangeTimeout) {
         clearTimeout(statusChangeTimeout)
         statusChangeTimeout = null
+      }
+      if (settleConfirmationTimer) {
+        clearTimeout(settleConfirmationTimer)
+        settleConfirmationTimer = null
       }
       if (loadingTimeout) clearTimeout(loadingTimeout)
       loadingTimeout = setTimeout(() => {
@@ -374,9 +445,13 @@ watch(() => props.status, (newStatus) => {
       ytPlayer.stopVideo()
     }
 
-    // Reset flag after a short delay to allow player state to settle
-    setTimeout(() => {
+    // Sprint 004: store the reset timer handle so subsequent status
+    // changes (or unmount) can replace/clear it deterministically rather
+    // than racing anonymous timeouts.
+    if (isUpdatingFromPropResetTimer) clearTimeout(isUpdatingFromPropResetTimer)
+    isUpdatingFromPropResetTimer = setTimeout(() => {
       isUpdatingFromProp.value = false
+      isUpdatingFromPropResetTimer = null
     }, 500)
   }
 })

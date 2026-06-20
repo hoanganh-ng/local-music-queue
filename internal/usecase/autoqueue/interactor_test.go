@@ -518,6 +518,47 @@ func blockingAddAutoQueueSongFunc(inner AddAutoQueueSongFunc, entered, release c
 	}
 }
 
+// blockingBroadcaster returns a BroadcastFunc that closes `entered` once it
+// has been invoked, then blocks on `release`. This lets the test keep the
+// downstream broadcast operation parked while SetEnabled races against it.
+func blockingBroadcaster(entered, release chan struct{}) BroadcastFunc {
+	return func(eventType string, _ interface{}) {
+		close(entered)
+		<-release
+	}
+}
+
+// blockingAppendHistory wraps a mockAutoQueueRepo so AppendHistory blocks on
+// a release channel after recording its invocation. Used to verify that
+// SetEnabled is not blocked on history persistence.
+func blockingAppendHistory(inner *mockAutoQueueRepo, entered, release chan struct{}) *blockingHistoryRepo {
+	return &blockingHistoryRepo{inner: inner, entered: entered, release: release}
+}
+
+type blockingHistoryRepo struct {
+	inner   *mockAutoQueueRepo
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingHistoryRepo) GetConfig(ctx context.Context) (*domain.AutoQueueConfig, error) {
+	return b.inner.GetConfig(ctx)
+}
+func (b *blockingHistoryRepo) SaveConfig(ctx context.Context, cfg domain.AutoQueueConfig) error {
+	return b.inner.SaveConfig(ctx, cfg)
+}
+func (b *blockingHistoryRepo) AppendHistory(ctx context.Context, entry domain.PlayHistoryEntry) error {
+	if err := b.inner.AppendHistory(ctx, entry); err != nil {
+		return err
+	}
+	close(b.entered)
+	<-b.release
+	return nil
+}
+func (b *blockingHistoryRepo) GetRecentHistory(ctx context.Context, limit int) ([]domain.PlayHistoryEntry, error) {
+	return b.inner.GetRecentHistory(ctx, limit)
+}
+
 // TestCheckAndTrigger_SetEnabledBlockedDuringInsertion asserts the
 // linearization the Sprint 004 hardening requires: once the post-fetch
 // "still enabled?" check passes and the queue-owned insertion begins,
@@ -625,6 +666,160 @@ func TestCheckAndTrigger_SetEnabledBlockedDuringInsertion(t *testing.T) {
 	cfg, _ := interactor.GetConfig(context.Background())
 	if cfg.Enabled {
 		t.Error("expected Enabled=false after SetEnabled(false) completed")
+	}
+}
+
+// TestCheckAndTrigger_SetEnabledUnblockedAfterInsertion asserts the Sprint
+// 004 contract that mu is released IMMEDIATELY after the insertion call
+// returns. The history append and broadcaster run OUTSIDE the auto-queue
+// mutex, so a concurrent SetEnabled(false) must complete while a
+// downstream broadcast or history persistence remains blocked.
+//
+// The test partitions the downstream work (history + broadcast) from the
+// insertion mutex by parking the broadcaster on a release channel, then
+// verifies SetEnabled(false) returns before the broadcast is unblocked.
+func TestCheckAndTrigger_SetEnabledUnblockedAfterInsertion(t *testing.T) {
+	baseRepo := &mockAutoQueueRepo{
+		config:  &domain.AutoQueueConfig{Enabled: true, Strategy: domain.StrategyRelated},
+		history: []domain.PlayHistoryEntry{},
+	}
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "source", Title: "Source"})
+	queueRepo := &mockQueueRepo{queue: q}
+	fetcher := &mockFetcher{
+		song: &entity.Song{ID: "candidate", Title: "Candidate", AddedBy: entity.SystemUserID},
+	}
+
+	bcastEntered := make(chan struct{})
+	bcastRelease := make(chan struct{})
+
+	interactor := NewInteractor(baseRepo, queueRepo, fetcher)
+	interactor.SetAddAutoQueueSongFunc(testAddAutoQueueSong(queueRepo))
+	interactor.SetBroadcaster(blockingBroadcaster(bcastEntered, bcastRelease))
+
+	triggerDone := make(chan error, 1)
+	go func() {
+		triggerDone <- interactor.CheckAndTrigger(context.Background())
+	}()
+
+	// Wait for the broadcaster to begin. At this point insertion has
+	// returned and mu has been released. The broadcaster is parked.
+	select {
+	case <-bcastEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("broadcaster did not begin within timeout")
+	}
+
+	// Sanity: history is already appended (history runs before broadcast
+	// and is not blocked).
+	if len(baseRepo.history) != 1 {
+		t.Errorf("expected 1 history entry before SetEnabled, got %d", len(baseRepo.history))
+	}
+
+	// SetEnabled(false) must complete even though the broadcaster is
+	// still parked, because mu was released after the insertion.
+	setEnabledDone := make(chan error, 1)
+	go func() {
+		setEnabledDone <- interactor.SetEnabled(context.Background(), false)
+	}()
+
+	select {
+	case err := <-setEnabledDone:
+		if err != nil {
+			t.Fatalf("SetEnabled returned error while downstream was blocked: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("SetEnabled blocked on downstream broadcast/history; mu not released after insertion")
+	}
+
+	// Sanity: queue was mutated by the insertion (now that mu is released
+	// the queue is consistent).
+	if got := len(queueRepo.queue.Songs); got != 2 {
+		t.Errorf("expected 2 songs after insertion, got %d", got)
+	}
+
+	// Disable DID land.
+	cfg, _ := interactor.GetConfig(context.Background())
+	if cfg.Enabled {
+		t.Error("expected Enabled=false after SetEnabled(false) completed")
+	}
+
+	// Unblock the downstream work; CheckAndTrigger must then return.
+	close(bcastRelease)
+
+	select {
+	case err := <-triggerDone:
+		if err != nil {
+			t.Fatalf("CheckAndTrigger returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("CheckAndTrigger did not complete after downstream released")
+	}
+}
+
+// TestCheckAndTrigger_SetEnabledUnblockedDuringHistoryPersistence
+// asserts the Sprint 004 contract that history persistence runs OUTSIDE
+// the auto-queue mutex. A concurrent SetEnabled(false) must complete
+// while the AppendHistory call is still blocked, proving the mutex was
+// released before the history append.
+func TestCheckAndTrigger_SetEnabledUnblockedDuringHistoryPersistence(t *testing.T) {
+	baseRepo := &mockAutoQueueRepo{
+		config:  &domain.AutoQueueConfig{Enabled: true, Strategy: domain.StrategyRelated},
+		history: []domain.PlayHistoryEntry{},
+	}
+	q := entity.NewQueue()
+	q.Add(entity.Song{ID: "source", Title: "Source"})
+	queueRepo := &mockQueueRepo{queue: q}
+	fetcher := &mockFetcher{
+		song: &entity.Song{ID: "candidate", Title: "Candidate", AddedBy: entity.SystemUserID},
+	}
+
+	historyEntered := make(chan struct{})
+	historyRelease := make(chan struct{})
+	historyRepo := blockingAppendHistory(baseRepo, historyEntered, historyRelease)
+
+	interactor := NewInteractor(historyRepo, queueRepo, fetcher)
+	interactor.SetAddAutoQueueSongFunc(testAddAutoQueueSong(queueRepo))
+
+	triggerDone := make(chan error, 1)
+	go func() {
+		triggerDone <- interactor.CheckAndTrigger(context.Background())
+	}()
+
+	// Wait for history persistence to begin. At this point insertion has
+	// returned and mu has been released.
+	select {
+	case <-historyEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("history did not begin within timeout")
+	}
+
+	// SetEnabled(false) must complete even though the history append is
+	// still parked, because mu was released after the insertion.
+	setEnabledDone := make(chan error, 1)
+	go func() {
+		setEnabledDone <- interactor.SetEnabled(context.Background(), false)
+	}()
+
+	select {
+	case err := <-setEnabledDone:
+		if err != nil {
+			t.Fatalf("SetEnabled returned error while history was blocked: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("SetEnabled blocked on history persistence; mu not released after insertion")
+	}
+
+	// Unblock history persistence; CheckAndTrigger must then return.
+	close(historyRelease)
+
+	select {
+	case err := <-triggerDone:
+		if err != nil {
+			t.Fatalf("CheckAndTrigger returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("CheckAndTrigger did not complete after history released")
 	}
 }
 

@@ -73,7 +73,14 @@ play/pause interactions.
     before queue insertion. The slow fetch is held outside the interactor's
     mutex; both `SetEnabled` and the pre-fetch and post-fetch config checks
     share that mutex so a `SetEnabled(false)` that lands mid-fetch is
-    observed before insertion.
+    observed before insertion. The `addAutoQueueSong` callback runs while
+    still holding the interactor's mutex so a `SetEnabled(false)` that
+    lands after the post-fetch check has passed is forced to wait for the
+    in-flight insertion to complete. The mutex is released IMMEDIATELY
+    after the insertion call returns; the error inspection, the history
+    append, and the broadcaster call all run OUTSIDE the auto-queue
+    mutex so a concurrent `SetEnabled(false)` is not blocked on those
+    downstream operations.
   - `NowPlaying.vue` arms a per-load `loadGeneration` counter. The guard
     remains engaged until a stable PLAYING matching `props.status` arrives
     for the current generation; the `statusChangeTimeout` debounce scheduled
@@ -93,12 +100,17 @@ play/pause interactions.
   different lock inside the callback); it only serializes the
   auto-queue decision against `SetEnabled`. A `SetEnabled(false)` that
   lands after the post-fetch check has passed must wait for the
-  insertion to complete before it can run.
+  insertion to complete before it can run. The mutex is released
+  IMMEDIATELY after the insertion call returns; the error inspection,
+  the history append, and the broadcaster call all run OUTSIDE the
+  auto-queue mutex so a concurrent `SetEnabled(false)` is not blocked
+  on those downstream operations.
 - The yt-dlp `FetchRelated` call is the only slow operation in the
   auto-queue path and remains outside both the queue lock and the
   auto-queue interactor's mutex. The WebSocket broadcaster and the
-  history append run AFTER `autoqueue.Interactor.mu` is released (via
-  defer on the post-fetch critical section).
+  history append run AFTER `autoqueue.Interactor.mu` is released
+  immediately after the insertion call returns — they are NOT held
+  under the post-fetch defer.
 
 ## REST Mappings
 - `POST /api/queue/add`
@@ -136,12 +148,20 @@ play/pause interactions.
   when the payload carries authoritative fields; otherwise they apply the
   single approved `applyLegacyFirstSongFallback`.
 - `NowPlaying.vue` arms a per-load `loadGeneration` counter in the
-  `videoId` watcher. `settledGeneration` only advances on a stable PLAYING
-  event matching `props.status`. A `statusChangeTimeout` armed for a
-  previous song is cancelled when the watcher arms a new generation. An
-  ENDED event is routed to `api.songEnded()` only when
-  `loadGeneration === settledGeneration`. Genuine host play/pause still
-  synchronizes via the existing `isUpdatingFromProp` prop watcher.
+  `videoId` watcher. `settledGeneration` only advances when a
+  generation-keyed confirmation timer fires: at confirmation time the
+  component verifies the component is still mounted, the generation has
+  not changed, the player's currently loaded video (read from
+  `player.getVideoUrl()`) still matches the expected videoId, and
+  `player.getPlayerState()` still reports `PLAYING`. A `statusChangeTimeout`
+  armed for a previous song is cancelled on every accepted PLAYING/PAUSED
+  callback (cleared and nulled before any new timeout is scheduled), and
+  again when the watcher arms a new generation. An ENDED event is routed
+  to `api.songEnded()` only when `loadGeneration === settledGeneration`.
+  Genuine host play/pause still synchronizes via the existing
+  `isUpdatingFromProp` prop watcher (whose reset timer handle is now
+  tracked, replaced safely on subsequent status changes, and cleared on
+  unmount).
 
 ## Tests
 - **Backend (`internal/usecase/queue/interactor_test.go`):**
@@ -177,6 +197,12 @@ play/pause interactions.
     returns; on release, the insertion commits and the disable lands
     after. Linearization asserted deterministically via a 100 ms
     goroutine-blocking check.
+  - `TestCheckAndTrigger_SetEnabledUnblockedAfterInsertion` —
+    insertion completes, downstream broadcast and history persistence
+    are parked; a concurrent `SetEnabled(false)` is verified to
+    complete BEFORE the broadcast/history unblock, proving the mutex
+    is released immediately after the insertion call returns and the
+    downstream work runs outside the auto-queue mutex.
   - `TestCheckAndTrigger_LoadFailurePropagates` — load failure surfaced by
     the callback reaches `CheckAndTrigger` and is NOT collapsed into
     `ErrAutoQueueStale`.
@@ -196,13 +222,26 @@ play/pause interactions.
 - **Frontend (`frontend/src/components/dashboard/__tests__/NowPlaying.spec.js`):**
   - Pause debounce scheduled for song A, then a swap to song B cancels the
     pending `setStatus('paused', ...)`.
+  - Settled current video: PAUSED then PLAYING within 300 ms cancels the
+    paused `setStatus` before the 300 ms debounce fires; advancing past
+    300 ms confirms no `setStatus('paused', ...)` was issued.
+  - PAUSED with no recovery still synchronizes `setStatus('paused', ...)`
+    exactly once even when repeated PAUSED callbacks fire within the
+    debounce window.
   - Loading B then C before B settles: B's late PLAYING does not clear C's
     guard.
   - Stale ENDED during a programmatic load does not call `api.songEnded`.
   - Genuine ENDED for a settled current song calls `api.songEnded`.
   - Genuine host pause after settlement calls `api.setStatus('paused', ...)`.
-  - PLAYING matching `props.status` advances `settledGeneration` so
-    subsequent genuine PAUSED reaches the backend.
+  - PLAYING matching `props.status` arms a generation-keyed confirmation
+    timer that settles the generation at fire time (re-checking mount,
+    generation, current video, and player state); subsequent genuine
+    PAUSED reaches the backend.
+  - Confirmation timer does NOT settle when the player has already moved
+    on (identity mismatch at confirmation fire time, e.g. C swapped in
+    after B's late PLAYING armed a B-keyed confirmation).
+  - Confirmation timer DOES settle when identity and state still match at
+    fire time.
   - B then C: late PLAYING(B) and transient PAUSED(C) arriving after a B→C
     load (with mismatched videoId identity) do NOT trigger `setStatus` or
     `songEnded`.
@@ -232,42 +271,94 @@ play/pause interactions.
   state. This is acceptable for the Sprint 004 scope but is a known
   locality boundary.
 
-  In addition, the guard is keyed on a videoId-identity match: every
-  state-change callback reads `event.target.getVideoData()?.video_id`
-  (with a `event.target.videoId` fallback seam for the test mock) and
-  returns early unless it equals the component's `expectedVideoId`.
-  This prevents a stale PLAYING belonging to the previous load from
-  falsely clearing the current generation's guard. An `isUnmounted`
-  ref provides a hard kill-switch so any callback arriving after
-  `onUnmounted` is a no-op even before the identity check. The guard
-  is therefore keyed on BOTH a monotonic counter AND an exact-match
-  videoId identity — not "generation-safe" by counter alone.
+  In addition, the guard is keyed on a videoId-identity match read from
+  the player's currently loaded video (parsed out of
+  `player.getVideoUrl()`, with a documented `getPlayerState()` companion
+  seam for tests). `event.target` identifies the player itself, NOT an
+  arbitrary historical video event — callbacks are not given a
+  fabricated per-event videoId identity. The mock player exposes
+  `getVideoUrl()` and `getPlayerState()` and tests mutate the single
+  player's actual current video/state rather than supplying a fabricated
+  callback identity. A stale callback that passes the initial identity
+  check is still rejected at the generation-keyed confirmation step
+  unless the player is still mounted, the generation has not changed,
+  the player's current video still matches, and `getPlayerState()` still
+  reports `PLAYING`. An `isUnmounted` ref provides a hard kill-switch so
+  any callback arriving after `onUnmounted` is a no-op even before the
+  identity check. The guard is therefore keyed on BOTH a monotonic
+  counter AND an exact-match current-player identity, and the actual
+  player state at confirmation time — not "generation-safe" by counter
+  alone.
 - **Auto-queue mid-fetch mutex:** the interactor's mutex serializes the
   post-fetch re-check, the queue-owned `addAutoQueueSong` insertion, AND
   `SetEnabled`. The slow `FetchRelated` is held outside the mutex; a
   `SetEnabled` that lands mid-fetch is observed before the post-fetch
   check. A `SetEnabled` that lands AFTER the post-fetch check has
   passed is forced to wait for the in-flight insertion to complete
-  (linearized after the insertion). If a future caller needs
-  `SetEnabled` to be non-blocking, the serialization must be revisited.
+  (linearized after the insertion). The mutex is released IMMEDIATELY
+  after the insertion call returns; the history append and broadcaster
+  call run OUTSIDE the auto-queue mutex so a concurrent `SetEnabled`
+  is not blocked on those downstream operations. If a future caller
+  needs `SetEnabled` to be non-blocking, the serialization must be
+  revisited.
 - **Load-failure semantics:** callers that previously relied on
   `ErrAutoQueueStale` to absorb load failures must now distinguish the two.
   The HTTP delivery layer does not call auto-queue insertion directly, so
   no HTTP contract change is required.
 
 ## Verification Results
-- `go test -count=1 ./internal/usecase/queue ./internal/usecase/autoqueue ./internal/delivery/http ./internal/delivery/ws` — PASS
-- `go test -race -count=1 ./internal/usecase/queue ./internal/usecase/autoqueue ./internal/delivery/http ./internal/delivery/ws` — PASS
-- `go test ./...` — BLOCKED (Pre-existing environmental blocker: `open letsencrypt-backend/accounts: permission denied`)
-- `go test -race ./...` — BLOCKED (Pre-existing environmental blocker)
-- `go vet ./...` — BLOCKED (Pre-existing environmental blocker)
-- `cd frontend && npm run test:unit -- --run` — PASS (9 test files, 38 tests)
+- `go test -count=1 ./internal/usecase/queue ./internal/usecase/autoqueue ./internal/delivery/http ./internal/delivery/ws` — PASS (97 tests across 4 packages)
+- `go test -race -count=1 ./internal/usecase/queue ./internal/usecase/autoqueue ./internal/delivery/http ./internal/delivery/ws` — PASS (97 tests, no races)
+- `go test ./...` — BLOCKED (Pre-existing environmental blocker: `TestAPIIntegration` and `TestSetupApp` in `cmd/` fail with `yt-dlp executable not found at` — the host does not have yt-dlp installed in the search path)
+- `go test -race ./...` — BLOCKED (same pre-existing environmental blocker as `go test ./...`)
+- `go vet ./...` — PASS (no issues found; the previously-recorded letsencrypt permission blocker is not surfacing in this environment)
+- `cd frontend && npm run test:unit -- --run` — PASS (9 test files, 47 tests)
 - `cd frontend && npm run build` — PASS
 - `docker compose config` — PASS
-- `git diff --check` — PASS
-- `git status --short --untracked-files=all` — PASS (8 modified files; no new untracked files beyond the Sprint 004 doc and existing `NowPlaying.spec.js`)
+- `git diff --check` — PASS (no whitespace/indent warnings)
+- `git status --short --untracked-files=all` — PASS (6 modified files: 2 backend, 2 frontend, 1 docs, 1 package-lock; no new untracked files)
 
 **Sprint 004-Specific Failures:** None observed in the focused test suites.
-The repository-wide `go test ./...`, `go test -race ./...`, and `go vet ./...`
-remain blocked by the pre-existing `letsencrypt-backend/accounts: permission
-denied` environmental issue first recorded in the Sprint 003 baseline.
+The repository-wide `go test ./...` and `go test -race ./...` remain
+blocked by a pre-existing environmental issue (host missing the yt-dlp
+binary in PATH; `cmd/` setup tests cannot bootstrap the app). `go vet ./...`
+passes cleanly. Focused Go and frontend test suites pass under the
+supported Node 20 line (host runs Node 22.22.1, compatible with the
+toolchain pinned in `frontend/Dockerfile`).
+
+## Outstanding Review Findings — Second Pass
+The first review pass left four categories of findings outstanding.
+The second implementation pass addresses each:
+
+1. **Debounce cancel-on-every-transition:** the `statusChangeTimeout`
+   is now cleared and nulled on every accepted PLAYING/PAUSED callback
+   before any new timeout is scheduled. A recovered PAUSED→PLAYING
+   within 300 ms no longer leaves a stale `setStatus('paused', ...)`
+   pending against the new song. A separate test
+   (`PAUSED with no recovery still synchronizes setStatus("paused")
+   exactly once`) proves a no-recovery PAUSED still synchronizes
+   exactly once.
+2. **Player-identity seam:** the production code now reads
+   `player.getVideoUrl()` (parsed) for identity and
+   `player.getPlayerState()` for state, with the mock implementing
+   both. `event.target` is the single stable player reference; tests
+   mutate the player's actual current video/state, not a fabricated
+   per-callback identity. Settling a generation requires a
+   generation-keyed confirmation that re-checks mount, generation,
+   current video, and current state at fire time. ENDED is gated on
+   `loadGeneration === settledGeneration`; the confirmation step is
+   keyed to the generation at arm time and re-validated at fire time.
+3. **Auto-queue mutex release:** `i.mu` is now released IMMEDIATELY
+   after the `addAutoQueueSong` callback returns. The insertion error
+   is inspected, the history entry is appended, and the broadcaster
+   is called — all OUTSIDE the auto-queue mutex. New tests
+   `TestCheckAndTrigger_SetEnabledUnblockedAfterInsertion` and
+   `TestCheckAndTrigger_SetEnabledUnblockedDuringHistoryPersistence`
+   assert this linearization deterministically. The original
+   `TestCheckAndTrigger_SetEnabledBlockedDuringInsertion` still passes
+   (insertion itself remains serialized with `SetEnabled`).
+4. **`isUpdatingFromProp` reset timer:** the reset timeout handle is
+   now stored in `isUpdatingFromPropResetTimer`. Subsequent status
+   changes replace the handle safely (`clearTimeout` before scheduling
+   a new one). The handle is cleared in `onUnmounted` so a pending
+   reset cannot fire after the component has been torn down.

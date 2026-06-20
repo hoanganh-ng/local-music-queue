@@ -98,14 +98,18 @@ func (i *Interactor) SetAddAutoQueueSongFunc(fn AddAutoQueueSongFunc) {
 //     released before FetchRelated runs (so the slow yt-dlp call is
 //     NOT held under any lock).
 //   - Post-fetch: mu is re-acquired to re-validate that auto-queue is
-//     still enabled and the queue tail is unchanged. If the check
-//     passes, mu is HELD continuously through the `addAutoQueueSong`
-//     callback (which itself takes the queue's own internal lock).
-//   - addAutoQueueSong performs its own internal queue lock; the
+//     still enabled and the queue tail is unchanged.
+//   - Insertion: if the post-fetch check passes, the `addAutoQueueSong`
+//     callback is invoked WHILE STILL HOLDING mu (so a concurrent
+//     `SetEnabled(false)` is forced to wait for the insertion to
+//     complete). The callback takes its own queue lock; the
 //     auto-queue interactor's mu does NOT block on the queue
 //     mutation itself, only on serializing the auto-queue decision
 //     against SetEnabled.
-//   - History append and broadcaster calls run AFTER mu is released.
+//   - mu is RELEASED IMMEDIATELY after the insertion call returns.
+//     The insertion error is inspected outside the lock, then the
+//     history append and broadcaster call run WITHOUT holding mu so
+//     they cannot block a concurrent `SetEnabled(false)`.
 func (i *Interactor) CheckAndTrigger(ctx context.Context) error {
 	i.mu.Lock()
 	if i.triggering {
@@ -207,14 +211,14 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context) error {
 	}
 
 	i.mu.Lock()
-	defer i.mu.Unlock()
-
 	cfg, err = i.autoQueueRepo.GetConfig(ctx)
 	if err != nil {
+		i.mu.Unlock()
 		log.Printf("auto-queue: failed to re-get config: %v", err)
 		return fmt.Errorf("failed to get config: %w", err)
 	}
 	if !cfg.Enabled {
+		i.mu.Unlock()
 		log.Printf("auto-queue: disabled mid-flight, dropping candidate %q (no save, no history, no activity, no broadcast)", song.ID)
 		return nil
 	}
@@ -223,15 +227,22 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context) error {
 	// The callback takes its own queue lock; we are not blocking on the
 	// queue mutation itself, only serializing the auto-queue decision
 	// against SetEnabled.
-	result, err := i.addAutoQueueSong(ctx, song, lastSong.ID)
-	if err != nil {
-		if errors.Is(err, ErrAutoQueueStale) {
+	result, insertErr := i.addAutoQueueSong(ctx, song, lastSong.ID)
+	// Sprint 004: release mu IMMEDIATELY after the insertion call returns.
+	// History append and broadcaster call run OUTSIDE the auto-queue mutex
+	// so a concurrent `SetEnabled(false)` is not blocked on those slow
+	// downstream operations.
+	i.mu.Unlock()
+
+	if insertErr != nil {
+		if errors.Is(insertErr, ErrAutoQueueStale) {
 			log.Printf("auto-queue: candidate %q stale at insertion, dropping (no save, no broadcast)", song.ID)
 			return nil
 		}
-		return fmt.Errorf("failed to add song via callback: %w", err)
+		return fmt.Errorf("failed to add song via callback: %w", insertErr)
 	}
-	// mu is released by the deferred Unlock when this function returns.
+
+	// --- mu released: downstream work runs outside the auto-queue mutex ---
 
 	historyEntry := domain.PlayHistoryEntry{
 		VideoID:  lastSong.ID,
