@@ -108,8 +108,9 @@ let statusChangeTimeout = null
 // Sprint 004 (generation-safe transitions): every videoId change arms a fresh
 // monotonic `loadGeneration`. A callback (PAUSED/BUFFERING/PLAYING/ENDED) that
 // arrives with a generation older than the current one belongs to a previous
-// load and must not affect the new song. The safety timer clears the guard if
-// no matching PLAYING settles within LOADING_GUARD_MS.
+// load and must not affect the new song. The safety timer attempts settlement
+// through the same identity, player-state, and authoritative-status checks as
+// the normal confirmation path.
 let loadGeneration = 0
 let settledGeneration = 0
 let loadingTimeout = null

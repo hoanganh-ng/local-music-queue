@@ -342,24 +342,35 @@ play/pause interactions.
   no HTTP contract change is required.
 
 ## Verification Results
+### 2026-06-20 Verification Follow-Up
+Current base commit: `24429dbbb3399ef8a871973af2ee5a0100c36d1c`.
+
+Commands executed for this follow-up:
+- `cd frontend && npm run test:unit -- --run` — PASS (9 test files, 51 tests)
+- `cd frontend && npm run build` — PASS (Vite production build completed)
+- `git diff --check` — PASS (no whitespace/indent warnings)
+- `git status --short --untracked-files=all` — PASS; final output:
+  `M documents/00-project-management/SPRINTS/004-authoritative-playback-advancement.md`
+  and `M frontend/src/components/dashboard/NowPlaying.vue`
+
+Backend and deployment checks were NOT rerun for this verification
+follow-up because the only runtime-file change is a stale-comment update
+in `NowPlaying.vue`; no backend, WebSocket, queue, auto-queue,
+persistence, authentication, voting, or deployment code was changed.
+
+Older backend/deployment verification from the Sprint 004 implementation
+pass, retained for historical context only and not rerun in this
+follow-up:
 - `go test -count=1 ./internal/usecase/queue ./internal/usecase/autoqueue ./internal/delivery/http ./internal/delivery/ws` — PASS (97 tests across 4 packages)
 - `go test -race -count=1 ./internal/usecase/queue ./internal/usecase/autoqueue ./internal/delivery/http ./internal/delivery/ws` — PASS (97 tests, no races)
-- `go test ./...` — BLOCKED (Pre-existing environmental blocker: `TestAPIIntegration` and `TestSetupApp` in `cmd/` fail with `yt-dlp executable not found at` — the host does not have yt-dlp installed in the search path)
-- `go test -race ./...` — BLOCKED (same pre-existing environmental blocker as `go test ./...`)
-- `go vet ./...` — PASS (no issues found; the previously-recorded letsencrypt permission blocker is not surfacing in this environment)
-- `cd frontend && npm run test:unit -- --run` — PASS (9 test files, 47 tests)
-- `cd frontend && npm run build` — PASS
+- `go test ./...` — BLOCKED (pre-existing environmental blocker:
+  `TestAPIIntegration` and `TestSetupApp` in `cmd/` fail with
+  `yt-dlp executable not found at`; the host did not have yt-dlp
+  installed in the search path)
+- `go test -race ./...` — BLOCKED (same pre-existing environmental
+  blocker as `go test ./...`)
+- `go vet ./...` — PASS (no issues found)
 - `docker compose config` — PASS
-- `git diff --check` — PASS (no whitespace/indent warnings)
-- `git status --short --untracked-files=all` — PASS (6 modified files: 2 backend, 2 frontend, 1 docs, 1 package-lock; no new untracked files)
-
-**Sprint 004-Specific Failures:** None observed in the focused test suites.
-The repository-wide `go test ./...` and `go test -race ./...` remain
-blocked by a pre-existing environmental issue (host missing the yt-dlp
-binary in PATH; `cmd/` setup tests cannot bootstrap the app). `go vet ./...`
-passes cleanly. Focused Go and frontend test suites pass under the
-supported Node 20 line (host runs Node 22.22.1, compatible with the
-toolchain pinned in `frontend/Dockerfile`).
 
 ## Outstanding Review Findings — Second Pass
 The first review pass left four categories of findings outstanding.
