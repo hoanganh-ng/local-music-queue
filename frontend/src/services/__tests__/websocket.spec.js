@@ -409,13 +409,56 @@ describe('WebSocketClient', () => {
 
     expect(globalStore.updateQueueState).toHaveBeenCalledWith(state)
     expect(wsClient.pendingFullSync).toBe(false)
-    // lastSeqNum should be reset so the next delta doesn't trigger a false gap.
-    expect(wsClient.lastSeqNum).toBe(0)
+    // lastSeqNum retains full_sync's seq_num so subsequent gaps are detectable.
+    expect(wsClient.lastSeqNum).toBe(3)
 
-    // A subsequent gap now triggers a new request.
-    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 4 }, seq_num: 2 })
-    // lastSeqNum was 0 after full_sync, so guard (lastSeqNum > 0) is false → no gap.
-    expect(fakeWs.send).toHaveBeenCalledTimes(1) // still 1, no new request
+    // A subsequent gap (seq 3 → 5) now triggers a new request.
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 5 }, seq_num: 5 })
+    expect(fakeWs.send).toHaveBeenCalledTimes(2)
+  })
+
+  it('full_sync with a higher seq_num does not send request_full_sync', () => {
+    const fakeWs = attachOpenSocket()
+    // Client starts fresh (lastSeqNum = 0). Server sends full_sync with a
+    // high seq_num (e.g. first message after connect).
+    wsClient.handleMessage({
+      type: 'full_sync',
+      data: { state: { songs: [], current_index: -1, status: 'paused', elapsed: 0 } },
+      seq_num: 42,
+    })
+
+    expect(fakeWs.send).not.toHaveBeenCalled()
+    expect(wsClient.lastSeqNum).toBe(42)
+  })
+
+  it('after full_sync seq_num N, receiving delta seq_num N+1 does not request sync', () => {
+    const fakeWs = attachOpenSocket()
+    const N = 10
+    wsClient.handleMessage({
+      type: 'full_sync',
+      data: { state: { songs: [], current_index: -1, status: 'paused', elapsed: 0 } },
+      seq_num: N,
+    })
+    // First delta is consecutive: N → N+1.
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 1 }, seq_num: N + 1 })
+
+    expect(fakeWs.send).not.toHaveBeenCalled()
+    expect(wsClient.lastSeqNum).toBe(N + 1)
+  })
+
+  it('after full_sync seq_num N, receiving delta seq_num N+2 does request sync', () => {
+    const fakeWs = attachOpenSocket()
+    const N = 10
+    wsClient.handleMessage({
+      type: 'full_sync',
+      data: { state: { songs: [], current_index: -1, status: 'paused', elapsed: 0 } },
+      seq_num: N,
+    })
+    // Delta skips N+1 → real gap: N → N+2.
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 2 }, seq_num: N + 2 })
+
+    expect(fakeWs.send).toHaveBeenCalledTimes(1)
+    expect(fakeWs.send).toHaveBeenCalledWith(JSON.stringify({ type: 'request_full_sync' }))
   })
 
   it('consecutive in-order seq_num messages do not request sync', () => {

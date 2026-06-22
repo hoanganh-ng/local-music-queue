@@ -165,12 +165,10 @@ class WebSocketClient {
     switch (message.type) {
       case 'full_sync':
         this.pendingFullSync = false
-        // Reset seq tracking so the first delta after a (re)connect full_sync
-        // does not trigger a false gap. The next broadcast's seq_num will be
-        // full_sync.seq_num + 1; setting lastSeqNum = 0 means the condition
-        // (seq > 0+1) won't fire for that first delta because the guard
-        // (lastSeqNum > 0) is false until a delta is actually processed.
-        this.lastSeqNum = 0
+        // Keep lastSeqNum at full_sync.seq_num (set by the top-level tracker
+        // above) so the first delta (seq_num = full_sync.seq_num + 1) passes
+        // the consecutive check, while a real gap (e.g. seq_num + 2) is still
+        // detected. Resetting to 0 would blind the client to that gap.
         globalStore.updateQueueState(message.data.state)
         break
       case 'user_joined':
