@@ -11,7 +11,7 @@ Local Music Queue uses Google OAuth 2.0 for secure, email-based authentication w
 4. Frontend receives ID token
 5. Backend verifies token with Google
 6. Backend assigns role based on email
-7. User session created with JWT
+7. Backend issues a server-side opaque session token (TTL 12 hours, in-memory)
 
 **Role Assignment:**
 - **Host**: Email in `HOST_EMAILS` → Full control + player hosting
@@ -29,7 +29,6 @@ Local Music Queue uses Google OAuth 2.0 for secure, email-based authentication w
 - ✅ Email domain restriction (`@urekamedia.vn` by default)
 - ✅ User profile pictures from Google accounts
 - ✅ Session persistence in localStorage (user profile under `lmq_user_session`; session token under `lmq_session_token` and `lmq_session_expires_at`)
-- ✅ Automatic token refresh
 - ✅ Role-based UI rendering
 
 ### Security
@@ -395,9 +394,16 @@ router.push({ name: 'Dashboard' })
 
 The route guard in `frontend/src/router/index.js` admits the request only when `globalStore.currentUser` AND `sessionHelper.isValid()` are both true, so a restored tab passes automatically while an expired or missing token still bounces the visitor to `/auth`. On rejection the guard evicts both the stale token (via `sessionHelper.clearSession()`) and the user profile (via `globalStore.clearUser()`), so storage self-heals.
 
-### Backend Session (Stateless)
+### Backend Session
 
-The backend is **stateless** - no server-side sessions. Each request includes user info from the frontend, and the backend verifies it via Google token validation.
+After a successful Google login the backend issues an **opaque session token** (not a JWT, no signature, no client-parseable claims). The token is generated server-side and stored in an **in-memory** session store:
+
+- **Storage**: in-memory only — no persistence, no database row, no cookie.
+- **Scope**: single-instance / single-process. Lost when the backend restarts.
+- **TTL**: 12 hours from issuance.
+- **Refresh**: none. The token is treated as invalid once expired; the frontend must re-authenticate via Google to obtain a new one.
+
+The frontend attaches the token as `Authorization: Bearer <token>` on requests where `sessionHelper.isValid()` returns true. Within this sprint, the backend enforces this session identity only for `POST /api/queue/remove` — every other endpoint still trusts client-supplied identity and role, and so still carries the known authorization gap recorded in [PROJECT_STATE.md](../../00-project-management/PROJECT_STATE.md).
 
 ---
 
