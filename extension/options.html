@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Local Music Queue - Options</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: #1a1a2e;
+      color: #eaeaea;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding: 40px 20px;
+    }
+    .container {
+      background: #16213e;
+      border-radius: 12px;
+      padding: 32px;
+      width: 100%;
+      max-width: 480px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    }
+    h1 {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: #3ea6ff;
+    }
+    .subtitle {
+      font-size: 13px;
+      color: #888;
+      margin-bottom: 24px;
+    }
+    .form-group {
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      margin-bottom: 6px;
+      color: #ccc;
+    }
+    label .required {
+      color: #ff6b6b;
+      margin-left: 2px;
+    }
+    label .optional {
+      color: #666;
+      font-weight: 400;
+      font-size: 11px;
+      margin-left: 4px;
+    }
+    input[type="text"],
+    input[type="number"],
+    input[type="url"] {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #2a3a5c;
+      border-radius: 6px;
+      background: #0f1629;
+      color: #eaeaea;
+      font-size: 14px;
+      transition: border-color 0.2s;
+    }
+    input:focus {
+      outline: none;
+      border-color: #3ea6ff;
+    }
+    input::placeholder {
+      color: #555;
+    }
+    .help-text {
+      font-size: 11px;
+      color: #666;
+      margin-top: 4px;
+    }
+    .button-row {
+      display: flex;
+      gap: 12px;
+      margin-top: 24px;
+    }
+    button {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s, opacity 0.2s;
+    }
+    button:active {
+      opacity: 0.8;
+    }
+    .btn-primary {
+      background: #3ea6ff;
+      color: #fff;
+    }
+    .btn-primary:hover {
+      background: #1c8ae6;
+    }
+    .btn-secondary {
+      background: #2a3a5c;
+      color: #ccc;
+    }
+    .btn-secondary:hover {
+      background: #3a4a6c;
+    }
+    .status {
+      margin-top: 16px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      display: none;
+    }
+    .status.success {
+      display: block;
+      background: rgba(43, 166, 64, 0.15);
+      color: #2ba640;
+      border: 1px solid rgba(43, 166, 64, 0.3);
+    }
+    .status.error {
+      display: block;
+      background: rgba(217, 48, 37, 0.15);
+      color: #d93025;
+      border: 1px solid rgba(217, 48, 37, 0.3);
+    }
+    .divider {
+      border: none;
+      border-top: 1px solid #2a3a5c;
+      margin: 24px 0;
+    }
+    .info-box {
+      background: rgba(62, 166, 255, 0.08);
+      border: 1px solid rgba(62, 166, 255, 0.2);
+      border-radius: 6px;
+      padding: 12px;
+      font-size: 12px;
+      color: #8ab4f8;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Local Music Queue</h1>
+    <p class="subtitle">Configure the browser extension to connect to your Local Music Queue server.</p>
+
+    <form id="options-form">
+      <div class="form-group">
+        <label for="api-base">
+          API Base URL
+          <span class="required">*</span>
+        </label>
+        <input
+          type="url"
+          id="api-base"
+          name="apiBase"
+          placeholder="https://your-server:443"
+          required
+        >
+        <p class="help-text">The full URL to your Local Music Queue server, including protocol and port.</p>
+      </div>
+
+      <div class="form-group">
+        <label for="display-name">
+          Display Name
+          <span class="required">*</span>
+        </label>
+        <input
+          type="text"
+          id="display-name"
+          name="displayName"
+          placeholder="Extension User"
+          required
+        >
+        <p class="help-text">The name shown as "added by" when songs are added from this extension.</p>
+      </div>
+
+      <div class="form-group">
+        <label for="user-id">
+          User ID
+          <span class="optional">(optional)</span>
+        </label>
+        <input
+          type="number"
+          id="user-id"
+          name="userId"
+          placeholder="0"
+          min="0"
+          step="1"
+        >
+        <p class="help-text">Numeric user ID for the Local Music Queue app. Defaults to 0 if not set.</p>
+      </div>
+
+      <div class="button-row">
+        <button type="submit" class="btn-primary">Save Settings</button>
+        <button type="button" class="btn-secondary" id="test-btn">Test Connection</button>
+      </div>
+    </form>
+
+    <div id="status" class="status"></div>
+
+    <hr class="divider">
+
+    <div class="info-box">
+      <strong>Supported sites:</strong> youtube.com, music.youtube.com<br>
+      <strong>Usage:</strong> Browse YouTube and click "Add to Local Queue" near video menus.<br>
+      <strong>Note:</strong> Your server must be reachable from this browser. Use HTTPS for production.
+    </div>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>
