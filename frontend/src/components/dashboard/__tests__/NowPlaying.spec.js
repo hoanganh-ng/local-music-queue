@@ -20,12 +20,14 @@ vi.mock('../../../services/api', () => ({
 
 // Capture the player-state callback for direct invocation.
 let capturedOnStateChange = null
+let capturedOnReady = null
 
 beforeEach(() => {
   vi.useFakeTimers()
   mockSetStatus.mockClear()
   mockSongEnded.mockClear()
   capturedOnStateChange = null
+  capturedOnReady = null
   globalStore.setUser({ id: 1, role: 'host', display_name: 'HostUser' })
 
   // Minimal YT IFrame API stub. Constructor calls onYouTubeIframeAPIReady → initPlayer,
@@ -34,6 +36,7 @@ beforeEach(() => {
     PlayerState: { PLAYING: 1, PAUSED: 2, ENDED: 0, BUFFERING: 3, CUED: 5, UNSTARTED: -1 },
     Player: vi.fn(function (_elId, opts) {
       capturedOnStateChange = opts.events.onStateChange
+      capturedOnReady = opts.events.onReady || null
       // Sprint 004 (identity-keyed): the real YouTube IFrame API exposes
       // getVideoUrl() and getPlayerState() on the player. event.target
       // identifies the player, not an arbitrary historical video. The
@@ -48,6 +51,7 @@ beforeEach(() => {
       this.currentState = this.currentVideoId
         ? window.YT.PlayerState.PLAYING
         : window.YT.PlayerState.UNSTARTED
+      this._volume = 50
       this.getVideoUrl = () => {
         if (!this.currentVideoId) return ''
         return `https://www.youtube.com/watch?v=${this.currentVideoId}`
@@ -64,8 +68,10 @@ beforeEach(() => {
         this.currentState = window.YT.PlayerState.UNSTARTED
       })
       this.getCurrentTime = () => 0
-      this.getVolume = () => 50
-      this.setVolume = vi.fn()
+      this.getVolume = () => this._volume
+      this.setVolume = vi.fn((v) => { this._volume = v })
+      // Invoke onReady synchronously like the real API does in test mocks.
+      if (capturedOnReady) capturedOnReady()
     })
   }
 })
@@ -517,5 +523,178 @@ describe('NowPlaying — Sprint 004 host-player programmatic-load guard (generat
     await flushPromises()
     expect(mockSetStatus).not.toHaveBeenCalled()
     expect(mockSongEnded).not.toHaveBeenCalled()
+  })
+})
+
+// --- Volume slider and mute/unmute tests ---
+
+function mountNonHost(song) {
+  return mount(NowPlaying, {
+    props: {
+      currentSong: song,
+      status: 'playing',
+      isHost: false,
+      canControl: true,
+    },
+    global: {
+      stubs: { BaseButton: true, VoteButton: true }
+    }
+  })
+}
+
+describe('NowPlaying — Volume slider and mute/unmute controls', () => {
+  const song = { id: 'vol11111111', title: 'VolSong', url: 'https://youtu.be/vol11111111', added_by: 'Alice' }
+
+  it('does not render volume controls when canControl is false', async () => {
+    const wrapper = mount(NowPlaying, {
+      props: {
+        currentSong: song,
+        status: 'playing',
+        isHost: false,
+        canControl: false,
+      },
+      global: {
+        stubs: { BaseButton: true, VoteButton: true }
+      }
+    })
+    await nextTick()
+    expect(wrapper.find('.volume-controls').exists()).toBe(false)
+  })
+
+  it('renders volume slider and mute toggle when canControl is true', async () => {
+    const wrapper = mountHost(song)
+    await nextTick()
+    expect(wrapper.find('.volume-controls').exists()).toBe(true)
+    expect(wrapper.find('.volume-slider').exists()).toBe(true)
+    expect(wrapper.find('.mute-toggle').exists()).toBe(true)
+    expect(wrapper.find('.volume-label').exists()).toBe(true)
+  })
+
+  it('host: slider initializes volume from ytPlayer.getVolume()', async () => {
+    // The mock player returns 50 from getVolume().
+    const wrapper = mountHost(song)
+    await nextTick()
+    const slider = wrapper.find('.volume-slider')
+    expect(Number(slider.element.value)).toBe(50)
+    expect(wrapper.find('.volume-label').text()).toBe('50%')
+  })
+
+  it('host: moving slider calls setVolume with clamped values', async () => {
+    const wrapper = mountHost(song)
+    await nextTick()
+    const player = latestPlayer()
+    const slider = wrapper.find('.volume-slider')
+
+    // Move to 80
+    slider.element.value = '80'
+    await slider.trigger('input')
+    expect(player.setVolume).toHaveBeenCalledWith(80)
+    expect(wrapper.find('.volume-label').text()).toBe('80%')
+
+    // Move to 120 (should clamp to 100)
+    slider.element.value = '120'
+    await slider.trigger('input')
+    expect(player.setVolume).toHaveBeenCalledWith(100)
+    expect(wrapper.find('.volume-label').text()).toBe('100%')
+
+    // Move to -10 (should clamp to 0)
+    slider.element.value = '-10'
+    await slider.trigger('input')
+    expect(player.setVolume).toHaveBeenCalledWith(0)
+    expect(wrapper.find('.volume-label').text()).toBe('0%')
+  })
+
+  it('host: mute stores previous non-zero volume and restores on unmute', async () => {
+    const wrapper = mountHost(song)
+    await nextTick()
+    const player = latestPlayer()
+    const slider = wrapper.find('.volume-slider')
+
+    // Set volume to 70 first
+    slider.element.value = '70'
+    await slider.trigger('input')
+    expect(player.setVolume).toHaveBeenCalledWith(70)
+
+    // Click mute
+    const muteBtn = wrapper.find('.mute-toggle')
+    await muteBtn.trigger('click')
+    expect(player.setVolume).toHaveBeenCalledWith(0)
+    expect(Number(slider.element.value)).toBe(0)
+    expect(muteBtn.classes()).toContain('muted')
+
+    // Click unmute — should restore to 70
+    await muteBtn.trigger('click')
+    expect(player.setVolume).toHaveBeenCalledWith(70)
+    expect(Number(slider.element.value)).toBe(70)
+    expect(muteBtn.classes()).not.toContain('muted')
+  })
+
+  it('host: unmute at volume 0 restores previous non-zero volume (default 50)', async () => {
+    const wrapper = mountHost(song)
+    await nextTick()
+    const player = latestPlayer()
+    const slider = wrapper.find('.volume-slider')
+
+    // Volume is 50 from init. Click mute.
+    const muteBtn = wrapper.find('.mute-toggle')
+    await muteBtn.trigger('click')
+    expect(player.setVolume).toHaveBeenCalledWith(0)
+
+    // Click unmute — should restore to 50
+    await muteBtn.trigger('click')
+    expect(player.setVolume).toHaveBeenCalledWith(50)
+    expect(Number(slider.element.value)).toBe(50)
+  })
+
+  it('non-host: slider drag does not call api.changeVolume on input events', async () => {
+    const { api } = await import('../../../services/api')
+    const wrapper = mountNonHost(song)
+    await nextTick()
+    const slider = wrapper.find('.volume-slider')
+
+    // Dragging the slider (input events only)
+    slider.element.value = '60'
+    await slider.trigger('input')
+    slider.element.value = '70'
+    await slider.trigger('input')
+    slider.element.value = '80'
+    await slider.trigger('input')
+
+    // No API calls during drag (only on commit/change)
+    expect(api.changeVolume).not.toHaveBeenCalled()
+  })
+
+  it('non-host: slider commit sends throttled direction commands', async () => {
+    const { api } = await import('../../../services/api')
+    api.changeVolume.mockClear()
+    const wrapper = mountNonHost(song)
+    await nextTick()
+    const slider = wrapper.find('.volume-slider')
+
+    // Move slider from 50 to 80 (diff = 30, steps = 3 up)
+    slider.element.value = '80'
+    await slider.trigger('change')
+
+    // Wait for throttle
+    await vi.advanceTimersByTimeAsync(300)
+    await flushPromises()
+
+    expect(api.changeVolume).toHaveBeenCalledTimes(3)
+    expect(api.changeVolume).toHaveBeenCalledWith('up')
+  })
+
+  it('WebSocket volume_changed still updates host player volume', async () => {
+    const wrapper = mountHost(song)
+    await nextTick()
+    const player = latestPlayer()
+
+    // Simulate a WebSocket volume_changed event (up)
+    globalStore.handleVolumeChange('up')
+    await nextTick()
+
+    // Player volume was 50, up by 10 = 60
+    expect(player.setVolume).toHaveBeenCalledWith(60)
+    // localVolume should also update
+    expect(wrapper.find('.volume-label').text()).toBe('60%')
   })
 })

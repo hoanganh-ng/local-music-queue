@@ -22,12 +22,36 @@
 
         <!-- Volume Controls next to artwork -->
         <div v-if="canControl" class="volume-controls">
-          <BaseButton variant="secondary" @click="handleVolumeUp" title="Volume Up" aria-label="Volume up">
-            Vol +
-          </BaseButton>
-          <BaseButton variant="secondary" @click="handleVolumeDown" title="Volume Down" aria-label="Volume down">
-            Vol -
-          </BaseButton>
+          <button
+            class="mute-toggle"
+            :class="{ muted: isMuted }"
+            :aria-label="isMuted ? 'Unmute' : 'Mute'"
+            :title="isMuted ? 'Unmute' : 'Mute'"
+            @click="toggleMute"
+          >
+            <svg v-if="isMuted || localVolume === 0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+              <path d="M3.63 3.63a.996.996 0 000 1.41L7.29 8.7 7 9H4c-.55 0-1 .45-1 1v4c0 .55.45 1 1 1h3l3.29 3.29c.63.63 1.71.18 1.71-.71v-4.17l4.18 4.18c-.49.37-1.02.68-1.6.91-.36.15-.58.53-.58.92 0 .72.73 1.18 1.39.91.8-.33 1.55-.77 2.22-1.31l1.34 1.34a.996.996 0 101.41-1.41L5.05 3.63c-.39-.39-1.02-.39-1.42 0z"/>
+            </svg>
+            <svg v-else-if="localVolume < 50" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+              <path d="M18.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM5 9v6h4l5 5V4L9 9H5z"/>
+            </svg>
+            <svg v-else xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+              <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+            </svg>
+          </button>
+          <div class="slider-group">
+            <input
+              type="range"
+              min="0"
+              max="100"
+              :value="localVolume"
+              class="volume-slider"
+              aria-label="Volume"
+              @input="handleSliderInput"
+              @change="handleSliderCommit"
+            />
+            <span class="volume-label">{{ localVolume }}%</span>
+          </div>
         </div>
       </div>
 
@@ -97,6 +121,19 @@ const props = defineProps({
 const emit = defineEmits(['toggle-playback', 'skip', 'song-end'])
 
 const currentUser = computed(() => globalStore.currentUser)
+
+// --- Volume state ---
+const localVolume = ref(50)
+const previousNonZeroVolume = ref(50)
+const isMuted = ref(false)
+// For non-host remote: track last assumed volume to compute deltas.
+let lastAssumedRemoteVolume = 50
+let remoteThrottleTimer = null
+const REMOTE_THROTTLE_MS = 200
+
+function clampVolume(v) {
+  return Math.max(0, Math.min(100, Math.round(v)))
+}
 
 // The iframe player instance
 let ytPlayer = null
@@ -176,6 +213,8 @@ onUnmounted(() => {
   if (isUpdatingFromPropResetTimer) clearTimeout(isUpdatingFromPropResetTimer)
   isUpdatingFromPropResetTimer = null
   isUpdatingFromProp.value = false
+  if (remoteThrottleTimer) clearTimeout(remoteThrottleTimer)
+  remoteThrottleTimer = null
   // Hard kill-switch: any in-flight YT callback must be a no-op.
   isUnmounted.value = true
   // Invalidate any in-flight load callbacks and clear the settled marker so
@@ -184,6 +223,16 @@ onUnmounted(() => {
   settledGeneration++
   expectedVideoId.value = null
 })
+
+function onPlayerReady() {
+  // Initialize local volume from the real YouTube iframe player.
+  const v = readHostVolume()
+  if (v !== null) {
+    localVolume.value = v
+    if (v > 0) previousNonZeroVolume.value = v
+    lastAssumedRemoteVolume = v
+  }
+}
 
 function initPlayer() {
   // Sprint 004 (identity-keyed): seed expectedVideoId BEFORE constructing
@@ -200,6 +249,7 @@ function initPlayer() {
       'disablekb': 1
     },
     events: {
+      'onReady': onPlayerReady,
       'onStateChange': onPlayerStateChange
     }
   })
@@ -388,30 +438,115 @@ async function handlePrev() {
   }
 }
 
-async function handleVolumeUp() {
-  if (props.isHost && ytPlayer && ytPlayer.getVolume) {
-    const currentVolume = ytPlayer.getVolume()
-    const newVolume = Math.min(100, currentVolume + 10)
-    ytPlayer.setVolume(newVolume)
+function setHostVolume(vol) {
+  if (ytPlayer && typeof ytPlayer.setVolume === 'function') {
+    ytPlayer.setVolume(vol)
+  }
+}
+
+function readHostVolume() {
+  if (ytPlayer && typeof ytPlayer.getVolume === 'function') {
+    try { return clampVolume(ytPlayer.getVolume()) } catch (_) { /* ignore */ }
+  }
+  return null
+}
+
+async function sendRemoteVolumeDelta(direction) {
+  try {
+    await api.changeVolume(direction)
+  } catch (err) {
+    console.error('Volume change failed:', err)
+  }
+}
+
+function handleSliderInput(event) {
+  const val = clampVolume(Number(event.target.value))
+  localVolume.value = val
+  if (props.isHost) {
+    // Host: apply immediately to the YouTube iframe.
+    setHostVolume(val)
+    if (val > 0) {
+      isMuted.value = false
+      previousNonZeroVolume.value = val
+    }
+  }
+  // Non-host: only update the slider visually; commit on @change.
+}
+
+function handleSliderCommit(event) {
+  const val = clampVolume(Number(event.target.value))
+  localVolume.value = val
+  if (props.isHost) {
+    setHostVolume(val)
+    if (val > 0) {
+      isMuted.value = false
+      previousNonZeroVolume.value = val
+    }
   } else {
-    try {
-      await api.changeVolume('up')
-    } catch (err) {
-      console.error('Volume up failed:', err)
+    // Non-host: send the minimum number of ±10 direction commands to
+    // approximate the desired volume through the existing contract.
+    const diff = val - lastAssumedRemoteVolume
+    const steps = Math.round(diff / 10)
+    if (steps !== 0) {
+      const direction = steps > 0 ? 'up' : 'down'
+      const count = Math.abs(steps)
+      // Throttle: if a burst is already scheduled, coalesce into it.
+      if (remoteThrottleTimer) {
+        clearTimeout(remoteThrottleTimer)
+        remoteThrottleTimer = null
+      }
+      remoteThrottleTimer = setTimeout(async () => {
+        remoteThrottleTimer = null
+        for (let i = 0; i < count; i++) {
+          await sendRemoteVolumeDelta(direction)
+        }
+        lastAssumedRemoteVolume = val
+      }, REMOTE_THROTTLE_MS)
     }
   }
 }
 
-async function handleVolumeDown() {
-  if (props.isHost && ytPlayer && ytPlayer.getVolume) {
-    const currentVolume = ytPlayer.getVolume()
-    const newVolume = Math.max(0, currentVolume - 10)
-    ytPlayer.setVolume(newVolume)
+function toggleMute() {
+  if (props.isHost) {
+    if (isMuted.value || localVolume.value === 0) {
+      // Unmute: restore previous non-zero volume.
+      const restore = previousNonZeroVolume.value > 0 ? previousNonZeroVolume.value : 50
+      localVolume.value = restore
+      setHostVolume(restore)
+      isMuted.value = false
+    } else {
+      // Mute: remember current volume, set to 0.
+      previousNonZeroVolume.value = localVolume.value > 0 ? localVolume.value : previousNonZeroVolume.value
+      localVolume.value = 0
+      setHostVolume(0)
+      isMuted.value = true
+    }
   } else {
-    try {
-      await api.changeVolume('down')
-    } catch (err) {
-      console.error('Volume down failed:', err)
+    // Non-host: approximate mute/unmute through direction commands.
+    // This is best-effort; exact remote mute is not supported by the
+    // direction-only contract.
+    if (isMuted.value || localVolume.value === 0) {
+      const restore = previousNonZeroVolume.value > 0 ? previousNonZeroVolume.value : 50
+      const diff = restore - lastAssumedRemoteVolume
+      const steps = Math.round(diff / 10)
+      if (steps !== 0) {
+        const direction = steps > 0 ? 'up' : 'down'
+        for (let i = 0; i < Math.abs(steps); i++) {
+          sendRemoteVolumeDelta(direction)
+        }
+        lastAssumedRemoteVolume = restore
+      }
+      localVolume.value = restore
+      isMuted.value = false
+    } else {
+      previousNonZeroVolume.value = localVolume.value
+      const steps = Math.round(localVolume.value / 10)
+      for (let i = 0; i < steps; i++) {
+        sendRemoteVolumeDelta('down')
+      }
+      lastAssumedRemoteVolume = 0
+      localVolume.value = 0
+      isMuted.value = true
     }
   }
 }
@@ -510,10 +645,21 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
       const currentVolume = ytPlayer.getVolume()
       const newVolume = Math.min(100, currentVolume + 10)
       ytPlayer.setVolume(newVolume)
+      localVolume.value = newVolume
+      if (newVolume > 0) {
+        isMuted.value = false
+        previousNonZeroVolume.value = newVolume
+      }
     } else if (direction === 'down') {
       const currentVolume = ytPlayer.getVolume()
       const newVolume = Math.max(0, currentVolume - 10)
       ytPlayer.setVolume(newVolume)
+      localVolume.value = newVolume
+      if (newVolume === 0) {
+        isMuted.value = true
+      } else {
+        previousNonZeroVolume.value = newVolume
+      }
     }
   }
 })
@@ -657,8 +803,98 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
 
 .volume-controls {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(0, 212, 255, 0.2);
+}
+
+.mute-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent-hover);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+  flex-shrink: 0;
+}
+
+.mute-toggle:hover {
+  background: rgba(0, 212, 255, 0.12);
+}
+
+.mute-toggle.muted {
+  color: var(--text-muted);
+}
+
+.mute-toggle svg {
+  pointer-events: none;
+}
+
+.slider-group {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  min-width: 60px;
+  max-width: 120px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(0, 212, 255, 0.25);
+  outline: none;
+  cursor: pointer;
+}
+
+.volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid rgba(0, 255, 136, 0.6);
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(0, 255, 136, 0.4);
+}
+
+.volume-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid rgba(0, 255, 136, 0.6);
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(0, 255, 136, 0.4);
+}
+
+.volume-slider:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.volume-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  min-width: 3ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
 }
 
 .empty-state {
