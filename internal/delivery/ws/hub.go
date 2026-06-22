@@ -213,8 +213,8 @@ func (h *Hub) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	go h.readPump(conn)
 }
 
-// readPump reads messages from the client to detect disconnections.
-// It doesn't process messages, just detects when the connection closes.
+// readPump reads messages from the client to detect disconnections and
+// handles client-initiated requests (e.g. full-sync recovery on sequence gap).
 func (h *Hub) readPump(conn *websocket.Conn) {
 	defer func() {
 		h.unregister <- conn
@@ -228,10 +228,32 @@ func (h *Hub) readPump(conn *websocket.Conn) {
 	})
 
 	for {
-		_, _, err := conn.ReadMessage()
+		_, msgBytes, err := conn.ReadMessage()
 		if err != nil {
 			// Connection closed or error occurred
 			break
+		}
+
+		var clientMsg ClientMessage
+		if err := json.Unmarshal(msgBytes, &clientMsg); err != nil {
+			log.Printf("Invalid client message: %v", err)
+			continue
+		}
+
+		switch clientMsg.Type {
+		case ClientMsgRequestFullSync:
+			if h.getQueueState != nil {
+				state, err := h.getQueueState(context.Background())
+				if err != nil {
+					log.Printf("Failed to get queue state for full sync recovery: %v", err)
+					continue
+				}
+				if err := h.SendFullSync(conn, state); err != nil {
+					log.Printf("Failed to send full sync recovery to client: %v", err)
+				}
+			}
+		default:
+			log.Printf("Unknown client message type: %s", clientMsg.Type)
 		}
 	}
 }

@@ -146,8 +146,22 @@ type AutoQueueAddedData struct {
 	Elapsed         int                   `json:"elapsed"`
 }
 
+// Client-to-server message type constants.
+const (
+	// ClientMsgRequestFullSync is sent by a client that detected a sequence
+	// gap and needs a fresh authoritative snapshot.
+	ClientMsgRequestFullSync = "request_full_sync"
+)
+
 // AutoQueueConfigChangedData contains the updated auto-queue configuration.
 type AutoQueueConfigChangedData struct {
 	Enabled  bool   `json:"enabled"`
 	Strategy string `json:"strategy"`
+}
+
+// ClientMessage is the envelope used to decode any message arriving from a
+// WebSocket client. Only the Type field is required; additional fields are
+// message-type-specific and decoded separately.
+type ClientMessage struct {
+	Type string `json:"type"`
 }

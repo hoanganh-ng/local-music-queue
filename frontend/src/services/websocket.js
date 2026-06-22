@@ -58,6 +58,7 @@ class WebSocketClient {
     this.reconnectTimer = null
     this.isConnecting = false
     this.lastSeqNum = 0
+    this.pendingFullSync = false
     this.callbacks = {
       songAdded: [],
       voteEvent: []
@@ -116,6 +117,7 @@ class WebSocketClient {
     this.ws.onopen = () => {
       console.log('WebSocket connected')
       this.isConnecting = false
+      this.pendingFullSync = false
       globalStore.setConnectionStatus('connected')
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer)
@@ -136,6 +138,7 @@ class WebSocketClient {
       console.log('WebSocket disconnected. Attempting to reconnect in 3 seconds...')
       this.ws = null
       this.isConnecting = false
+      this.pendingFullSync = false
       globalStore.setConnectionStatus('reconnecting')
       this.scheduleReconnect()
     }
@@ -153,13 +156,14 @@ class WebSocketClient {
       // Detect gap (missed messages)
       if (this.lastSeqNum > 0 && message.seq_num > this.lastSeqNum + 1) {
         console.warn(`Sequence gap detected: ${this.lastSeqNum} -> ${message.seq_num}`)
-        // For now, just log. Could request full sync here.
+        this.requestFullSync()
       }
       this.lastSeqNum = message.seq_num
     }
 
     switch (message.type) {
       case 'full_sync':
+        this.pendingFullSync = false
         globalStore.updateQueueState(message.data.state)
         break
       case 'user_joined':
@@ -297,6 +301,16 @@ class WebSocketClient {
         this.connect()
       }, 3000)
     }
+  }
+
+  // requestFullSync sends a request_full_sync message to the backend to
+  // recover from a detected sequence gap. A pending guard prevents repeated
+  // gaps from spamming requests until the next full_sync arrives.
+  requestFullSync() {
+    if (this.pendingFullSync) return
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    this.pendingFullSync = true
+    this.ws.send(JSON.stringify({ type: 'request_full_sync' }))
   }
 
   disconnect() {

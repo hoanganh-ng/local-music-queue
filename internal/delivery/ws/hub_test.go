@@ -289,3 +289,107 @@ func TestHub_Broadcast_MarshalError(t *testing.T) {
 		t.Errorf("expected 1 client to remain after marshal error, got %d", clientCount)
 	}
 }
+
+func setupTestHubWithState(t *testing.T) (*Hub, *httptest.Server) {
+	t.Helper()
+	fakeQueue := &entity.Queue{
+		Songs:        []entity.Song{{ID: "abc", Title: "Test Song"}},
+		CurrentIndex: 0,
+		Status:       entity.StatusPlaying,
+		Elapsed:      5,
+	}
+	getState := func(_ context.Context) (*entity.Queue, error) {
+		return fakeQueue, nil
+	}
+	hub := NewHub(getState)
+	go hub.Run()
+
+	server := httptest.NewServer(http.HandlerFunc(hub.RegisterHandler))
+	return hub, server
+}
+
+func TestHub_RequestFullSync_SendsOnlyToRequester(t *testing.T) {
+	_, server := setupTestHubWithState(t)
+	defer server.Close()
+
+	// Connect two clients.
+	requester := dialWS(t, server)
+	defer requester.Close()
+	bystander := dialWS(t, server)
+	defer bystander.Close()
+
+	// Both clients receive an initial full_sync on connect. Drain them.
+	requester.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err := requester.ReadMessage()
+	if err != nil {
+		t.Fatalf("requester: failed to read initial sync: %v", err)
+	}
+	bystander.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err = bystander.ReadMessage()
+	if err != nil {
+		t.Fatalf("bystander: failed to read initial sync: %v", err)
+	}
+
+	// Wait for registration to complete.
+	time.Sleep(50 * time.Millisecond)
+
+	// Requester sends request_full_sync.
+	reqMsg := `{"type":"request_full_sync"}`
+	if err := requester.WriteMessage(websocket.TextMessage, []byte(reqMsg)); err != nil {
+		t.Fatalf("failed to send request_full_sync: %v", err)
+	}
+
+	// Requester should receive a full_sync response.
+	requester.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := requester.ReadMessage()
+	if err != nil {
+		t.Fatalf("requester: failed to read full_sync response: %v", err)
+	}
+	var received struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &received); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if received.Type != EventFullSync {
+		t.Errorf("requester: expected type %q, got %q", EventFullSync, received.Type)
+	}
+
+	// Bystander should NOT receive any message within a short window.
+	bystander.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	_, unexpected, err := bystander.ReadMessage()
+	if err == nil {
+		var msg struct {
+			Type string `json:"type"`
+		}
+		json.Unmarshal(unexpected, &msg)
+		t.Errorf("bystander: expected no message, got type %q", msg.Type)
+	}
+}
+
+func TestHub_RequestFullSync_WithNilGetState(t *testing.T) {
+	// Hub has no getQueueState; request_full_sync should not crash or close
+	// the connection.
+	hub, server := setupTestHub(t)
+	defer server.Close()
+
+	conn := dialWS(t, server)
+	defer conn.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	reqMsg := `{"type":"request_full_sync"}`
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(reqMsg)); err != nil {
+		t.Fatalf("failed to send request_full_sync: %v", err)
+	}
+
+	// Give readPump time to process the message.
+	time.Sleep(100 * time.Millisecond)
+
+	// Hub should still have the client connected.
+	hub.mu.Lock()
+	clientCount := len(hub.clients)
+	hub.mu.Unlock()
+	if clientCount != 1 {
+		t.Errorf("expected 1 client to remain, got %d", clientCount)
+	}
+}
