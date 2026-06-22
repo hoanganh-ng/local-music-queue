@@ -65,10 +65,10 @@ describe('DashboardView', () => {
     vi.clearAllMocks()
   })
 
-  it('logout clears sessionStorage, globalStore user, and navigates to Auth', async () => {
+  it('logout clears localStorage session, globalStore user, and navigates to Auth', async () => {
     globalStore.setUser({ id: 42, role: 'host', display_name: 'HostUser' })
-    sessionStorage.setItem('lmq_session_token', 'active-token')
-    sessionStorage.setItem('lmq_session_expires_at', 'expires-at')
+    localStorage.setItem('lmq_session_token', 'active-token')
+    localStorage.setItem('lmq_session_expires_at', 'expires-at')
 
     const wrapper = shallowMount(DashboardView)
     const logoutBtn = wrapper.find('.logout-btn')
@@ -76,8 +76,8 @@ describe('DashboardView', () => {
 
     await logoutBtn.trigger('click')
 
-    expect(sessionStorage.getItem('lmq_session_token')).toBeNull()
-    expect(sessionStorage.getItem('lmq_session_expires_at')).toBeNull()
+    expect(localStorage.getItem('lmq_session_token')).toBeNull()
+    expect(localStorage.getItem('lmq_session_expires_at')).toBeNull()
     expect(globalStore.currentUser).toBeNull()
     expect(wsClient.disconnect).toHaveBeenCalled()
     expect(mockPush).toHaveBeenCalledWith({ name: 'Auth' })

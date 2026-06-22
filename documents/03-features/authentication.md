@@ -28,7 +28,7 @@ Local Music Queue uses Google OAuth 2.0 for secure, email-based authentication w
 - ✅ Email-based role assignment (Host/Admin/Guest)
 - ✅ Email domain restriction (`@urekamedia.vn` by default)
 - ✅ User profile pictures from Google accounts
-- ✅ Session persistence in localStorage
+- ✅ Session persistence in localStorage (user profile under `lmq_user_session`; session token under `lmq_session_token` and `lmq_session_expires_at`)
 - ✅ Automatic token refresh
 - ✅ Role-based UI rendering
 
@@ -332,30 +332,68 @@ if !domainAllowed {
 
 ### Frontend Session Storage
 
+The frontend persists two independent keys in `localStorage` so a returning tab can restore both the user profile and the active session token without re-authenticating.
+
+**File**: `frontend/src/services/session.js`
+
+```javascript
+// Persist session token + expiry to localStorage
+const TOKEN_KEY = 'lmq_session_token'
+const EXPIRY_KEY = 'lmq_session_expires_at'
+
+export const sessionHelper = {
+  saveSession(token, expiresAt) {
+    if (token) localStorage.setItem(TOKEN_KEY, token)
+    if (expiresAt) localStorage.setItem(EXPIRY_KEY, expiresAt)
+  },
+  getToken() { return localStorage.getItem(TOKEN_KEY) },
+  getExpiresAt() { return localStorage.getItem(EXPIRY_KEY) },
+  clearSession() {
+    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(EXPIRY_KEY)
+  },
+  isValid() {
+    const token = this.getToken()
+    const expiresAtStr = this.getExpiresAt()
+    if (!token || !expiresAtStr) return false
+    return new Date(expiresAtStr) > new Date()
+  }
+}
+```
+
 **File**: `frontend/src/store/index.js`
 
 ```javascript
-// Store user in localStorage
-function setUser(user) {
-  state.user = user
-  localStorage.setItem('user', JSON.stringify(user))
-}
+// User profile persisted separately, WITHOUT the session token
+const STORE_KEY = 'lmq_user_session'
 
-// Load user on app start
-function loadSession() {
-  const stored = localStorage.getItem('user')
-  if (stored) {
-    state.user = JSON.parse(stored)
-  }
-}
+export const globalStore = reactive({
+  currentUser: null,
+  setUser(user) { this.currentUser = user },
+  clearUser() { this.currentUser = null }
+})
 
-// Clear session on logout
-function logout() {
-  state.user = null
-  localStorage.removeItem('user')
-  router.push('/auth')
-}
+watch(
+  () => globalStore.currentUser,
+  (newUser) => {
+    if (newUser) localStorage.setItem(STORE_KEY, JSON.stringify(newUser))
+    else localStorage.removeItem(STORE_KEY)
+  },
+  { deep: true }
+)
 ```
+
+**File**: `frontend/src/views/AuthView.vue`
+
+```javascript
+const responseData = await api.loginWithGoogle(response.credential)
+const { session_token, session_expires_at, ...user } = responseData
+sessionHelper.saveSession(session_token, session_expires_at)  // localStorage
+globalStore.setUser(user)                                     // persisted without token
+router.push({ name: 'Dashboard' })
+```
+
+The route guard in `frontend/src/router/index.js` admits the request only when `globalStore.currentUser` AND `sessionHelper.isValid()` are both true, so a restored tab passes automatically while an expired or missing token still bounces the visitor to `/auth`. On rejection the guard evicts both the stale token (via `sessionHelper.clearSession()`) and the user profile (via `globalStore.clearUser()`), so storage self-heals.
 
 ### Backend Session (Stateless)
 

@@ -21,6 +21,7 @@ describe('AuthView', () => {
   beforeEach(() => {
     localStorage.clear()
     sessionStorage.clear()
+    sessionHelper.clearSession()
     globalStore.clearUser()
     vi.restoreAllMocks()
   })
@@ -45,9 +46,11 @@ describe('AuthView', () => {
     // Simulate Google callback
     await window.handleGoogleCallback({ credential: 'google-oauth-credential-token' })
 
-    // Verify sessionStorage stores session info
-    expect(sessionStorage.getItem('lmq_session_token')).toBe('extracted-session-token')
-    expect(sessionStorage.getItem('lmq_session_expires_at')).toBe('2026-06-19T23:59:59Z')
+    // Verify localStorage stores session info (persistent across tab reopen)
+    expect(localStorage.getItem('lmq_session_token')).toBe('extracted-session-token')
+    expect(localStorage.getItem('lmq_session_expires_at')).toBe('2026-06-19T23:59:59Z')
+    // sessionStorage must not be used for tokens
+    expect(sessionStorage.getItem('lmq_session_token')).toBeNull()
 
     // Verify globalStore does not have session fields
     expect(globalStore.currentUser.session_token).toBeUndefined()

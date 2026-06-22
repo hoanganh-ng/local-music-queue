@@ -4,7 +4,9 @@ import { sessionHelper } from '../session'
 
 describe('API Service', () => {
   beforeEach(() => {
+    localStorage.clear()
     sessionStorage.clear()
+    sessionHelper.clearSession()
     vi.restoreAllMocks()
   })
 

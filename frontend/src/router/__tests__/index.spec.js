@@ -1,39 +1,67 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import router from '../index'
 import { globalStore } from '../../store'
+import { sessionHelper } from '../../services/session'
 
 describe('Router Guard', () => {
   beforeEach(() => {
     localStorage.clear()
     sessionStorage.clear()
+    sessionHelper.clearSession()
     globalStore.clearUser()
     vi.restoreAllMocks()
   })
 
-  it('a legacy localStorage user without a session is rejected by the route guard', async () => {
-    // 1. Set user but no session
+  it('rejects a restored user with no session token (clears user, redirects to Auth)', async () => {
+    // Simulate: previous tab restored user, but token is missing
     globalStore.setUser({ id: 42, role: 'guest' })
-    sessionStorage.clear()
+    localStorage.removeItem('lmq_session_token')
+    localStorage.removeItem('lmq_session_expires_at')
 
-    // 2. Navigate to Dashboard (requires auth)
     await router.push('/')
 
-    // 3. Expect legacy user to be cleared
     expect(globalStore.currentUser).toBeNull()
-    
-    // 4. Expect to be redirected to Auth
     expect(router.currentRoute.value.name).toBe('Auth')
   })
 
-  it('allows authenticated user with valid session to proceed to Dashboard', async () => {
+  it('rejects a restored user with an expired token', async () => {
     globalStore.setUser({ id: 42, role: 'guest' })
-    const futureDate = new Date(Date.now() + 1000 * 60 * 60)
-    sessionStorage.setItem('lmq_session_token', 'valid-token')
-    sessionStorage.setItem('lmq_session_expires_at', futureDate.toISOString())
+    const past = new Date(Date.now() - 60_000).toISOString()
+    sessionHelper.saveSession('expired-token', past)
+
+    await router.push('/')
+
+    expect(globalStore.currentUser).toBeNull()
+    expect(router.currentRoute.value.name).toBe('Auth')
+    // Stale token must also be evicted from localStorage
+    expect(localStorage.getItem('lmq_session_token')).toBeNull()
+  })
+
+  it('allows a restored user with a valid persisted token to proceed to Dashboard', async () => {
+    globalStore.setUser({ id: 42, role: 'guest' })
+    const future = new Date(Date.now() + 60 * 60_000).toISOString()
+    sessionHelper.saveSession('valid-token', future)
 
     await router.push('/')
 
     expect(globalStore.currentUser).not.toBeNull()
+    expect(globalStore.currentUser.id).toBe(42)
     expect(router.currentRoute.value.name).toBe('Dashboard')
+  })
+
+  it('redirects an authenticated user away from /auth back to Dashboard', async () => {
+    globalStore.setUser({ id: 42, role: 'guest' })
+    const future = new Date(Date.now() + 60 * 60_000).toISOString()
+    sessionHelper.saveSession('valid-token', future)
+
+    await router.push('/auth')
+
+    expect(router.currentRoute.value.name).toBe('Dashboard')
+  })
+
+  it('allows an unauthenticated visitor to reach /auth', async () => {
+    await router.push('/auth')
+
+    expect(router.currentRoute.value.name).toBe('Auth')
   })
 })

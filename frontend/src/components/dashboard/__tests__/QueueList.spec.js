@@ -189,7 +189,7 @@ describe('QueueList', () => {
 
   it('401 clears session/user and navigates to Auth', async () => {
     globalStore.setUser({ id: 10, role: 'guest', display_name: 'Guest1' })
-    sessionStorage.setItem('lmq_session_token', 'test-token')
+    localStorage.setItem('lmq_session_token', 'test-token')
 
     const mockQueue = [
       { id: 101, title: 'Song 1', added_by_id: 10, added_by: 'Guest1' }
@@ -209,13 +209,13 @@ describe('QueueList', () => {
     await wrapper.find('.remove-btn').trigger('click')
 
     expect(globalStore.currentUser).toBeNull()
-    expect(sessionStorage.getItem('lmq_session_token')).toBeNull()
+    expect(localStorage.getItem('lmq_session_token')).toBeNull()
     expect(mockPush).toHaveBeenCalledWith({ name: 'Auth' })
   })
 
   it('403 shows permission feedback without clearing the session', async () => {
     globalStore.setUser({ id: 10, role: 'guest', display_name: 'Guest1' })
-    sessionStorage.setItem('lmq_session_token', 'test-token')
+    localStorage.setItem('lmq_session_token', 'test-token')
 
     const mockQueue = [
       { id: 101, title: 'Song 1', added_by_id: 10, added_by: 'Guest1' }
@@ -236,7 +236,7 @@ describe('QueueList', () => {
 
     expect(mockToastError).toHaveBeenCalledWith('Permission denied: Forbidden')
     expect(globalStore.currentUser).not.toBeNull()
-    expect(sessionStorage.getItem('lmq_session_token')).toBe('test-token')
+    expect(localStorage.getItem('lmq_session_token')).toBe('test-token')
     expect(mockPush).not.toHaveBeenCalled()
   })
 

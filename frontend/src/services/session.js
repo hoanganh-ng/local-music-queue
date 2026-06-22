@@ -4,24 +4,24 @@ const EXPIRY_KEY = 'lmq_session_expires_at'
 export const sessionHelper = {
   saveSession(token, expiresAt) {
     if (token) {
-      sessionStorage.setItem(TOKEN_KEY, token)
+      localStorage.setItem(TOKEN_KEY, token)
     }
     if (expiresAt) {
-      sessionStorage.setItem(EXPIRY_KEY, expiresAt)
+      localStorage.setItem(EXPIRY_KEY, expiresAt)
     }
   },
 
   getToken() {
-    return sessionStorage.getItem(TOKEN_KEY)
+    return localStorage.getItem(TOKEN_KEY)
   },
 
   getExpiresAt() {
-    return sessionStorage.getItem(EXPIRY_KEY)
+    return localStorage.getItem(EXPIRY_KEY)
   },
 
   clearSession() {
-    sessionStorage.removeItem(TOKEN_KEY)
-    sessionStorage.removeItem(EXPIRY_KEY)
+    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(EXPIRY_KEY)
   },
 
   isValid() {

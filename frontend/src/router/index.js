@@ -26,8 +26,9 @@ router.beforeEach((to, from, next) => {
   const hasValidSession = sessionHelper.isValid()
   const isAuthenticated = hasUser && hasValidSession
 
-  // Clear legacy localStorage user without valid session
+  // Clear stale localStorage user without valid session
   if (hasUser && !hasValidSession) {
+    sessionHelper.clearSession()
     globalStore.clearUser()
   }
 
