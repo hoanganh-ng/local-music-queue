@@ -118,6 +118,7 @@ class WebSocketClient {
       console.log('WebSocket connected')
       this.isConnecting = false
       this.pendingFullSync = false
+      this.lastSeqNum = 0
       globalStore.setConnectionStatus('connected')
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer)
@@ -164,6 +165,12 @@ class WebSocketClient {
     switch (message.type) {
       case 'full_sync':
         this.pendingFullSync = false
+        // Reset seq tracking so the first delta after a (re)connect full_sync
+        // does not trigger a false gap. The next broadcast's seq_num will be
+        // full_sync.seq_num + 1; setting lastSeqNum = 0 means the condition
+        // (seq > 0+1) won't fire for that first delta because the guard
+        // (lastSeqNum > 0) is false until a delta is actually processed.
+        this.lastSeqNum = 0
         globalStore.updateQueueState(message.data.state)
         break
       case 'user_joined':

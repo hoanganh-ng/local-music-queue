@@ -37,6 +37,17 @@ type PriorityChecker interface {
 type ClientState struct {
 	conn        *websocket.Conn
 	connectedAt time.Time
+	// writeMu serialises all WriteMessage calls for this connection so that
+	// the readPump (request_full_sync) cannot write concurrently with hub
+	// broadcasts or pings.
+	writeMu sync.Mutex
+}
+
+// writeMessage acquires the per-connection write lock before sending.
+func (cs *ClientState) writeMessage(msgType int, data []byte) error {
+	cs.writeMu.Lock()
+	defer cs.writeMu.Unlock()
+	return cs.conn.WriteMessage(msgType, data)
 }
 
 // BroadcastMessage wraps messages with sequence numbers
@@ -107,15 +118,24 @@ func (h *Hub) Run() {
 				continue
 			}
 
-			for client := range h.clients {
-				err := client.WriteMessage(websocket.TextMessage, data)
-				if err != nil {
-					log.Printf("Error writing message to client: %v", err)
-					client.Close()
-					delete(h.clients, client)
-				}
+			// Snapshot the client set under the lock so we can write
+			// without holding h.mu (avoids deadlock with readPump
+			// calling SendFullSync which also needs h.mu briefly).
+			clientStates := make([]*ClientState, 0, len(h.clients))
+			for _, cs := range h.clients {
+				clientStates = append(clientStates, cs)
 			}
 			h.mu.Unlock()
+
+			for _, cs := range clientStates {
+				if err := cs.writeMessage(websocket.TextMessage, data); err != nil {
+					log.Printf("Error writing message to client: %v", err)
+					cs.conn.Close()
+					h.mu.Lock()
+					delete(h.clients, cs.conn)
+					h.mu.Unlock()
+				}
+			}
 
 		case <-ticker.C:
 			if h.voteInteractor != nil {
@@ -134,15 +154,21 @@ func (h *Hub) Run() {
 
 		case <-pingTicker.C:
 			h.mu.Lock()
-			for client := range h.clients {
-				err := client.WriteMessage(websocket.PingMessage, nil)
-				if err != nil {
-					log.Printf("Error sending ping to client: %v", err)
-					client.Close()
-					delete(h.clients, client)
-				}
+			clientStates := make([]*ClientState, 0, len(h.clients))
+			for _, cs := range h.clients {
+				clientStates = append(clientStates, cs)
 			}
 			h.mu.Unlock()
+
+			for _, cs := range clientStates {
+				if err := cs.writeMessage(websocket.PingMessage, nil); err != nil {
+					log.Printf("Error sending ping to client: %v", err)
+					cs.conn.Close()
+					h.mu.Lock()
+					delete(h.clients, cs.conn)
+					h.mu.Unlock()
+				}
+			}
 		}
 	}
 }
@@ -282,11 +308,19 @@ func (h *Hub) SendFullSync(conn *websocket.Conn, state *entity.Queue) error {
 		SeqNum:    h.seqNum,
 		Timestamp: time.Now(),
 	}
+	// Look up ClientState to use per-connection write lock. When called
+	// from RegisterHandler before the client is added to h.clients, cs is
+	// nil and we fall back to a direct write (safe: no concurrent writers
+	// exist until readPump starts after h.register <- conn).
+	cs := h.clients[conn]
 	h.mu.Unlock()
 
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
+	}
+	if cs != nil {
+		return cs.writeMessage(websocket.TextMessage, data)
 	}
 	return conn.WriteMessage(websocket.TextMessage, data)
 }
@@ -300,11 +334,15 @@ func (h *Hub) sendToClient(conn *websocket.Conn, msgType string, data interface{
 		SeqNum:    h.seqNum,
 		Timestamp: time.Now(),
 	}
+	cs := h.clients[conn]
 	h.mu.Unlock()
 
 	msgData, err := json.Marshal(msg)
 	if err != nil {
 		return err
+	}
+	if cs != nil {
+		return cs.writeMessage(websocket.TextMessage, msgData)
 	}
 	return conn.WriteMessage(websocket.TextMessage, msgData)
 }

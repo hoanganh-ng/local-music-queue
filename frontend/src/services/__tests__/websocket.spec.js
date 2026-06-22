@@ -37,6 +37,10 @@ describe('WebSocketClient', () => {
     liveQueueState.current_song = null
     liveQueueState.elapsed = 0
     wsClient.callbacks.voteEvent = []
+    // Reset sequence-gap recovery state between tests.
+    wsClient.lastSeqNum = 0
+    wsClient.pendingFullSync = false
+    wsClient.ws = null
   })
 
   it('should handle queue_updated message', () => {
@@ -352,5 +356,76 @@ describe('WebSocketClient', () => {
     })
 
     expect(callback).not.toHaveBeenCalled()
+  })
+
+  // --- Sequence gap / full-sync recovery ---
+
+  function attachOpenSocket() {
+    const fakeWs = {
+      readyState: 1, // WebSocket.OPEN
+      send: vi.fn(),
+      close: vi.fn(),
+    }
+    wsClient.ws = fakeWs
+    return fakeWs
+  }
+
+  it('gap detection sends request_full_sync when socket is open', () => {
+    const fakeWs = attachOpenSocket()
+    // First message establishes lastSeqNum.
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 1 }, seq_num: 1 })
+    // Skip seq_num 2 → gap detected.
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 2 }, seq_num: 3 })
+
+    expect(fakeWs.send).toHaveBeenCalledTimes(1)
+    expect(fakeWs.send).toHaveBeenCalledWith(JSON.stringify({ type: 'request_full_sync' }))
+  })
+
+  it('repeated gaps while awaiting sync do not spam requests', () => {
+    const fakeWs = attachOpenSocket()
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 1 }, seq_num: 1 })
+    // Gap: seq 2 is missing, triggers request_full_sync.
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 3 }, seq_num: 3 })
+    // Another gap: seq 4 is missing, but pendingFullSync is still true.
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 5 }, seq_num: 5 })
+    // Yet another gap.
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 7 }, seq_num: 7 })
+
+    // Only one request_full_sync should have been sent.
+    expect(fakeWs.send).toHaveBeenCalledTimes(1)
+  })
+
+  it('receiving full_sync applies queue state and clears the pending guard', () => {
+    const fakeWs = attachOpenSocket()
+    // Simulate a gap → request sent, pendingFullSync = true.
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 1 }, seq_num: 1 })
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 3 }, seq_num: 3 })
+    expect(fakeWs.send).toHaveBeenCalledTimes(1)
+    expect(wsClient.pendingFullSync).toBe(true)
+
+    // Server responds with full_sync.
+    const state = { songs: [{ id: 'x', title: 'X' }], current_index: 0, status: 'playing', elapsed: 10 }
+    wsClient.handleMessage({ type: 'full_sync', data: { state }, seq_num: 3 })
+
+    expect(globalStore.updateQueueState).toHaveBeenCalledWith(state)
+    expect(wsClient.pendingFullSync).toBe(false)
+    // lastSeqNum should be reset so the next delta doesn't trigger a false gap.
+    expect(wsClient.lastSeqNum).toBe(0)
+
+    // A subsequent gap now triggers a new request.
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 4 }, seq_num: 2 })
+    // lastSeqNum was 0 after full_sync, so guard (lastSeqNum > 0) is false → no gap.
+    expect(fakeWs.send).toHaveBeenCalledTimes(1) // still 1, no new request
+  })
+
+  it('consecutive in-order seq_num messages do not request sync', () => {
+    const fakeWs = attachOpenSocket()
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 1 }, seq_num: 1 })
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 2 }, seq_num: 2 })
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 3 }, seq_num: 3 })
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 4 }, seq_num: 4 })
+
+    expect(fakeWs.send).not.toHaveBeenCalled()
+    expect(wsClient.pendingFullSync).toBe(false)
   })
 })

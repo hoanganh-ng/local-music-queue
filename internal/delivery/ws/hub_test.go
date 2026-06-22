@@ -393,3 +393,53 @@ func TestHub_RequestFullSync_WithNilGetState(t *testing.T) {
 		t.Errorf("expected 1 client to remain, got %d", clientCount)
 	}
 }
+
+func TestHub_MalformedAndUnknownMessages_DoNotBlockFullSync(t *testing.T) {
+	_, server := setupTestHubWithState(t)
+	defer server.Close()
+
+	conn := dialWS(t, server)
+	defer conn.Close()
+
+	// Drain the initial full_sync sent on connect.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("failed to read initial full_sync: %v", err)
+	}
+
+	// Wait for registration.
+	time.Sleep(50 * time.Millisecond)
+
+	// 1. Send a malformed (invalid JSON) message.
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{not json`)); err != nil {
+		t.Fatalf("failed to send malformed message: %v", err)
+	}
+
+	// 2. Send a message with an unknown type.
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"bogus_type"}`)); err != nil {
+		t.Fatalf("failed to send unknown-type message: %v", err)
+	}
+
+	// 3. Send a valid request_full_sync after the noise.
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"request_full_sync"}`)); err != nil {
+		t.Fatalf("failed to send request_full_sync: %v", err)
+	}
+
+	// The server must respond with a full_sync.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("failed to read full_sync response: %v", err)
+	}
+
+	var received struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &received); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if received.Type != EventFullSync {
+		t.Errorf("expected type %q after malformed/unknown messages, got %q", EventFullSync, received.Type)
+	}
+}
