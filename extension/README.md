@@ -50,7 +50,7 @@ You can also click **Test Connection** to verify that your server is reachable.
 - **YouTube DOM instability**: YouTube and YouTube Music frequently update their DOM structure. The extension uses multiple selector fallbacks, but buttons may not appear if YouTube changes their HTML. File an issue if buttons stop appearing.
 - **No playlist support**: The extension adds individual songs only. Playlist-level operations are not supported.
 - **No Firefox/Safari support**: This extension is built for Chrome/Chromium using Manifest V3. Firefox and Safari are not supported.
-- **HTTPS recommended**: When adding songs from HTTPS YouTube pages to an HTTP local server, the extension's service worker handles the request. However, for production use, configure your Local Music Queue server with HTTPS.
+- **HTTPS with valid certificate required**: The extension's service worker `fetch()` requires the Local Music Queue server to have a valid TLS certificate if using HTTPS. Self-signed certificates will cause the request to fail. For local/development use, HTTP is acceptable. The server's `Access-Control-Allow-Origin: *` CORS header is required unless the user grants the extension optional host permission for the API host during configuration.
 - **Identity is client-supplied**: The extension uses the configured display name and user ID without server-side authentication. This matches the existing Local Music Queue behavior for the add-song endpoint.
 
 ## Architecture
@@ -74,7 +74,7 @@ extension/
 
 1. **Content Script** (`content.js`): Runs on YouTube and YouTube Music pages. Uses `MutationObserver` to detect dynamically loaded menus and inject "Add to Local Queue" buttons. Handles button clicks and displays feedback.
 
-2. **Background Service Worker** (`background.js`): Receives messages from the content script, loads configuration from `chrome.storage.local`, and makes the API request to the Local Music Queue server. In Manifest V3, service worker `fetch()` bypasses CORS restrictions.
+2. **Background Service Worker** (`background.js`): Receives messages from the content script, loads configuration from `chrome.storage.local`, and makes the API request to the Local Music Queue server. The service worker `fetch()` relies on the server's `Access-Control-Allow-Origin: *` CORS header, or on an optional host permission granted by the user during configuration.
 
 3. **Shared Utilities** (`shared.js`): Pure functions for extracting YouTube video IDs from various URL formats. Used by both the content script and background worker.
 
@@ -123,9 +123,11 @@ To verify the extension works correctly:
 - Check firewall settings if accessing a remote server.
 - Use the "Test Connection" button on the options page.
 
-### Mixed content warnings
+### Mixed content or connection errors
 
-- If your Local Music Queue server uses HTTP while YouTube uses HTTPS, the extension handles this via the service worker. If you see errors, configure your server with HTTPS.
+- The extension's service worker makes the API call directly (not from the YouTube page context), so mixed content (HTTP API from HTTPS YouTube) is not blocked by the browser's mixed-content policy.
+- However, if using HTTPS, the server must have a **valid** TLS certificate. Self-signed or expired certificates will cause the request to fail.
+- When saving your configuration, the extension may prompt you to grant host permission for your API base URL. If denied, the request relies on the server's CORS header (`Access-Control-Allow-Origin: *`).
 
 ## Development
 
@@ -135,6 +137,54 @@ To regenerate the icons (requires Python 3 with Pillow):
 cd extension
 python3 generate_icons.py
 ```
+
+## Distribution
+
+### Load Unpacked (Development)
+
+For local development and testing:
+
+1. Navigate to `chrome://extensions/`
+2. Enable **Developer mode**
+3. Click **Load unpacked**
+4. Select the `extension/` directory
+
+Changes to the extension files require clicking the reload icon on the extension card or reloading the extension page.
+
+### GitHub Release ZIP (Internal Users)
+
+For distributing to technical team members via a GitHub release:
+
+1. Create a ZIP of the `extension/` directory contents (not the parent directory):
+   ```bash
+   cd extension
+   zip -r ../lmq-extension-v1.0.0.zip . -x "generate_icons.py" "README.md"
+   ```
+2. Attach the ZIP to a GitHub release.
+3. Recipients download the ZIP, extract it, and load unpacked from the extracted directory.
+
+**Note**: Recipients still need Developer mode enabled and must load unpacked manually.
+
+### Unlisted Chrome Web Store (Recommended for Non-Technical Users)
+
+For the easiest installation experience for non-technical users:
+
+1. Package the extension into a ZIP (same as above).
+2. Go to the [Chrome Web Store Developer Dashboard](https://chrome.google.com/webstore/devconsole).
+3. Pay the one-time $5 developer registration fee (if not already paid).
+4. Upload the ZIP as a new item.
+5. Set the visibility to **Unlisted** (anyone with the link can install, not publicly searchable).
+6. Submit for review (typically takes 1-3 business days).
+
+**Benefits of unlisted distribution:**
+- Users install via a simple link, no Developer mode required.
+- Automatic updates when you publish new versions.
+- No public visibility in the Chrome Web Store.
+
+**Considerations:**
+- Each version update requires re-packaging and re-submitting for review.
+- Chrome Web Store policies apply (even for unlisted items).
+- The extension must comply with Chrome Web Store developer program policies.
 
 ## License
 

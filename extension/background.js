@@ -1,7 +1,8 @@
 /**
  * Background service worker for Local Music Queue browser extension.
  * Handles API communication with the Local Music Queue server.
- * In MV3, service worker fetch() bypasses CORS restrictions.
+ * Relies on server CORS (Access-Control-Allow-Origin: *) or optional host
+ * permission granted by the user during configuration.
  */
 
 // Import shared utilities (available via manifest content_scripts registration)

@@ -42,9 +42,45 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   /**
+   * Requests host permission for the API base URL.
+   * Must be called from a user gesture (e.g., button click).
+   * @param {string} apiBase - The API base URL.
+   * @returns {Promise<boolean>} True if permission is granted or already held.
+   */
+  async function requestHostPermission(apiBase) {
+    try {
+      const url = new URL(apiBase);
+      const origin = `${url.protocol}//${url.host}/*`;
+
+      // Check if we already have permission
+      const hasPermission = await chrome.permissions.contains({
+        origins: [origin]
+      });
+      if (hasPermission) return true;
+
+      // Request permission (user must approve via Chrome dialog)
+      const granted = await chrome.permissions.request({
+        origins: [origin]
+      });
+
+      if (!granted) {
+        showStatus(
+          'Host permission denied. The extension may not be able to reach your server. ' +
+          'CORS with Access-Control-Allow-Origin: * may still work.',
+          'error'
+        );
+      }
+      return granted;
+    } catch {
+      // If permission request fails, rely on CORS
+      return false;
+    }
+  }
+
+  /**
    * Saves options to chrome.storage.local.
    */
-  function saveOptions() {
+  async function saveOptions() {
     const apiBase = apiBaseInput.value.trim().replace(/\/+$/, '');
     const displayName = displayNameInput.value.trim();
     const userId = parseInt(userIdInput.value, 10) || 0;
@@ -66,6 +102,9 @@ document.addEventListener('DOMContentLoaded', () => {
       showStatus('API Base URL is not a valid URL.', 'error');
       return;
     }
+
+    // Request host permission for the API base URL (non-blocking if denied)
+    await requestHostPermission(apiBase);
 
     chrome.storage.local.set({
       apiBase: apiBase,
