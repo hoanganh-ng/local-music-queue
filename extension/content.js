@@ -41,32 +41,43 @@
   const style = document.createElement('style');
   style.textContent = `
     .${BUTTON_CLASS} {
-      display: inline-flex;
+      display: inline-flex !important;
       align-items: center;
       justify-content: center;
-      width: 28px;
-      height: 28px;
-      padding: 0;
-      border: none;
-      border-radius: 50%;
-      background: transparent;
-      color: #909090;
-      cursor: pointer;
-      transition: background 0.2s, color 0.2s, opacity 0.2s;
+      width: 32px !important;
+      height: 32px !important;
+      padding: 0 !important;
+      border: 1px solid rgba(255, 255, 255, 0.15) !important;
+      border-radius: 50% !important;
+      background: rgba(255, 255, 255, 0.06) !important;
+      color: #ccc !important;
+      cursor: pointer !important;
+      transition: background 0.2s, color 0.2s, border-color 0.2s, opacity 0.2s;
       line-height: 1;
       vertical-align: middle;
       flex-shrink: 0;
+      z-index: 1;
+      position: relative;
+      outline: none !important;
+      box-sizing: border-box !important;
+    }
+    .${BUTTON_CLASS} svg {
+      display: block;
+      pointer-events: none;
+      fill: currentColor;
     }
     .${BUTTON_CLASS}:hover {
-      background: rgba(255, 255, 255, 0.1);
-      color: #3ea6ff;
+      background: rgba(62, 166, 255, 0.15) !important;
+      border-color: rgba(62, 166, 255, 0.4) !important;
+      color: #3ea6ff !important;
     }
     .${BUTTON_CLASS}:disabled {
       opacity: 0.5;
       cursor: not-allowed;
     }
     .${BUTTON_CLASS}.lmq-loading {
-      color: #aaa;
+      color: #aaa !important;
+      border-color: rgba(170, 170, 170, 0.3) !important;
     }
     .${BUTTON_CLASS}.lmq-loading svg {
       animation: lmq-spin 0.8s linear infinite;
@@ -76,18 +87,26 @@
       to { transform: rotate(360deg); }
     }
     .${BUTTON_CLASS}.lmq-success {
-      color: #2ba640;
+      color: #2ba640 !important;
+      background: rgba(43, 166, 64, 0.12) !important;
+      border-color: rgba(43, 166, 64, 0.4) !important;
     }
     .${BUTTON_CLASS}.lmq-error {
-      color: #d93025;
+      color: #d93025 !important;
+      background: rgba(217, 48, 37, 0.12) !important;
+      border-color: rgba(217, 48, 37, 0.4) !important;
     }
     .${BUTTON_CLASS}.lmq-duplicate {
-      color: #f9ab00;
+      color: #f9ab00 !important;
+      background: rgba(249, 171, 0, 0.12) !important;
+      border-color: rgba(249, 171, 0, 0.4) !important;
     }
     .lmq-menu-wrapper {
-      display: inline-flex;
+      display: inline-flex !important;
       align-items: center;
       margin-left: 4px;
+      z-index: 1;
+      position: relative;
     }
   `;
   document.head.appendChild(style);
