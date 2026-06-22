@@ -24,9 +24,9 @@
         <div v-if="canControl" class="volume-controls">
           <button
             class="mute-toggle"
-            :class="{ muted: isMuted }"
-            :aria-label="isMuted ? 'Unmute' : 'Mute'"
-            :title="isMuted ? 'Unmute' : 'Mute'"
+            :class="{ muted: isMuted || localVolume === 0 }"
+            :aria-label="(isMuted || localVolume === 0) ? 'Unmute' : 'Mute'"
+            :title="(isMuted || localVolume === 0) ? 'Unmute' : 'Mute'"
             @click="toggleMute"
           >
             <svg v-if="isMuted || localVolume === 0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
@@ -465,10 +465,14 @@ function handleSliderInput(event) {
   if (props.isHost) {
     // Host: apply immediately to the YouTube iframe.
     setHostVolume(val)
-    if (val > 0) {
-      isMuted.value = false
-      previousNonZeroVolume.value = val
-    }
+  }
+  // State consistency for both host and non-host:
+  // previousNonZeroVolume is maintained from prior updates (init or last val > 0).
+  if (val === 0) {
+    isMuted.value = true
+  } else {
+    isMuted.value = false
+    previousNonZeroVolume.value = val
   }
   // Non-host: only update the slider visually; commit on @change.
 }
@@ -478,10 +482,6 @@ function handleSliderCommit(event) {
   localVolume.value = val
   if (props.isHost) {
     setHostVolume(val)
-    if (val > 0) {
-      isMuted.value = false
-      previousNonZeroVolume.value = val
-    }
   } else {
     // Non-host: send the minimum number of ±10 direction commands to
     // approximate the desired volume through the existing contract.
@@ -503,6 +503,13 @@ function handleSliderCommit(event) {
         lastAssumedRemoteVolume = val
       }, REMOTE_THROTTLE_MS)
     }
+  }
+  // State consistency for both host and non-host:
+  if (val === 0) {
+    isMuted.value = true
+  } else {
+    isMuted.value = false
+    previousNonZeroVolume.value = val
   }
 }
 
