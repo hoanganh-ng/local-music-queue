@@ -27,23 +27,23 @@ You can also click **Test Connection** to verify that your server is reachable.
 
 ## Supported Sites
 
-- **YouTube** (`https://www.youtube.com/*`): Adds "Add to Local Queue" buttons near video menus in:
+- **YouTube** (`https://www.youtube.com/*`): Adds a compact queue icon button near video menus in:
   - Video lists (search results, recommendations, playlists)
   - The currently playing video's menu
-- **YouTube Music** (`https://music.youtube.com/*`): Adds buttons near song menus in:
+- **YouTube Music** (`https://music.youtube.com/*`): Adds a compact queue icon button near song menus in:
   - Song lists and search results
   - The player bar (currently playing song)
 
 ## Usage
 
 1. Browse YouTube or YouTube Music
-2. Look for the blue "Add to Local Queue" button near video/song menus
-3. Click the button
-4. The button will show feedback:
-   - **Adding...** - Request in progress
-   - **Added!** (green) - Song successfully added to the queue
-   - **Duplicate** (yellow) - Song is already in the queue
-   - **Error** (red) - Something went wrong (hover for details)
+2. Look for the small queue icon button (♫ with +) next to video/song menus — it appears as a subtle grey icon
+3. Click the icon button
+4. The icon provides visual feedback:
+   - **Spinning icon** (grey) - Request in progress
+   - **Checkmark** (green) - Song successfully added to the queue
+   - **Warning triangle** (yellow) - Song is already in the queue
+   - **Error circle** (red) - Something went wrong (hover for details)
 
 ## Known Limitations
 
@@ -89,24 +89,24 @@ To verify the extension works correctly:
 3. **Test from YouTube**:
    - Navigate to `https://www.youtube.com`
    - Find a video in the recommendations or search results
-   - Click "Add to Local Queue"
-   - Verify the song appears in your Local Music Queue app
+   - Click the queue icon button next to the video menu
+   - Verify the icon turns green (checkmark) and the song appears in your Local Music Queue app
 4. **Test from YouTube Music**:
    - Navigate to `https://music.youtube.com`
    - Find a song
-   - Click "Add to Local Queue"
-   - Verify the song appears in your Local Music Queue app
+   - Click the queue icon button next to the song menu
+   - Verify the icon turns green (checkmark) and the song appears in your Local Music Queue app
 5. **Test duplicate detection**:
    - Try adding the same song again
-   - Verify the button shows "Duplicate" feedback
+   - Verify the icon turns yellow (warning triangle) indicating duplicate
 6. **Test error handling**:
    - Stop your Local Music Queue server
    - Try adding a song
-   - Verify the button shows an error with a helpful message
+   - Verify the icon turns red (error circle); hover for tooltip details
 7. **Test missing configuration**:
    - Clear the extension's settings (or install fresh)
    - Try adding a song without configuring
-   - Verify the button shows a configuration error
+   - Verify the icon turns red; hover for configuration error tooltip
 
 ## Troubleshooting
 

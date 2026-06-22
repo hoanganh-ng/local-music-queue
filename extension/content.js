@@ -18,44 +18,71 @@
   // Detect which site we're on
   const isYouTubeMusic = window.location.hostname === 'music.youtube.com';
 
+  // ─── SVG Icons ──────────────────────────────────────────────────────────────
+  // Each icon is a 20x20 inline SVG. We swap them based on feedback state.
+
+  const ICON_QUEUE_ADD = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">` +
+    `<path d="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z"/>` +
+    `</svg>`;
+
+  const ICON_CHECK = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">` +
+    `<path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/>` +
+    `</svg>`;
+
+  const ICON_ERROR = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">` +
+    `<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>` +
+    `</svg>`;
+
+  const ICON_DUPLICATE = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">` +
+    `<path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/>` +
+    `</svg>`;
+
   // ─── Styles ───────────────────────────────────────────────────────────────
   const style = document.createElement('style');
   style.textContent = `
     .${BUTTON_CLASS} {
       display: inline-flex;
       align-items: center;
-      gap: 4px;
-      padding: 6px 12px;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
       border: none;
-      border-radius: 4px;
-      background: #3ea6ff;
-      color: #fff;
-      font-size: 12px;
-      font-weight: 500;
+      border-radius: 50%;
+      background: transparent;
+      color: #909090;
       cursor: pointer;
-      white-space: nowrap;
-      transition: background 0.2s, opacity 0.2s;
+      transition: background 0.2s, color 0.2s, opacity 0.2s;
       line-height: 1;
+      vertical-align: middle;
+      flex-shrink: 0;
     }
     .${BUTTON_CLASS}:hover {
-      background: #1c8ae6;
+      background: rgba(255, 255, 255, 0.1);
+      color: #3ea6ff;
     }
     .${BUTTON_CLASS}:disabled {
-      opacity: 0.6;
+      opacity: 0.5;
       cursor: not-allowed;
     }
     .${BUTTON_CLASS}.lmq-loading {
-      background: #888;
+      color: #aaa;
+    }
+    .${BUTTON_CLASS}.lmq-loading svg {
+      animation: lmq-spin 0.8s linear infinite;
+    }
+    @keyframes lmq-spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
     }
     .${BUTTON_CLASS}.lmq-success {
-      background: #2ba640;
+      color: #2ba640;
     }
     .${BUTTON_CLASS}.lmq-error {
-      background: #d93025;
+      color: #d93025;
     }
     .${BUTTON_CLASS}.lmq-duplicate {
-      background: #f9ab00;
-      color: #000;
+      color: #f9ab00;
     }
     .lmq-menu-wrapper {
       display: inline-flex;
@@ -68,20 +95,21 @@
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
   /**
-   * Creates the "Add to Local Queue" button element.
+   * Creates the compact "Add to Local Queue" icon button element.
    * @returns {HTMLButtonElement} The button element.
    */
   function createButton() {
     const btn = document.createElement('button');
     btn.className = BUTTON_CLASS;
     btn.type = 'button';
-    btn.textContent = 'Add to Local Queue';
-    btn.title = 'Add this song to Local Music Queue';
+    btn.innerHTML = ICON_QUEUE_ADD;
+    btn.title = 'Add to Local Queue';
+    btn.setAttribute('aria-label', 'Add to Local Queue');
     return btn;
   }
 
   /**
-   * Sets button visual state.
+   * Sets button visual state using compact icon feedback.
    * @param {HTMLButtonElement} btn - The button element.
    * @param {'idle'|'loading'|'success'|'error'|'duplicate'} state - The state.
    * @param {string} [message] - Optional tooltip message.
@@ -93,28 +121,34 @@
     switch (state) {
       case 'loading':
         btn.classList.add('lmq-loading');
-        btn.textContent = 'Adding...';
+        btn.innerHTML = ICON_QUEUE_ADD;
+        btn.title = 'Adding...';
+        btn.setAttribute('aria-label', 'Adding to queue');
         btn.disabled = true;
         break;
       case 'success':
         btn.classList.add('lmq-success');
-        btn.textContent = 'Added!';
-        btn.title = 'Song added to Local Music Queue';
+        btn.innerHTML = ICON_CHECK;
+        btn.title = 'Added to Local Music Queue';
+        btn.setAttribute('aria-label', 'Added to queue');
         break;
       case 'error':
         btn.classList.add('lmq-error');
-        btn.textContent = 'Error';
+        btn.innerHTML = ICON_ERROR;
         btn.title = message || 'Failed to add to Local Music Queue';
+        btn.setAttribute('aria-label', 'Error adding to queue');
         break;
       case 'duplicate':
         btn.classList.add('lmq-duplicate');
-        btn.textContent = 'Duplicate';
+        btn.innerHTML = ICON_DUPLICATE;
         btn.title = message || 'Song already in queue';
+        btn.setAttribute('aria-label', 'Song already in queue');
         break;
       case 'idle':
       default:
-        btn.textContent = 'Add to Local Queue';
-        btn.title = 'Add this song to Local Music Queue';
+        btn.innerHTML = ICON_QUEUE_ADD;
+        btn.title = 'Add to Local Queue';
+        btn.setAttribute('aria-label', 'Add to Local Queue');
         break;
     }
   }
