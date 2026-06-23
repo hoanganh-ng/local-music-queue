@@ -1,16 +1,25 @@
 <template>
   <div class="queue-list glass-panel">
     <div class="queue-header">
-      <h3 class="cyber-glitch">Up Next</h3>
-      <div class="header-controls">
-        <span v-if="currentUser" class="priority-indicator" :aria-label="`${currentUser.priority_balance} priority tokens`">
+      <div class="queue-header__title-row">
+        <div class="queue-header__title-group">
+          <h3 class="queue-header__title cyber-glitch">Up Next</h3>
+          <span class="queue-count" :aria-label="`Up next queue length: ${queue.length}`">{{ queue.length }} songs</span>
+        </div>
+        <span
+          v-if="currentUser"
+          class="priority-indicator"
+          :aria-label="`${currentUser.priority_balance} priority tokens`"
+        >
           <span class="priority-indicator__label">Priority tokens</span>
           <span class="priority-indicator__value">
             <span aria-hidden="true">⚡</span> {{ currentUser.priority_balance }}
           </span>
         </span>
-        <button v-if="canControl && queue.length > 0" class="clear-btn" @click="handleClear">Clear</button>
-        <span class="queue-count">{{ queue.length }} songs</span>
+      </div>
+
+      <div v-if="canControl && queue.length > 0" class="queue-header__actions">
+        <button class="clear-btn" @click="handleClear">Clear</button>
       </div>
     </div>
 
@@ -22,22 +31,33 @@
           class="queue-item"
           :class="{ 'prioritized': song.is_prioritized }"
         >
-          <!-- Top Row: Number + Title + Remove -->
+          <!-- Top Row: Number + Badges + Title + Remove -->
           <div class="item-top-row">
             <div class="item-number">{{ index + 1 }}</div>
-            <div class="item-title">
-              <span v-if="song.is_prioritized" class="priority-icon" aria-label="Prioritized">⚡</span>
-              <span v-if="song.added_by === 'system:autoqueue'" class="auto-badge" aria-label="Added by radio mode">📻 auto</span>
-              {{ song.title || song.url }}
+
+            <div class="item-badges" aria-hidden="true">
+              <span v-if="song.is_prioritized" class="priority-icon" title="Prioritized">⚡</span>
+              <span v-if="song.added_by === 'system:autoqueue'" class="auto-badge" title="Added by radio mode">📻</span>
             </div>
-            <button v-if="canRemoveSong(song)" class="remove-btn" @click="handleRemove(index)" title="Remove from queue">
+
+            <div class="item-title">{{ song.title || song.url }}</div>
+
+            <button
+              v-if="canRemoveSong(song)"
+              class="remove-btn"
+              @click="handleRemove(index)"
+              :title="`Remove ${song.title || song.url || 'song'} from queue`"
+              :aria-label="`Remove ${song.title || song.url || 'song'} from queue`"
+            >
               &times;
             </button>
           </div>
 
           <!-- Second Row: Metadata -->
           <div class="item-meta-row">
-            <div class="item-meta">Added by {{ song.added_by }}</div>
+            <span class="item-meta">Added by {{ song.added_by }}</span>
+            <span v-if="song.duration" class="item-meta-sep" aria-hidden="true">·</span>
+            <span v-if="song.duration" class="item-meta">{{ formatDuration(song.duration) }}</span>
           </div>
 
           <!-- Third Row: Action Buttons -->
@@ -225,6 +245,13 @@ function queueIndexFor(upNextIndex) {
   // Convert "Up Next" index to full songs array index
   return props.currentIndex + 1 + upNextIndex
 }
+
+function formatDuration(seconds) {
+  if (!seconds || seconds < 0) return ''
+  const m = Math.floor(seconds / 60)
+  const s = Math.floor(seconds % 60)
+  return `${m}:${String(s).padStart(2, '0')}`
+}
 </script>
 
 <style scoped>
@@ -237,30 +264,49 @@ function queueIndexFor(upNextIndex) {
 
 .queue-header {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 1.5rem;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1.25rem;
   padding-bottom: 0.75rem;
   border-bottom: 1px solid var(--navy-border);
 }
 
-.queue-header h3 {
-  font-size: 1.25rem;
+.queue-header__title-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  min-width: 0;
+}
+
+.queue-header__title-group {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.queue-header__title {
+  font-size: 1.15rem;
   margin: 0;
+  flex-shrink: 0;
+}
+
+.queue-header__actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .queue-count {
-  font-size: 0.875rem;
+  font-size: 0.78rem;
   color: var(--accent);
   background: rgba(67, 97, 238, 0.15);
-  padding: 0.25rem 0.75rem;
+  padding: 0.2rem 0.6rem;
   border-radius: var(--radius-full);
-}
-
-.header-controls {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .clear-btn {
@@ -268,11 +314,13 @@ function queueIndexFor(upNextIndex) {
   color: #e74c3c;
   border: 1px solid rgba(231, 76, 60, 0.3);
   border-radius: var(--radius-sm);
-  padding: 0.2rem 0.6rem;
-  font-size: 0.75rem;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.72rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .clear-btn:hover {
@@ -305,8 +353,8 @@ function queueIndexFor(upNextIndex) {
 .queue-item {
   display: flex;
   flex-direction: column;
-  gap: 0.375rem;
-  padding: 0.75rem 1rem;
+  gap: 0.5rem;
+  padding: 0.875rem 1rem;
   background: rgba(7, 7, 13, 0.58);
   border: 1px solid rgba(0, 255, 136, 0.16);
   border-radius: var(--radius-sm);
@@ -324,16 +372,27 @@ function queueIndexFor(upNextIndex) {
 .item-top-row {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: 0.75rem;
   width: 100%;
 }
 
 .item-number {
   font-weight: 700;
   color: var(--text-muted);
-  width: 20px;
+  width: 22px;
   flex-shrink: 0;
   text-align: center;
+}
+
+.item-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
+  min-width: 0;
+}
+.item-badges:empty {
+  display: none;
 }
 
 .item-title {
@@ -347,32 +406,40 @@ function queueIndexFor(upNextIndex) {
 }
 
 .item-meta-row {
-  padding-left: 36px;
-}
-
-.item-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding-left: 30px;
   font-size: 0.75rem;
   color: var(--text-muted);
+  flex-wrap: wrap;
+}
+.item-meta-sep {
+  opacity: 0.5;
 }
 
 .item-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   flex-wrap: wrap;
-  gap: 0.375rem;
-  padding-left: 36px;
+  gap: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed rgba(0, 255, 136, 0.12);
 }
 
 .priority-indicator {
   display: inline-flex;
   align-items: baseline;
-  gap: 0.4rem;
-  padding: 0.2rem 0.55rem;
+  gap: 0.35rem;
+  padding: 0.18rem 0.5rem;
   border: 1px solid rgba(0, 212, 255, 0.22);
   border-radius: var(--radius-sm);
   background: rgba(0, 212, 255, 0.06);
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   line-height: 1;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .priority-indicator__label {
@@ -403,20 +470,22 @@ function queueIndexFor(upNextIndex) {
 }
 
 .auto-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
   background: rgba(52, 152, 219, 0.2);
   color: #3498db;
-  padding: 0.125rem 0.375rem;
+  padding: 0.15rem 0.4rem;
   border-radius: var(--radius-sm);
-  font-size: 0.625rem;
+  font-size: 0.65rem;
   font-weight: 600;
-  margin-right: 0.5rem;
   border: 1px solid rgba(52, 152, 219, 0.3);
 }
 
 @media (max-width: 768px) {
   .prioritize-btn {
-    font-size: 0.65rem;
-    padding: 0.2rem 0.4rem;
+    font-size: 0.7rem;
+    padding: 0.35rem 0.5rem;
   }
 }
 
@@ -448,8 +517,16 @@ function queueIndexFor(upNextIndex) {
 }
 
 .priority-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  background: rgba(243, 156, 18, 0.15);
   color: #f39c12;
-  margin-right: 0.25rem;
+  font-size: 0.85rem;
+  line-height: 1;
 }
 
 .remove-btn {
@@ -515,22 +592,45 @@ function queueIndexFor(upNextIndex) {
 @media (max-width: 768px) {
   .queue-item {
     padding: 0.625rem 0.75rem;
-    gap: 0.3rem;
+    gap: 0.4rem;
   }
 
   .item-meta-row {
-    padding-left: 28px;
+    padding-left: 22px;
   }
 
   .item-actions {
-    padding-left: 28px;
-    gap: 0.25rem;
+    justify-content: stretch;
+    gap: 0.4rem;
+  }
+
+  .item-actions > * {
+    flex: 1 1 auto;
+    min-width: 0;
   }
 }
 
 @media (max-width: 480px) {
-  .item-actions {
-    padding-left: 28px;
+  .item-top-row {
+    gap: 0.5rem;
+  }
+
+  .item-meta-row {
+    padding-left: 18px;
+  }
+
+  .queue-header__title-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .queue-header__title-group {
+    flex: 0 0 auto;
+  }
+
+  .queue-header__actions {
+    justify-content: flex-start;
   }
 }
 </style>

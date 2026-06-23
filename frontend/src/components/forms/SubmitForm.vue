@@ -339,13 +339,14 @@ defineExpose({
 
 .input-group {
   display: flex;
-  gap: 1rem;
+  flex-direction: column;
+  gap: 0.75rem;
   align-items: stretch;
 }
 
 .input-wrapper {
-  flex-grow: 1;
   position: relative;
+  width: 100%;
 }
 
 .search-results {
@@ -447,19 +448,24 @@ defineExpose({
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+  min-width: 0;
 }
 
 .result-meta {
   display: flex;
-  gap: 1rem;
+  gap: 0.75rem;
   font-size: 0.875rem;
   color: var(--text-muted);
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .result-artist {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .result-duration {
@@ -506,17 +512,38 @@ defineExpose({
 }
 
 @media (max-width: 768px) {
-  .input-group {
-    flex-direction: column;
-  }
-
   .result-card {
     gap: 0.75rem;
+    padding: 0.5rem;
   }
 
   .result-thumbnail {
     width: 80px;
     height: 60px;
+  }
+
+  .add-button {
+    width: 32px;
+    height: 32px;
+    font-size: 1.05rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .result-thumbnail {
+    width: 64px;
+    height: 48px;
+  }
+
+  .add-button {
+    width: 28px;
+    height: 28px;
+    font-size: 0.95rem;
+  }
+
+  .result-meta {
+    gap: 0.4rem;
+    font-size: 0.78rem;
   }
 }
 </style>
