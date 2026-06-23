@@ -935,7 +935,7 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
   color: var(--accent);
   margin: 0;
   text-shadow: var(--glow-sm);
-  white-space: nowrap;
+  white-space: normal;
   overflow: hidden;
   text-overflow: ellipsis;
 }
