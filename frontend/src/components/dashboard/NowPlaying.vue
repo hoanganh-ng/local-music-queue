@@ -37,9 +37,11 @@
         </div>
       </div>
 
-      <!-- Bottom: volume + transport controls grouped in one control bar -->
-      <div class="control-bar">
-        <div v-if="canControl" class="volume-controls">
+      <!-- Bottom: volume + transport controls grouped in one control bar.
+           Render only for users who can control playback; guests/non-control
+           users see no empty bar. -->
+      <div v-if="canControl" class="control-bar">
+        <div class="volume-controls">
           <button
             class="mute-toggle"
             :class="{ muted: isMuted || localVolume === 0 }"
@@ -72,7 +74,7 @@
           </div>
         </div>
 
-        <div v-if="canControl" class="host-controls">
+        <div class="host-controls">
           <BaseButton variant="secondary" :aria-label="status === 'playing' ? 'Pause playback' : 'Start playback'" @click="$emit('toggle-playback')">
             <span v-if="status === 'playing'">Pause</span>
             <span v-else>Play</span>
