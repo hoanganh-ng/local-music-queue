@@ -31,36 +31,35 @@
 
     <main class="dashboard-content">
 
-      <!--Left Column: Queue List -->
-      <aside class="col-right">
-        <QueueList
-          :queue="globalStore.queueState.queue || []"
-          :isHost="isHost"
-          :canControl="canControl"
-          :currentIndex="globalStore.queueState.current_index"
-        />
-      </aside>
-      
-
-      <!-- Center Column: Player and Input -->
-      <section class="col-center">
-        <div class="player-wrapper">
-          <NowPlaying
-            :currentSong="globalStore.queueState.current_song"
-            :status="globalStore.queueState.status"
-            :isHost="isHost"
-            :canControl="canControl"
-            @toggle-playback="togglePlayback"
-            @skip="skipSong"
-          />
-        </div>
-        <div class="input-wrapper">
+      <!-- Left Column: Add Track + Up Next -->
+      <aside class="col-left">
+        <div class="add-track-panel">
           <SubmitForm ref="submitFormRef" :onSubmit="addSong" />
         </div>
+        <div class="up-next-panel">
+          <QueueList
+            :queue="globalStore.queueState.queue || []"
+            :isHost="isHost"
+            :canControl="canControl"
+            :currentIndex="globalStore.queueState.current_index"
+          />
+        </div>
+      </aside>
+
+      <!-- Center Column: Now Playing -->
+      <section class="col-center">
+        <NowPlaying
+          :currentSong="globalStore.queueState.current_song"
+          :status="globalStore.queueState.status"
+          :isHost="isHost"
+          :canControl="canControl"
+          @toggle-playback="togglePlayback"
+          @skip="skipSong"
+        />
       </section>
 
       <!-- Right Column: Activity Log -->
-      <aside class="col-left">
+      <aside class="col-right">
         <ActivityLog :logs="globalStore.queueState.history || []" :currentUserName="currentUser?.display_name" />
       </aside>
     </main>
@@ -427,7 +426,7 @@ const toggleAutoQueue = async () => {
 
 .dashboard-content {
   display: grid;
-  grid-template-columns: minmax(260px, 0.85fr) minmax(420px, 1.7fr) minmax(280px, 1fr);
+  grid-template-columns: minmax(280px, 1fr) minmax(440px, 1.6fr) minmax(280px, 1fr);
   flex-grow: 1;
   min-height: 0;
   gap: 1.25rem;
@@ -443,20 +442,25 @@ const toggleAutoQueue = async () => {
   flex-direction: column;
 }
 
-.col-center {
-  gap: 0.85rem;
+.col-left {
+  gap: 1rem;
 }
 
-.player-wrapper {
-  flex-shrink: 0;
+.add-track-panel,
+.up-next-panel {
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
-.input-wrapper {
+.up-next-panel {
+  flex: 1 1 auto;
+}
+
+.add-track-panel {
+  flex: 0 0 auto;
   position: relative;
   z-index: 20;
-  flex-shrink: 0;
 }
 
 /* Responsive adjustments */
@@ -466,7 +470,7 @@ const toggleAutoQueue = async () => {
     flex-direction: column;
     overflow-y: auto;
   }
-  
+
   .top-nav {
     align-items: flex-start;
     flex-direction: column;
@@ -485,8 +489,8 @@ const toggleAutoQueue = async () => {
   }
 
   .col-center { order: 1; }
-  .col-right { order: 2; min-height: min(70vh, 520px); }
-  .col-left { order: 3; min-height: 260px; }
+  .col-left   { order: 2; min-height: min(60vh, 520px); }
+  .col-right  { order: 3; min-height: 260px; }
 }
 
 @media (max-width: 600px) {

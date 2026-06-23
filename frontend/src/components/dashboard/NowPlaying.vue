@@ -728,7 +728,7 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
 .song-details {
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
+  gap: 0.85rem;
   width: 100%;
   align-items: stretch;
 }

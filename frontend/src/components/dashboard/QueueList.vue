@@ -3,8 +3,11 @@
     <div class="queue-header">
       <h3 class="cyber-glitch">Up Next</h3>
       <div class="header-controls">
-        <span v-if="currentUser" class="priority-badge" :aria-label="`${currentUser.priority_balance} priority tokens`">
-          <span aria-hidden="true">⚡</span> {{ currentUser.priority_balance }}
+        <span v-if="currentUser" class="priority-indicator" :aria-label="`${currentUser.priority_balance} priority tokens`">
+          <span class="priority-indicator__label">Priority tokens</span>
+          <span class="priority-indicator__value">
+            <span aria-hidden="true">⚡</span> {{ currentUser.priority_balance }}
+          </span>
         </span>
         <button v-if="canControl && queue.length > 0" class="clear-btn" @click="handleClear">Clear</button>
         <span class="queue-count">{{ queue.length }} songs</span>
@@ -360,13 +363,29 @@ function queueIndexFor(upNextIndex) {
   padding-left: 36px;
 }
 
-.priority-badge {
-  font-size: 0.875rem;
-  color: #f39c12;
-  background: rgba(243, 156, 18, 0.15);
-  padding: 0.25rem 0.75rem;
-  border-radius: var(--radius-full);
+.priority-indicator {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid rgba(0, 212, 255, 0.22);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 212, 255, 0.06);
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+.priority-indicator__label {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
   font-weight: 600;
+}
+
+.priority-indicator__value {
+  color: var(--accent-hover);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 .prioritize-btn {
