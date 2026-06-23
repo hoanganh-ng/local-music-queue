@@ -31,11 +31,8 @@
 
     <main class="dashboard-content">
 
-      <!-- Left Column: Add Track + Up Next -->
+      <!-- Left Column: Up Next only -->
       <aside class="col-left">
-        <div class="add-track-panel">
-          <SubmitForm ref="submitFormRef" :onSubmit="addSong" />
-        </div>
         <div class="up-next-panel">
           <QueueList
             :queue="globalStore.queueState.queue || []"
@@ -46,16 +43,21 @@
         </div>
       </aside>
 
-      <!-- Center Column: Now Playing -->
+      <!-- Center Column: Now Playing + Add Song below playback -->
       <section class="col-center">
-        <NowPlaying
-          :currentSong="globalStore.queueState.current_song"
-          :status="globalStore.queueState.status"
-          :isHost="isHost"
-          :canControl="canControl"
-          @toggle-playback="togglePlayback"
-          @skip="skipSong"
-        />
+        <div class="now-playing-card">
+          <NowPlaying
+            :currentSong="globalStore.queueState.current_song"
+            :status="globalStore.queueState.status"
+            :isHost="isHost"
+            :canControl="canControl"
+            @toggle-playback="togglePlayback"
+            @skip="skipSong"
+          />
+        </div>
+        <div class="add-track-panel">
+          <SubmitForm ref="submitFormRef" :onSubmit="addSong" />
+        </div>
       </section>
 
       <!-- Right Column: Activity Log -->
@@ -446,6 +448,19 @@ const toggleAutoQueue = async () => {
   gap: 1rem;
 }
 
+.col-center {
+  gap: 1rem;
+}
+
+.col-center > .now-playing-card {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.col-center > .add-track-panel {
+  flex: 0 0 auto;
+}
+
 .add-track-panel,
 .up-next-panel {
   display: flex;
@@ -461,6 +476,7 @@ const toggleAutoQueue = async () => {
   flex: 0 0 auto;
   position: relative;
   z-index: 20;
+  overflow: visible;
 }
 
 /* Responsive adjustments */

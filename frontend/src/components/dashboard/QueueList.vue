@@ -8,13 +8,15 @@
         </div>
         <span
           v-if="currentUser"
-          class="priority-indicator"
-          :aria-label="`${currentUser.priority_balance} priority tokens`"
+          class="priority-token-indicator"
+          tabindex="0"
+          role="img"
+          :aria-label="priorityTokenLabel"
+          :title="priorityTokenLabel"
+          :data-tooltip="priorityTokenLabel"
         >
-          <span class="priority-indicator__label">Priority tokens</span>
-          <span class="priority-indicator__value">
-            <span aria-hidden="true">⚡</span> {{ currentUser.priority_balance }}
-          </span>
+          <span aria-hidden="true">⚡</span>
+          <span class="priority-token-indicator__count">{{ currentUser.priority_balance }}</span>
         </span>
       </div>
 
@@ -124,6 +126,9 @@ const props = defineProps({
 })
 
 const currentUser = computed(() => globalStore.currentUser)
+const priorityTokenLabel = computed(() =>
+  `${currentUser.value?.priority_balance ?? 0} priority tokens. Use one to bump your own song.`
+)
 const prioritizingIndex = ref(null)
 const toast = useToast()
 const { confirm } = useConfirm()
@@ -428,31 +433,58 @@ function formatDuration(seconds) {
   border-top: 1px dashed rgba(0, 255, 136, 0.12);
 }
 
-.priority-indicator {
+.priority-token-indicator {
   display: inline-flex;
-  align-items: baseline;
-  gap: 0.35rem;
-  padding: 0.18rem 0.5rem;
-  border: 1px solid rgba(0, 212, 255, 0.22);
-  border-radius: var(--radius-sm);
-  background: rgba(0, 212, 255, 0.06);
-  font-size: 0.7rem;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.85rem;
   line-height: 1;
-  white-space: nowrap;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent-hover);
+  cursor: help;
+  outline: none;
   flex-shrink: 0;
-}
-
-.priority-indicator__label {
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
+  position: relative;
   font-weight: 600;
 }
 
-.priority-indicator__value {
-  color: var(--accent-hover);
-  font-weight: 700;
+.priority-token-indicator__count {
   font-variant-numeric: tabular-nums;
+}
+
+.priority-token-indicator:focus-visible {
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 2px;
+}
+
+.priority-token-indicator::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: rgba(0, 0, 0, 0.92);
+  color: #fff;
+  padding: 0.35rem 0.55rem;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity .15s ease, transform .15s ease;
+  z-index: 200;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+
+.priority-token-indicator:hover::after,
+.priority-token-indicator:focus::after {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .prioritize-btn {

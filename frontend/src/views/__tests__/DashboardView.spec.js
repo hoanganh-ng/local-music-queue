@@ -254,4 +254,31 @@ describe('DashboardView', () => {
     expect(wsMockState.unsubscribeVoteEvent).toHaveBeenCalled()
     expect(wsClient.disconnect).toHaveBeenCalled()
   })
+
+  it('renders QueueList in the left column and no SubmitForm', () => {
+    const wrapper = shallowMount(DashboardView)
+    const left = wrapper.find('.col-left')
+    expect(left.exists()).toBe(true)
+    expect(left.findComponent({ name: 'QueueList' }).exists()).toBe(true)
+    expect(left.findComponent({ name: 'SubmitForm' }).exists()).toBe(false)
+  })
+
+  it('renders NowPlaying and SubmitForm in .col-center, SubmitForm after NowPlaying', () => {
+    const wrapper = shallowMount(DashboardView)
+    const center = wrapper.find('.col-center')
+    expect(center.exists()).toBe(true)
+    const kids = Array.from(center.element.children)
+    expect(kids.length).toBeGreaterThanOrEqual(2)
+    expect(kids[0].classList.contains('now-playing-card')).toBe(true)
+    expect(kids[1].classList.contains('add-track-panel')).toBe(true)
+    expect(center.findComponent({ name: 'NowPlaying' }).exists()).toBe(true)
+    expect(center.findComponent({ name: 'SubmitForm' }).exists()).toBe(true)
+  })
+
+  it('keeps ActivityLog in the right column', () => {
+    const wrapper = shallowMount(DashboardView)
+    const right = wrapper.find('.col-right')
+    expect(right.exists()).toBe(true)
+    expect(right.findComponent({ name: 'ActivityLog' }).exists()).toBe(true)
+  })
 })

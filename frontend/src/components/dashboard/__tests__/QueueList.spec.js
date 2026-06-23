@@ -275,4 +275,41 @@ describe('QueueList', () => {
     expect(globalStore.queueState.songs).toHaveLength(1)
     expect(globalStore.queueState.songs[0].id).toBe(100)
   })
+
+  it('renders a compact priority token with accessible label when currentUser is set', () => {
+    globalStore.setUser({ id: 10, role: 'guest', display_name: 'Guest1', priority_balance: 3 })
+    const wrapper = mount(QueueList, {
+      props: { queue: [] }
+    })
+
+    const tok = wrapper.find('.priority-token-indicator')
+    expect(tok.exists()).toBe(true)
+    expect(tok.attributes('tabindex')).toBe('0')
+    expect(tok.attributes('role')).toBe('img')
+    expect(tok.text()).toContain('⚡')
+    expect(tok.text()).toContain('3')
+    expect(tok.attributes('title')).toBe(
+      '3 priority tokens. Use one to bump your own song.'
+    )
+    expect(tok.attributes('aria-label')).toBe(
+      '3 priority tokens. Use one to bump your own song.'
+    )
+  })
+
+  it('does not render the priority token when there is no currentUser', () => {
+    const wrapper = mount(QueueList, {
+      props: { queue: [] }
+    })
+
+    expect(wrapper.find('.priority-token-indicator').exists()).toBe(false)
+  })
+
+  it('does not render the legacy "Priority tokens" text label', () => {
+    globalStore.setUser({ id: 10, role: 'guest', display_name: 'Guest1', priority_balance: 3 })
+    const wrapper = mount(QueueList, {
+      props: { queue: [] }
+    })
+
+    expect(wrapper.text()).not.toContain('Priority tokens')
+  })
 })

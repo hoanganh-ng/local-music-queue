@@ -11,13 +11,93 @@
       <!-- Top: artwork + song info read as one "current song" block -->
       <div class="now-top">
         <div class="artwork-section">
-          <div class="artwork-container">
+          <div class="artwork-container" @wheel="handleWheelVolume">
             <!-- We can use the default maxresdefault thumbnail from YouTube -->
             <img v-if="!isHost || !showPlayer" :src="thumbnailUrl" alt="Album Art" class="artwork-img" />
 
             <!-- Host Only: The actual YouTube IFrame -->
             <div v-if="isHost && showPlayer" class="youtube-wrapper">
               <div id="youtube-player"></div>
+            </div>
+
+            <!-- Hidden overlay: appears on artwork hover/focus.
+                 Centered transport cluster + right-edge volume cluster.
+                 Wheel over the artwork adjusts volume through existing logic. -->
+            <div
+              v-if="canControl"
+              class="artwork-controls"
+              aria-label="Playback controls"
+            >
+              <div class="artwork-controls__center">
+                <button
+                  class="transport-btn"
+                  :aria-label="status === 'playing' ? 'Pause playback' : 'Start playback'"
+                  :title="status === 'playing' ? 'Pause' : 'Play'"
+                  @click="$emit('toggle-playback')"
+                >
+                  <svg v-if="status === 'playing'" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="22" height="22" aria-hidden="true">
+                    <path d="M6 5h4v14H6zM14 5h4v14h-4z"/>
+                  </svg>
+                  <svg v-else xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="22" height="22" aria-hidden="true">
+                    <path d="M8 5v14l11-7z"/>
+                  </svg>
+                </button>
+                <button
+                  class="transport-btn"
+                  aria-label="Play previous song"
+                  title="Previous"
+                  @click="handlePrev"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="22" height="22" aria-hidden="true">
+                    <path d="M6 6h2v12H6zM9.5 12l8.5 6V6z"/>
+                  </svg>
+                </button>
+                <button
+                  class="transport-btn"
+                  aria-label="Skip current song"
+                  title="Skip"
+                  @click="$emit('skip')"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="22" height="22" aria-hidden="true">
+                    <path d="M6 18l8.5-6L6 6zM16 6h2v12h-2z"/>
+                  </svg>
+                </button>
+              </div>
+
+              <div class="artwork-controls__right">
+                <div class="volume-controls" :style="{ '--vol': localVolume + '%' }">
+                  <span class="volume-label">{{ localVolume }}%</span>
+                  <div class="slider-group">
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      :value="localVolume"
+                      class="volume-slider"
+                      aria-label="Volume"
+                      @input="handleSliderInput"
+                      @change="handleSliderCommit"
+                    />
+                  </div>
+                  <button
+                    class="mute-toggle"
+                    :class="{ muted: isMuted || localVolume === 0 }"
+                    :aria-label="(isMuted || localVolume === 0) ? 'Unmute' : 'Mute'"
+                    :title="(isMuted || localVolume === 0) ? 'Unmute' : 'Mute'"
+                    @click="toggleMute"
+                  >
+                    <svg v-if="isMuted || localVolume === 0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                      <path d="M3.63 3.63a.996.996 0 000 1.41L7.29 8.7 7 9H4c-.55 0-1 .45-1 1v4c0 .55.45 1 1 1h3l3.29 3.29c.63.63 1.71.18 1.71-.71v-4.17l4.18 4.18c-.49.37-1.02.68-1.6.91-.36.15-.58.53-.58.92 0 .72.73 1.18 1.39.91.8-.33 1.55-.77 2.22-1.31l1.34 1.34a.996.996 0 101.41-1.41L5.05 3.63c-.39-.39-1.02-.39-1.42 0z"/>
+                    </svg>
+                    <svg v-else-if="localVolume < 50" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                      <path d="M18.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM5 9v6h4l5 5V4L9 9H5z"/>
+                    </svg>
+                    <svg v-else xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                      <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+                    </svg>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -34,57 +114,6 @@
               :disabled="currentUser.role === 'host'"
             />
           </div>
-        </div>
-      </div>
-
-      <!-- Bottom: volume + transport controls grouped in one control bar.
-           Render only for users who can control playback; guests/non-control
-           users see no empty bar. -->
-      <div v-if="canControl" class="control-bar">
-        <div class="volume-controls">
-          <button
-            class="mute-toggle"
-            :class="{ muted: isMuted || localVolume === 0 }"
-            :aria-label="(isMuted || localVolume === 0) ? 'Unmute' : 'Mute'"
-            :title="(isMuted || localVolume === 0) ? 'Unmute' : 'Mute'"
-            @click="toggleMute"
-          >
-            <svg v-if="isMuted || localVolume === 0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
-              <path d="M3.63 3.63a.996.996 0 000 1.41L7.29 8.7 7 9H4c-.55 0-1 .45-1 1v4c0 .55.45 1 1 1h3l3.29 3.29c.63.63 1.71.18 1.71-.71v-4.17l4.18 4.18c-.49.37-1.02.68-1.6.91-.36.15-.58.53-.58.92 0 .72.73 1.18 1.39.91.8-.33 1.55-.77 2.22-1.31l1.34 1.34a.996.996 0 101.41-1.41L5.05 3.63c-.39-.39-1.02-.39-1.42 0z"/>
-            </svg>
-            <svg v-else-if="localVolume < 50" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
-              <path d="M18.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM5 9v6h4l5 5V4L9 9H5z"/>
-            </svg>
-            <svg v-else xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
-              <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
-            </svg>
-          </button>
-          <div class="slider-group">
-            <input
-              type="range"
-              min="0"
-              max="100"
-              :value="localVolume"
-              class="volume-slider"
-              aria-label="Volume"
-              @input="handleSliderInput"
-              @change="handleSliderCommit"
-            />
-            <span class="volume-label">{{ localVolume }}%</span>
-          </div>
-        </div>
-
-        <div class="host-controls">
-          <BaseButton variant="secondary" :aria-label="status === 'playing' ? 'Pause playback' : 'Start playback'" @click="$emit('toggle-playback')">
-            <span v-if="status === 'playing'">Pause</span>
-            <span v-else>Play</span>
-          </BaseButton>
-          <BaseButton variant="primary" aria-label="Play previous song" @click="handlePrev">
-            Previous
-          </BaseButton>
-          <BaseButton variant="primary" aria-label="Skip current song" @click="$emit('skip')">
-            Skip
-          </BaseButton>
         </div>
       </div>
     </div>
@@ -482,8 +511,11 @@ function handleSliderInput(event) {
   // Non-host: only update the slider visually; commit on @change.
 }
 
-function handleSliderCommit(event) {
-  const val = clampVolume(Number(event.target.value))
+// Shared commit path used by both the range slider (@change) and the artwork
+// wheel handler. Centralizes throttle / lastAssumedRemoteVolume behavior so
+// the existing volume contract is preserved for non-host canControl users.
+function commitVolume(newVal) {
+  const val = clampVolume(Number(newVal))
   localVolume.value = val
   if (props.isHost) {
     setHostVolume(val)
@@ -516,6 +548,20 @@ function handleSliderCommit(event) {
     isMuted.value = false
     previousNonZeroVolume.value = val
   }
+}
+
+function handleSliderCommit(event) {
+  commitVolume(Number(event.target.value))
+}
+
+// Wheel input on the artwork overlay adjusts volume through the same path.
+// deltaY > 0 (wheel down) decreases volume; deltaY < 0 (wheel up) increases.
+function handleWheelVolume(event) {
+  if (!props.canControl) return
+  event.preventDefault()
+  const step = 5
+  const delta = event.deltaY > 0 ? -step : step
+  commitVolume(localVolume.value + delta)
 }
 
 function toggleMute() {
@@ -734,22 +780,22 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
 }
 
 .now-top {
-  display: grid;
-  grid-template-columns: minmax(220px, 1.1fr) minmax(0, 1fr);
-  gap: 1.25rem;
-  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  align-items: stretch;
+  width: 100%;
 }
 
 .artwork-section {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   justify-content: center;
   width: 100%;
 }
 
 .artwork-container {
   width: 100%;
-  max-width: 420px;
   aspect-ratio: 16 / 9;
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -779,6 +825,93 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
   background: repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.05) 0 1px, transparent 1px 5px);
 }
 
+/* Hidden overlay region: anchored to bottom of artwork; reveals on hover/focus.
+   Scoped behind the YouTube iframe visually but reachable above the scanline. */
+.artwork-controls {
+  position: absolute;
+  inset: auto 0 0 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0));
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity .2s ease, visibility .2s ease;
+  z-index: 5;
+}
+
+.artwork-container:hover .artwork-controls,
+.artwork-controls:focus-within {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+/* Touch / coarse pointer: keep reachable without hover. */
+@media (hover: none) {
+  .artwork-controls {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+  }
+}
+
+/* Centered transport cluster: absolutely centered on the overlay so it stays
+   centered regardless of the right-cluster's width. */
+.artwork-controls__center {
+  position: absolute;
+  left: 50%;
+  bottom: 0.65rem;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+/* Right-edge volume cluster wrapper. */
+.artwork-controls__right {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 1;
+}
+
+.transport-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 1px solid rgba(0, 212, 255, 0.32);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--accent-hover);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  flex-shrink: 0;
+}
+
+.transport-btn:hover {
+  background: rgba(0, 212, 255, 0.18);
+  border-color: var(--accent-hover);
+  color: #fff;
+}
+
+.transport-btn:focus-visible {
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 2px;
+}
+
+.transport-btn svg {
+  pointer-events: none;
+}
+
 .youtube-wrapper {
   position: absolute;
   top: 0;
@@ -792,7 +925,8 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
   flex-direction: column;
   gap: 0.5rem;
   min-width: 0;
-  text-align: left;
+  text-align: center;
+  align-items: center;
 }
 
 .song-title {
@@ -820,46 +954,26 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
   margin-top: 0.25rem;
 }
 
-.control-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  flex-wrap: wrap;
-  padding: 0.75rem 1rem;
-  border-radius: var(--radius-sm);
-  background: rgba(0, 0, 0, 0.28);
-  border: 1px solid rgba(0, 212, 255, 0.18);
-}
-
-.host-controls {
-  display: flex;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-end;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
 .volume-controls {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.75rem;
-  background: rgba(0, 0, 0, 0.35);
+  gap: 0.3rem;
+  padding: 0.35rem 0.25rem;
+  background: rgba(0, 0, 0, 0.45);
   border-radius: var(--radius-sm);
-  border: 1px solid rgba(0, 212, 255, 0.22);
-  flex: 0 1 280px;
-  min-width: 200px;
+  border: 1px solid rgba(0, 212, 255, 0.18);
+  flex: 0 0 auto;
+  width: 28px;
+  --vol: 50%;
 }
 
 .mute-toggle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: none;
   border-radius: var(--radius-sm);
@@ -885,19 +999,28 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
 .slider-group {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  justify-content: center;
   flex: 1;
-  min-width: 0;
+  min-height: 0;
+  width: 100%;
 }
 
 .volume-slider {
   -webkit-appearance: none;
   appearance: none;
-  width: 100%;
-  min-width: 60px;
-  height: 4px;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 12px;
+  height: 90px;
+  min-height: 70px;
   border-radius: 2px;
-  background: rgba(0, 212, 255, 0.25);
+  background: linear-gradient(
+    to top,
+    rgba(0, 212, 255, 0.45) 0%,
+    rgba(0, 212, 255, 0.45) var(--vol, 50%),
+    rgba(0, 212, 255, 0.15) var(--vol, 50%),
+    rgba(0, 212, 255, 0.15) 100%
+  );
   outline: none;
   cursor: pointer;
 }
@@ -924,19 +1047,26 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
   box-shadow: 0 0 6px rgba(0, 255, 136, 0.4);
 }
 
+.volume-slider::-moz-range-track {
+  background: rgba(0, 212, 255, 0.25);
+  width: 4px;
+  border-radius: 2px;
+}
+
 .volume-slider:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
 .volume-label {
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   font-weight: 600;
   color: var(--text-muted);
   min-width: 3ch;
-  text-align: right;
+  text-align: center;
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
+  line-height: 1;
 }
 
 .empty-state {
@@ -961,40 +1091,20 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
   margin-top: 0.5rem;
 }
 
-/* Tablet: stack artwork above song info, keep control bar together */
-@media (max-width: 900px) {
-  .now-top {
-    grid-template-columns: 1fr;
-    gap: 0.75rem;
-  }
-
-  .song-info {
-    text-align: center;
-    align-items: center;
-  }
-
+/* Mobile: keep song title wrapping so centered layout doesn't overflow.
+   On narrow screens wrap the overlay so volume and transport don't collide. */
+@media (max-width: 640px) {
   .song-title {
     white-space: normal;
   }
 }
 
-/* Mobile: stack volume above transport buttons so nothing squishes */
-@media (max-width: 640px) {
-  .control-bar {
-    flex-direction: column;
-    align-items: stretch;
+@media (max-width: 480px) {
+  .artwork-controls {
+    flex-wrap: wrap;
   }
-
-  .volume-controls {
-    flex: 1 1 auto;
-    width: 100%;
-    min-width: 0;
-  }
-
-  .host-controls {
-    justify-content: center;
-    width: 100%;
-  }
+  .artwork-controls__center { order: 2; width: 100%; justify-content: center; }
+  .artwork-controls__right  { order: 1; width: 100%; justify-content: flex-end; }
 }
 
 @keyframes float {

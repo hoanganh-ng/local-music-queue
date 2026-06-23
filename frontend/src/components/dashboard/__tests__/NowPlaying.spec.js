@@ -697,4 +697,187 @@ describe('NowPlaying — Volume slider and mute/unmute controls', () => {
     // localVolume should also update
     expect(wrapper.find('.volume-label').text()).toBe('60%')
   })
+
+  it('does not render the artwork overlay when canControl is false', async () => {
+    const wrapper = mount(NowPlaying, {
+      props: {
+        currentSong: song,
+        status: 'playing',
+        isHost: false,
+        canControl: false,
+      },
+      global: {
+        stubs: { BaseButton: true, VoteButton: true }
+      }
+    })
+    await nextTick()
+    expect(wrapper.find('.artwork-controls').exists()).toBe(false)
+  })
+
+  it('renders the artwork overlay inside .artwork-container when canControl is true', async () => {
+    const wrapper = mountHost(song)
+    await nextTick()
+    const art = wrapper.find('.artwork-container')
+    expect(art.exists()).toBe(true)
+    expect(art.find('.artwork-controls').exists()).toBe(true)
+    // Volume controls live inside the overlay.
+    expect(art.find('.volume-controls').exists()).toBe(true)
+  })
+
+  it('host: wheel up over the artwork increases localVolume via commitVolume', async () => {
+    const wrapper = mountHost(song)
+    await nextTick()
+    const before = wrapper.vm.localVolume
+    await wrapper.find('.artwork-container').trigger('wheel', { deltaY: -100 })
+    expect(wrapper.vm.localVolume).toBe(before + 5)
+  })
+
+  it('host: wheel down over the artwork decreases localVolume', async () => {
+    const wrapper = mountHost(song)
+    await nextTick()
+    const before = wrapper.vm.localVolume
+    await wrapper.find('.artwork-container').trigger('wheel', { deltaY: 100 })
+    expect(wrapper.vm.localVolume).toBe(before - 5)
+  })
+
+  it('host: wheel input clamps to 0..100', async () => {
+    const wrapper = mountHost(song)
+    await nextTick()
+    // Drive volume to 95 with a few wheel-ups, then a single up clamps to 100.
+    for (let i = 0; i < 10; i++) {
+      await wrapper.find('.artwork-container').trigger('wheel', { deltaY: -100 })
+    }
+    expect(wrapper.vm.localVolume).toBe(100)
+  })
+
+  it('non-host: wheel input fires api.changeVolume direction commands via commitVolume', async () => {
+    const { api } = await import('../../../services/api')
+    api.changeVolume.mockClear()
+    const wrapper = mountNonHost(song)
+    await nextTick()
+
+    // Wheel up: 50 → 55. diff = 5, steps = round(5/10) = 1 → 'up'.
+    await wrapper.find('.artwork-container').trigger('wheel', { deltaY: -100 })
+    await vi.advanceTimersByTimeAsync(300)
+    await flushPromises()
+    expect(api.changeVolume).toHaveBeenCalledWith('up')
+
+    // Wheel down: 55 → 50. diff = -5, steps = round(-5/10) = 0 → no call.
+    api.changeVolume.mockClear()
+    await wrapper.find('.artwork-container').trigger('wheel', { deltaY: 100 })
+    await vi.advanceTimersByTimeAsync(300)
+    await flushPromises()
+    expect(api.changeVolume).not.toHaveBeenCalled()
+
+    // Bigger wheel-down: 50 → 40. diff = -10, steps = -1 → 'down'.
+    api.changeVolume.mockClear()
+    await wrapper.find('.artwork-container').trigger('wheel', { deltaY: 100 })
+    await wrapper.find('.artwork-container').trigger('wheel', { deltaY: 100 })
+    await vi.advanceTimersByTimeAsync(300)
+    await flushPromises()
+    expect(api.changeVolume).toHaveBeenCalledWith('down')
+  })
+
+  it('wheel is a no-op when canControl is false', async () => {
+    const { api } = await import('../../../services/api')
+    api.changeVolume.mockClear()
+    const wrapper = mount(NowPlaying, {
+      props: {
+        currentSong: song,
+        status: 'playing',
+        isHost: false,
+        canControl: false,
+      },
+      global: {
+        stubs: { BaseButton: true, VoteButton: true }
+      }
+    })
+    await nextTick()
+    await wrapper.find('.artwork-container').trigger('wheel', { deltaY: -100 })
+    await vi.advanceTimersByTimeAsync(300)
+    await flushPromises()
+    expect(api.changeVolume).not.toHaveBeenCalled()
+  })
+
+  it('renders three transport buttons inside .artwork-controls when canControl is true', async () => {
+    const wrapper = mountHost(song)
+    await nextTick()
+    const overlay = wrapper.find('.artwork-controls')
+    expect(overlay.exists()).toBe(true)
+    const transport = overlay.findAll('.transport-btn')
+    expect(transport.length).toBe(3)
+    // The volume cluster still lives inside the same overlay region.
+    expect(overlay.find('.volume-controls').exists()).toBe(true)
+    expect(overlay.find('.artwork-controls__center').exists()).toBe(true)
+    expect(overlay.find('.artwork-controls__right').exists()).toBe(true)
+  })
+
+  it('does not render .artwork-controls when canControl is false', async () => {
+    const wrapper = mount(NowPlaying, {
+      props: {
+        currentSong: song,
+        status: 'playing',
+        isHost: true,
+        canControl: false,
+      },
+      global: {
+        stubs: { BaseButton: true, VoteButton: true }
+      }
+    })
+    await nextTick()
+    expect(wrapper.find('.artwork-controls').exists()).toBe(false)
+    expect(wrapper.find('.transport-btn').exists()).toBe(false)
+  })
+
+  it('transport play/pause emits toggle-playback', async () => {
+    const wrapper = mountHost(song)
+    await nextTick()
+    const buttons = wrapper.findAll('.transport-btn')
+    await buttons[0].trigger('click')
+    expect(wrapper.emitted('toggle-playback')).toBeTruthy()
+  })
+
+  it('transport previous calls api.prevSong', async () => {
+    const { api } = await import('../../../services/api')
+    api.prevSong.mockClear()
+    const wrapper = mountHost(song)
+    await nextTick()
+    const buttons = wrapper.findAll('.transport-btn')
+    await buttons[1].trigger('click')
+    expect(api.prevSong).toHaveBeenCalledWith('HostUser')
+  })
+
+  it('transport skip emits skip', async () => {
+    const wrapper = mountHost(song)
+    await nextTick()
+    const buttons = wrapper.findAll('.transport-btn')
+    await buttons[2].trigger('click')
+    expect(wrapper.emitted('skip')).toBeTruthy()
+  })
+
+  it('play/pause icon reflects status (pause icon when playing)', async () => {
+    const wrapper = mountHost(song) // status: 'playing'
+    await nextTick()
+    const firstBtn = wrapper.findAll('.transport-btn')[0]
+    const svgPath = firstBtn.find('svg path').attributes('d')
+    expect(svgPath).toContain('M6 5h4v14H6z')
+  })
+
+  it('play/pause icon reflects status (play icon when paused)', async () => {
+    const wrapper = mount(NowPlaying, {
+      props: {
+        currentSong: song,
+        status: 'paused',
+        isHost: true,
+        canControl: true,
+      },
+      global: {
+        stubs: { BaseButton: true, VoteButton: true }
+      }
+    })
+    await nextTick()
+    const firstBtn = wrapper.findAll('.transport-btn')[0]
+    const svgPath = firstBtn.find('svg path').attributes('d')
+    expect(svgPath).toContain('M8 5v14l11-7z')
+  })
 })
