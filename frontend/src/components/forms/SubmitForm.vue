@@ -328,7 +328,7 @@ defineExpose({
 
 <style scoped>
 .submit-form {
-  padding: 1.5rem;
+  padding: 1rem 1.25rem;
   display: flex;
   flex-direction: column;
   gap: 0.5rem;

@@ -8,19 +8,37 @@
     </div>
 
     <div v-if="currentSong" class="song-details">
-      <!-- Thumbnail/Visuals and Volume Controls -->
-      <div class="artwork-section">
-        <div class="artwork-container">
-          <!-- We can use the default maxresdefault thumbnail from YouTube -->
-          <img v-if="!isHost || !showPlayer" :src="thumbnailUrl" alt="Album Art" class="artwork-img" />
+      <!-- Top: artwork + song info read as one "current song" block -->
+      <div class="now-top">
+        <div class="artwork-section">
+          <div class="artwork-container">
+            <!-- We can use the default maxresdefault thumbnail from YouTube -->
+            <img v-if="!isHost || !showPlayer" :src="thumbnailUrl" alt="Album Art" class="artwork-img" />
 
-          <!-- Host Only: The actual YouTube IFrame -->
-          <div v-if="isHost && showPlayer" class="youtube-wrapper">
-            <div id="youtube-player"></div>
+            <!-- Host Only: The actual YouTube IFrame -->
+            <div v-if="isHost && showPlayer" class="youtube-wrapper">
+              <div id="youtube-player"></div>
+            </div>
           </div>
         </div>
 
-        <!-- Volume Controls next to artwork -->
+        <div class="song-info">
+          <h3 class="song-title" :title="currentSong.title">{{ currentSong.title }}</h3>
+          <p class="song-meta">Added by: <strong>{{ currentSong.added_by }}</strong></p>
+
+          <!-- Vote to Skip visually anchored to the current song -->
+          <div v-if="currentSong && currentUser && currentUser.role !== 'host'" class="vote-section">
+            <VoteButton
+              voteType="skip"
+              :songID="currentSong.id"
+              :disabled="currentUser.role === 'host'"
+            />
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom: volume + transport controls grouped in one control bar -->
+      <div class="control-bar">
         <div v-if="canControl" class="volume-controls">
           <button
             class="mute-toggle"
@@ -53,34 +71,19 @@
             <span class="volume-label">{{ localVolume }}%</span>
           </div>
         </div>
-      </div>
 
-      <div class="song-info">
-        <h3 class="song-title" :title="currentSong.title">{{ currentSong.title }}</h3>
-        <p class="song-meta">Added by: <strong>{{ currentSong.added_by }}</strong></p>
-      </div>
-
-      <!-- Vote Button (Guest/Admin only) -->
-      <div v-if="currentSong && currentUser && currentUser.role !== 'host'" class="vote-section">
-        <VoteButton
-          voteType="skip"
-          :songID="currentSong.id"
-          :disabled="currentUser.role === 'host'"
-        />
-      </div>
-
-      <!-- Controls (Host or Admin) -->
-      <div v-if="canControl" class="host-controls">
-        <BaseButton variant="secondary" :aria-label="status === 'playing' ? 'Pause playback' : 'Start playback'" @click="$emit('toggle-playback')">
-          <span v-if="status === 'playing'">Pause</span>
-          <span v-else>Play</span>
-        </BaseButton>
-        <BaseButton variant="primary" aria-label="Play previous song" @click="handlePrev">
-          Previous
-        </BaseButton>
-        <BaseButton variant="primary" aria-label="Skip current song" @click="$emit('skip')">
-          Skip
-        </BaseButton>
+        <div v-if="canControl" class="host-controls">
+          <BaseButton variant="secondary" :aria-label="status === 'playing' ? 'Pause playback' : 'Start playback'" @click="$emit('toggle-playback')">
+            <span v-if="status === 'playing'">Pause</span>
+            <span v-else>Play</span>
+          </BaseButton>
+          <BaseButton variant="primary" aria-label="Play previous song" @click="handlePrev">
+            Previous
+          </BaseButton>
+          <BaseButton variant="primary" aria-label="Skip current song" @click="$emit('skip')">
+            Skip
+          </BaseButton>
+        </div>
       </div>
     </div>
 
@@ -723,21 +726,28 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
 .song-details {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 1.25rem;
+  width: 100%;
+  align-items: stretch;
+}
+
+.now-top {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.1fr) minmax(0, 1fr);
+  gap: 1.25rem;
   align-items: center;
 }
 
 .artwork-section {
   display: flex;
-  gap: 1rem;
   align-items: center;
-  width: 100%;
   justify-content: center;
+  width: 100%;
 }
 
 .artwork-container {
   width: 100%;
-  max-width: 400px;
+  max-width: 420px;
   aspect-ratio: 16 / 9;
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -776,15 +786,18 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
 }
 
 .song-info {
-  text-align: center;
-  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+  text-align: left;
 }
 
 .song-title {
-  font-size: 1.5rem;
+  font-size: 1.35rem;
   font-weight: 700;
   color: var(--accent);
-  margin-bottom: 0.5rem;
+  margin: 0;
   text-shadow: var(--glow-sm);
   white-space: nowrap;
   overflow: hidden;
@@ -794,28 +807,49 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
 .song-meta {
   font-size: 0.875rem;
   color: var(--text-muted);
+  margin: 0;
 }
 
 .song-meta strong {
   color: var(--accent-hover);
 }
 
+.vote-section {
+  margin-top: 0.25rem;
+}
+
+.control-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 1rem;
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(0, 212, 255, 0.18);
+}
+
 .host-controls {
   display: flex;
-  gap: 1rem;
-  margin-top: 1rem;
+  gap: 0.75rem;
   flex-wrap: wrap;
-  justify-content: center;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .volume-controls {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  background: rgba(0, 0, 0, 0.3);
+  padding: 0.4rem 0.75rem;
+  background: rgba(0, 0, 0, 0.35);
   border-radius: var(--radius-sm);
-  border: 1px solid rgba(0, 212, 255, 0.2);
+  border: 1px solid rgba(0, 212, 255, 0.22);
+  flex: 0 1 280px;
+  min-width: 200px;
 }
 
 .mute-toggle {
@@ -859,7 +893,6 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
   appearance: none;
   width: 100%;
   min-width: 60px;
-  max-width: 120px;
   height: 4px;
   border-radius: 2px;
   background: rgba(0, 212, 255, 0.25);
@@ -924,6 +957,42 @@ watch(() => globalStore.queueState.volumeChangeTimestamp, () => {
   font-size: 0.875rem;
   opacity: 0.7;
   margin-top: 0.5rem;
+}
+
+/* Tablet: stack artwork above song info, keep control bar together */
+@media (max-width: 900px) {
+  .now-top {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+
+  .song-info {
+    text-align: center;
+    align-items: center;
+  }
+
+  .song-title {
+    white-space: normal;
+  }
+}
+
+/* Mobile: stack volume above transport buttons so nothing squishes */
+@media (max-width: 640px) {
+  .control-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .volume-controls {
+    flex: 1 1 auto;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .host-controls {
+    justify-content: center;
+    width: 100%;
+  }
 }
 
 @keyframes float {

@@ -444,7 +444,7 @@ const toggleAutoQueue = async () => {
 }
 
 .col-center {
-  gap: 1rem;
+  gap: 0.85rem;
 }
 
 .player-wrapper {
