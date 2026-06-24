@@ -209,8 +209,8 @@ volumes:
 | Concern | Decision |
 | --- | --- |
 | Compose version | Continues to use `version: '3.8'`. No `version` bump required for `condition: service_healthy` / `service_completed_successfully`. |
-| Service ordering | `postgres` is the foundation. `db-init` waits for `postgres` healthy, runs `migrate up`, and exits 0 on success. `backend` waits for both `postgres` healthy and `db-init` success. |
-| `Dockerfile.migrate` | A small multi-stage image that copies the migrations directory and the `cmd/migrate` binary, then runs `./migrate up` on container start. It is `restart: "no"` and exits cleanly. |
+| Service ordering | `postgres` is the foundation. `db-init` waits for `postgres` healthy, runs `migrate-schema up`, and exits 0 on success. `backend` waits for both `postgres` healthy and `db-init` success. |
+| `Dockerfile.migrate` | A small multi-stage image that copies the migrations directory and the `cmd/migrate-schema` binary, then runs `migrate-schema up` on container start. It is `restart: "no"` and exits cleanly. The data copy CLI is a separate binary, `cmd/migrate-data`, reserved for R03 only and not invoked by `db-init`. |
 | Existing `backend-db` volume | Retained during R02's cutover window AND through R03. R03 is the only sprint authorized to remove it, and only after R03 has successfully migrated and verified the SQLite data in PostgreSQL. R02 does NOT remove it. |
 | Existing `letsencrypt` volumes | Unchanged. Out of scope. |
 | Port collisions | `POSTGRES_PORT` defaults to `5432`; explicitly documented to avoid host-port collisions with `BACKEND_PORT` (`443`/`1111`) and `FRONTEND_*_PORT` (`80`/`443`). |
@@ -242,12 +242,12 @@ Decision: **The `*sql.DB` boundary and the existing repository interfaces are pr
 | `QueueRepository` interface | Unchanged. `*PostgresQueueRepository` implements it. |
 | `UserRepository` interface | Unchanged. `*PostgresUserRepository` implements it. |
 | `AutoQueueRepository` interface | Unchanged. `*PostgresAutoQueueRepository` implements it. |
-| Wiring in `main.go` | `persistence.NewPostgresRepository(cfg.DatabaseURL)` is the new entry point. The call to `persistence.NewSQLiteRepository(cfg.DBPath)` is removed at the end of R02. R02's commit log shows the swap. |
-| `go.mod` | Adds `github.com/jackc/pgx/v5` and `github.com/golang-migrate/migrate/v4`. Removes `modernc.org/sqlite` after the cutover (R02). |
+| Wiring in `main.go` | `persistence.NewPostgresRepository(cfg.DatabaseURL)` is the new entry point. R02 keeps the existing `persistence.NewSQLiteRepository(cfg.DBPath)` call live and gated (selected when `DATABASE_URL` is empty). R02 does NOT remove the SQLite constructor; R03 is the only sprint authorized to remove it, and only after R03 verifies the data migration. R03's commit log shows the swap. |
+| `go.mod` | Adds `github.com/jackc/pgx/v5` and `github.com/golang-migrate/migrate/v4`. **Keeps `modernc.org/sqlite` available** through R02 AND R03 (R03 still reads from the SQLite source file for the data copy). R03 is the only sprint authorized to remove `modernc.org/sqlite`, and only after R03 verifies the data migration. R02 does NOT remove it. |
 | `embed.FS` for migrations | Migrations are read from the embed FS by the `golang-migrate` library, not from disk. This keeps the binary self-contained. |
 | Use cases | Untouched. `usecase/queue`, `usecase/priority`, `usecase/vote`, `usecase/autoqueue` continue to depend on the repository interfaces only. |
 | Handlers | Untouched. The HTTP and WebSocket layers continue to depend on use cases only. |
-| Tests | The existing `sqlite_repository_test.go` and `auto_queue_repo_test.go` are kept as a fallback during R02, then deleted at the end of R02. New `postgres_repository_test.go` is added in R02 against the deterministic test schema. |
+| Tests | The existing `sqlite_repository_test.go` and `auto_queue_repo_test.go` are kept as a fallback through R02 AND R03, and are removed by R03 (not by R02), only after R03 verifies the data migration. New `postgres_repository_test.go` is added in R02 against the deterministic test schema. |
 | Type mapping | The migration script defines the canonical PostgreSQL types. `INTEGER PRIMARY KEY AUTOINCREMENT` becomes `BIGSERIAL PRIMARY KEY`. `DATETIME` becomes `TIMESTAMPTZ`. `TEXT` stays `TEXT`. `INTEGER` stays `INTEGER`/`BIGINT` as appropriate. |
 | JSON storage | `queue_state.data` remains `TEXT` containing JSON. The application does not use SQLite's `JSON1` extension, so no PostgreSQL `jsonb` conversion is required in R02. (R06 may revisit.) |
 | Triggers | The `trg_play_history_cap` SQLite trigger is replaced by a server-side cap (see §13). No PostgreSQL trigger is required. |
@@ -292,7 +292,7 @@ Decision: **A one-shot, idempotent, offline CLI that reads from the existing SQL
 ### Rollback limits (R03 documents)
 
 - **No automatic down-migration.** The CLI does not implement `down`.
-- **Rollback is restore-only.** The operator must restore the previous PostgreSQL state from the pre-migration snapshot OR restart the backend against a restored SQLite file. R02's "SQLite fallback" path is removed by the end of R02, so R03's restore must use the pre-migration PostgreSQL snapshot.
+- **Rollback is restore-only.** The operator must restore the previous PostgreSQL state from the pre-migration snapshot OR restart the backend against a restored SQLite file. The SQLite fallback / SQLite source access (the `DB_PATH` path, the `backend-db` volume, and the SQLite repository implementations) remains available through R03 until R03's data migration verification completes; R03's restore may still use the SQLite source path. R03 is the only sprint authorized to remove that fallback, and only after R03 verifies the data migration.
 - **Identity remap is one-way.** Once `users.id` is remapped and `priority_transactions.user_id` is rewritten, there is no automatic way to revert to the original `legacy_id` mapping. The mapping is preserved in the `legacy_id` column for audit only.
 
 ## 12. R02 compatibility requirement: preserve current single-context behavior
