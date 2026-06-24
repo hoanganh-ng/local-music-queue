@@ -162,7 +162,22 @@ The ADR should be practical, decision-oriented, and explicit about what is decid
 
 ## Execution Note
 
-The ADR was authored and saved to `documents/00-project-management/ADRS/001-room-architecture-and-contracts.md`. The sprint document was updated to record the ADR location and verification results. No runtime, frontend, backend, configuration, deployment, or test files were modified.
+> **Status update (post-review):** Sprint 006 / R00 remains in progress. The ADR was authored and saved to `documents/00-project-management/ADRS/001-room-architecture-and-contracts.md`. A focused documentation-fix pass was applied to address Architect review feedback (migrated-room bootstrap deadlock, player lease release semantics, heartbeat visibility wording, lease timestamp wording, ADR status wording, broken relative links). No runtime, frontend, backend, configuration, deployment, or test files were modified. PostgreSQL and room implementation have not been started.
+
+### ADR Location
+
+- [`documents/00-project-management/ADRS/001-room-architecture-and-contracts.md`](../ADRS/001-room-architecture-and-contracts.md)
+
+### ADR Review Fix Pass (Architect Feedback)
+
+The following issues identified during review were corrected in the ADR:
+
+1. **Migrated-room bootstrap deadlock** — §11 now defines an explicit migration-time bootstrap rule. The Product Owner supplies the migrated room name/slug and an initial migrated-room host user (e.g. email). Migration resolves that user and creates the `RoomMember` row with `role = 'host'`. If the user cannot be resolved, migration fails clearly and atomically. Normal invitees cannot self-select `host`.
+2. **Player lease release semantics** — §6 release row now separates explicit "Leave Room" from transient page lifecycle events (`beforeunload`, `pagehide`, network disconnect). Explicit leave may release/archive; transient events rely on heartbeat expiry + grace. Reconnect within grace may renew or reclaim.
+3. **Heartbeat visibility wording** — §6 heartbeat row no longer says "while the tab is visible". Heartbeat runs while the page is loaded and the user holds the active player lease; browser throttling of timers is acknowledged as an implementation-time tuning concern.
+4. **Lease timestamp wording** — §6 claim row now states the timestamps explicitly: `claimed_at = now`, `last_heartbeat_at = now`, `expires_at = now + 60 seconds`, grace ends at `expires_at + 30 seconds`. The misleading "30-second last_heartbeat_at" wording is removed.
+5. **ADR status** — Front-matter status is now `Proposed — awaiting Architect review and Product Owner approval`. The ADR no longer claims `Accepted` while still under review.
+6. **Broken relative links** — Cross-repo links in §1 (`internal/...`, `cmd/...`, `frontend/...`) now use the correct `../../../` prefix from the ADR path. Links to nearby docs (`../ROOM_EPIC_SPRINT_SEQUENCE.md`, `../PROJECT_STATE.md`) remain unchanged.
 
 ### ADR Location
 

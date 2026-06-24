@@ -1,6 +1,6 @@
 # ADR 001 — Room Architecture and Contracts
 
-- Status: Accepted (Sprint 006 / R00 deliverable; awaiting Architect review and Product Owner approval)
+- Status: Proposed — awaiting Architect review and Product Owner approval (Sprint 006 / R00 deliverable)
 - Date: 2026-06-24
 - Scope: Defines the room domain, room-scoped REST and WebSocket contracts, persistence and migration direction, PostgreSQL timing, frontend flow, authorization caveats, and the transition strategy for the existing global API. This ADR is a contract plan; it does not authorize runtime implementation in this sprint.
 
@@ -8,14 +8,14 @@
 
 The application currently behaves as a single global playback context:
 
-- One singleton `entity.Queue` JSON blob is persisted in `queue_state` (single row, `id = 1`) in SQLite ([`internal/infrastructure/persistence/sqlite_repository.go:41`](../../internal/infrastructure/persistence/sqlite_repository.go#L41)).
-- REST, voting, and auto-queue endpoints are global ([`cmd/server/main.go:168`](../../cmd/server/main.go#L168)).
-- The WebSocket hub is a single shared broadcast channel serving one global event stream ([`internal/delivery/ws/hub.go:62`](../../internal/delivery/ws/hub.go#L62)).
-- The hub accepts any origin (`CheckOrigin: return true`) and uses an unvalidated `user_id` query parameter for connection identification ([`internal/delivery/ws/hub.go:16`](../../internal/delivery/ws/hub.go#L16)).
-- Vote sessions live in process memory, scoped by a session ID derived from the current song ID (`"skip:<videoID>"` / `"prioritize:<videoID>"`) ([`internal/usecase/vote/interactor.go:63`](../../internal/usecase/vote/interactor.go#L63)).
-- Auto-queue holds a single process-wide in-flight `triggering` flag and a single global config row (`auto_queue_config`) plus a single process-wide `play_history` ([`internal/usecase/autoqueue/interactor.go:65`](../../internal/usecase/autoqueue/interactor.go#L65), [`sqlite_repository.go:88`](../../internal/infrastructure/persistence/sqlite_repository.go#L88)).
-- The frontend exposes one global `globalStore` with one `queueState`, one WebSocket connection, and one user session ([`frontend/src/store/index.js:25`](../../frontend/src/store/index.js#L25)).
-- The host is currently whichever account has `role === 'host'` and the device that renders the YouTube iframe ([`frontend/src/components/dashboard/NowPlaying.vue:18`](../../frontend/src/components/dashboard/NowPlaying.vue#L18)).
+- One singleton `entity.Queue` JSON blob is persisted in `queue_state` (single row, `id = 1`) in SQLite ([`internal/infrastructure/persistence/sqlite_repository.go:41`](../../../internal/infrastructure/persistence/sqlite_repository.go#L41)).
+- REST, voting, and auto-queue endpoints are global ([`cmd/server/main.go:168`](../../../cmd/server/main.go#L168)).
+- The WebSocket hub is a single shared broadcast channel serving one global event stream ([`internal/delivery/ws/hub.go:62`](../../../internal/delivery/ws/hub.go#L62)).
+- The hub accepts any origin (`CheckOrigin: return true`) and uses an unvalidated `user_id` query parameter for connection identification ([`internal/delivery/ws/hub.go:16`](../../../internal/delivery/ws/hub.go#L16)).
+- Vote sessions live in process memory, scoped by a session ID derived from the current song ID (`"skip:<videoID>"` / `"prioritize:<videoID>"`) ([`internal/usecase/vote/interactor.go:63`](../../../internal/usecase/vote/interactor.go#L63)).
+- Auto-queue holds a single process-wide in-flight `triggering` flag and a single global config row (`auto_queue_config`) plus a single process-wide `play_history` ([`internal/usecase/autoqueue/interactor.go:65`](../../../internal/usecase/autoqueue/interactor.go#L65), [`sqlite_repository.go:88`](../../../internal/infrastructure/persistence/sqlite_repository.go#L88)).
+- The frontend exposes one global `globalStore` with one `queueState`, one WebSocket connection, and one user session ([`frontend/src/store/index.js:25`](../../../frontend/src/store/index.js#L25)).
+- The host is currently whichever account has `role === 'host'` and the device that renders the YouTube iframe ([`frontend/src/components/dashboard/NowPlaying.vue:18`](../../../frontend/src/components/dashboard/NowPlaying.vue#L18)).
 
 The Product Owner has approved the move to explicit rooms. The decisions captured in [`ROOM_EPIC_SPRINT_SEQUENCE.md`](../ROOM_EPIC_SPRINT_SEQUENCE.md) and the closed Sprint 005 baseline ([`PROJECT_STATE.md`](../PROJECT_STATE.md)) are the inputs this ADR freezes into contracts. This ADR is intentionally documentation-only: no runtime change is authorized by it.
 
@@ -86,10 +86,10 @@ The host is a person. The player is a device. They are **not** the same thing.
 | Concept | Decision |
 | --- | --- |
 | Player lease | Exactly one active `PlayerLease(room_id, lease_id, claimed_by_user_id, claimed_at, last_heartbeat_at, expires_at)` per active room. |
-| Claim | The active host's browser claims the lease through `POST /api/rooms/{roomId}/player/claim`. The lease is created with a default 60-second `expires_at` and a 30-second `last_heartbeat_at`. |
-| Heartbeat | `POST /api/rooms/{roomId}/player/heartbeat` extends `expires_at` by another 60 seconds. The host's browser issues a heartbeat every ~20 seconds while its tab is visible. |
-| Grace | A 30-second grace after `expires_at` permits a missed heartbeat (network blip, brief tab-switch). During grace, the lease is not yet considered expired; new heartbeats revive it. |
-| Release | `POST /api/rooms/{roomId}/player/release` deletes the lease immediately. The host's browser calls this on `beforeunload`, `pagehide`, and explicit "leave room". |
+| Claim | The active host's browser claims the lease through `POST /api/rooms/{roomId}/player/claim`. On claim: `claimed_at = now`, `last_heartbeat_at = now`, `expires_at = now + 60 seconds`. Grace ends at `expires_at + 30 seconds`. |
+| Heartbeat | `POST /api/rooms/{roomId}/player/heartbeat` extends `expires_at` by another 60 seconds. The host's browser issues a heartbeat every ~20 seconds **while the page is loaded and the user holds the active player lease** (i.e. while this client is the lease holder — not gated on tab visibility). Browser background-tab throttling of timers is acknowledged; concrete interval/grace tuning is decided at R05 implementation time. |
+| Grace | A 30-second grace after `expires_at` permits a missed heartbeat (network blip, brief tab-switch, transient page lifecycle event). During grace, the lease is not yet considered expired; new heartbeats revive it. A reconnecting client within grace may renew the existing lease or reclaim it as the same holder. |
+| Release | `POST /api/rooms/{roomId}/player/release` deletes the lease immediately. Release is **only** invoked on an explicit user action (e.g. user clicks "Leave Room"). The lease is **not** released on transient page lifecycle events (`beforeunload`, `pagehide`, network disconnect). Those events rely on heartbeat expiry plus grace: if the user returns or reconnects inside grace, the lease is renewed or reclaimed by the same host/player; if grace elapses without renewal, the lease expires and the room is archived. |
 | Expiry | After grace elapses without a successful heartbeat, the lease is **expired**. The room is archived. See §8. |
 | Duplicate claims | If a lease already exists and is still within grace, a second `claim` returns `409 Conflict` and identifies the current holder. After grace but before archive completes, the claim is rejected with `410 Gone`. |
 | Admin actions | Admin can control an active room, but **cannot** claim the player lease and cannot prevent archive if the lease expires. Admin calling `/player/release` while the lease belongs to the host is rejected with `403 Forbidden`. |
@@ -268,9 +268,30 @@ During the room API introduction (R08), `/ws` continues to accept upgrades and s
 - R06 does **not** create a permanent `main` room and does **not** leave the old global state as an alternate source of truth. The global rows are deleted at the end of R06; only the migrated room remains.
 - The Product Owner supplies the migrated room name at migration time. The name is the **slug** (URL-safe) AND the **display name**. The two are equal in the first implementation.
 
-### Migrated room with no active host/player
+### Migrated room bootstrap
 
-If R06 completes while no host/player lease exists for the migrated room, the room starts in `active` state but **without** an active player lease. The first joiner can claim the lease if they join as host, OR an existing admin can promote a member and that promoted member can claim the lease. There is no automatic bootstrap to a "phantom host".
+Migration-time bootstrap of the migrated room is an explicit, Product-Owner-driven step. It exists to avoid a deadlock in which the migrated room has no host (and only a host can promote or transfer, and only a host can claim the player lease).
+
+The migration MUST be supplied with:
+
+1. The migrated room **name** (and slug) — by the Product Owner.
+2. The **initial migrated room host user** (identified by a stable user identifier, e.g. email) — by the Product Owner.
+
+At migration time the migration MUST:
+
+1. Resolve the supplied host user against the existing user records.
+2. Create the migrated room's `RoomMember` row for that user with `role = 'host'`.
+3. Leave the room in `active` state with exactly one host and no player lease.
+
+If the supplied host user **cannot be resolved** (no matching account, ambiguous match, missing email, etc.) the migration MUST fail clearly and atomically: no partial migrated room, no half-populated membership, and no alternate host assigned. The error message MUST name the unresolved user identifier and the operator action required to resolve it.
+
+After migration completes:
+
+- The initial host is the only host. No other member is promoted to host at migration time.
+- Normal invitees joining the migrated room after migration are inserted as `guest` (see §5). They MUST NOT be able to self-select `host` through any client payload, invite redemption path, or membership mutation.
+- The initial host claims the player lease through the normal `POST /api/rooms/{roomId}/player/claim` flow the first time they open the migrated room's dashboard.
+
+This bootstrap rule supersedes any "first joiner can claim the lease as host" or "existing admin can promote and then claim" behavior for the migrated room. Those flows remain valid for rooms created post-migration through the normal create-room flow, where the creator becomes host (§5).
 
 ### Account-scoped vs room-scoped priority
 
