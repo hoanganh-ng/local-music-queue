@@ -49,12 +49,9 @@ services:
       - DUCKDNS_DOMAIN=${DUCKDNS_DOMAIN}
       - DUCKDNS_TOKEN=${DUCKDNS_TOKEN}
       - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL}
-      # When DATABASE_URL is set the backend uses PostgreSQL. The SQLite
-      # source path and backend-db volume remain mounted for R02/R03 only
-      # and are removed by R03 once the data migration is verified.
+      # PostgreSQL is the only persistence layer (R03).
       - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
     volumes:
-      - backend-db:/app/data
       - backend-letsencrypt:/etc/letsencrypt
     depends_on:
       postgres:
@@ -96,8 +93,6 @@ networks:
     driver: bridge
 
 volumes:
-  backend-db:
-    driver: local
   postgres-data:
     driver: local
   backend-letsencrypt:

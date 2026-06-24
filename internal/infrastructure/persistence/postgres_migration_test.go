@@ -18,7 +18,7 @@ func TestPostgresMigration_CleanSchema(t *testing.T) {
 		t.Fatalf("second migrate up should be no-op: %v", err)
 	}
 
-	// Version subcommand must report 1 (the only initial migration).
+	// Version subcommand must report 2 (0001_initial + 0002_legacy_id).
 	v, dirty, err := EmbeddedMigrationsVersion(db)
 	if err != nil {
 		t.Fatalf("read version: %v", err)
@@ -26,8 +26,8 @@ func TestPostgresMigration_CleanSchema(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema unexpectedly dirty")
 	}
-	if v != 1 {
-		t.Fatalf("expected version=1 after first migration, got %d", v)
+	if v != 2 {
+		t.Fatalf("expected version=2 after first migration, got %d", v)
 	}
 
 	// Verify all seven tables exist.
@@ -90,7 +90,8 @@ func TestPostgresMigration_DownThenUp(t *testing.T) {
 		t.Fatalf("migrate up: %v", err)
 	}
 
-	// Step down one version.
+	// Step down one version. We are now at v2 (0001 + 0002); stepping
+	// down 1 lands us at v1 with only the 0002 changes reverted.
 	if err := RunEmbeddedMigrationsDown(db, 1); err != nil {
 		t.Fatalf("migrate down 1: %v", err)
 	}
@@ -99,8 +100,20 @@ func TestPostgresMigration_DownThenUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read version: %v", err)
 	}
+	if v != 1 {
+		t.Errorf("expected version=1 after down 1, got %d", v)
+	}
+
+	// Step down another to fully revert. queue_state is dropped with 0001.
+	if err := RunEmbeddedMigrationsDown(db, 1); err != nil {
+		t.Fatalf("migrate down 1 (second): %v", err)
+	}
+	v, _, err = EmbeddedMigrationsVersion(db)
+	if err != nil {
+		t.Fatalf("read version: %v", err)
+	}
 	if v != 0 {
-		t.Errorf("expected version=0 after down, got %d", v)
+		t.Errorf("expected version=0 after down 2, got %d", v)
 	}
 
 	// queue_state should be gone. Scoped to the test schema so the query
@@ -119,7 +132,7 @@ func TestPostgresMigration_DownThenUp(t *testing.T) {
 		t.Errorf("expected queue_state dropped after down")
 	}
 
-	// Re-apply: the schema must come back.
+	// Re-apply: the schema must come back to version 2.
 	if err := RunEmbeddedMigrationsUp(db); err != nil {
 		t.Fatalf("re-migrate up: %v", err)
 	}
@@ -127,7 +140,7 @@ func TestPostgresMigration_DownThenUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if v != 1 {
-		t.Errorf("expected version=1 after re-up, got %d", v)
+	if v != 2 {
+		t.Errorf("expected version=2 after re-up, got %d", v)
 	}
 }

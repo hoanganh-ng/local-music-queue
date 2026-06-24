@@ -16,11 +16,10 @@ type Config struct {
 	ClientPIN string
 	HostPIN   string
 	AdminPIN  string
-	DBPath    string
 	YTDLPPath string
 
-	// DatabaseURL selects the PostgreSQL backend when non-empty.
-	// When empty, the SQLite fallback (DBPath) is used.
+	// DatabaseURL selects the PostgreSQL backend. R03 removed the SQLite
+	// fallback; this field must be non-empty in production.
 	DatabaseURL string
 }
 
@@ -44,7 +43,7 @@ func Load() *Config {
 	if databaseURL != "" {
 		log.Printf("PostgreSQL backend selected (DATABASE_URL host redacted: %s)", RedactDSN(databaseURL))
 	} else {
-		log.Printf("SQLite backend selected (DB_PATH=%s)", getEnv("DB_PATH", "./.localdb/music_queue.db"))
+		log.Printf("no DATABASE_URL or POSTGRES_* set; the server will refuse to start until one is provided")
 	}
 
 	return &Config{
@@ -52,7 +51,6 @@ func Load() *Config {
 		ClientPIN:   getEnv("CLIENT_PIN", "5555"),
 		HostPIN:     getEnv("HOST_PIN", "9512"),
 		AdminPIN:    getEnv("ADMIN_PIN", "1598"),
-		DBPath:      getEnv("DB_PATH", "./.localdb/music_queue.db"),
 		YTDLPPath:   getEnv("YTDLP_PATH", "yt-dlp"),
 		DatabaseURL: databaseURL,
 	}
@@ -62,7 +60,8 @@ func Load() *Config {
 //
 // DATABASE_URL takes precedence. When absent, POSTGRES_HOST/POSTGRES_PORT/
 // POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB/POSTGRES_SSLMODE overrides are
-// honored. Returns "" when neither is set, signaling the SQLite fallback.
+// honored. Returns "" when neither is set; the server refuses to start in
+// that state (see cmd/server/main.go).
 func buildDatabaseURL() string {
 	if raw := getEnv("DATABASE_URL", ""); raw != "" {
 		return strings.TrimSpace(raw)

@@ -3,8 +3,10 @@ package http
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"local-music-queue/internal/delivery/ws"
 	"local-music-queue/internal/domain/entity"
@@ -24,20 +26,68 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// newTestHandlers creates Handlers wired to a temp SQLite DB and a fake yt-dlp.
+// testRepo bundles the per-test postgres DB and the repos derived from it.
+type testRepo struct {
+	db       *sql.DB
+	queue    repository.QueueRepository
+	user     repository.UserRepository
+	autoQueue *persistence.PostgresAutoQueueRepository
+}
+
+// newTestRepo opens a per-test throwaway PG schema with migrations applied.
+func newTestRepo(t *testing.T) *testRepo {
+	t.Helper()
+	dsn := os.Getenv("LMQ_TEST_DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://lmq:devpassword@localhost:5432/lmq?sslmode=disable"
+	}
+	root, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Skipf("postgres unavailable (open): %v", err)
+	}
+	defer root.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := root.PingContext(ctx); err != nil {
+		t.Skipf("postgres unavailable (ping): %v", err)
+	}
+	schema := fmt.Sprintf("lmq_http_test_%d_%d", time.Now().UnixNano(), runtime.NumCPU()*1000+os.Getpid())
+	if _, err := root.Exec("CREATE SCHEMA " + schema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	scoped, err := sql.Open("pgx", dsn+"&search_path="+schema)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() {
+		drop, _ := sql.Open("pgx", dsn)
+		if drop != nil {
+			_, _ = drop.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE")
+			_ = drop.Close()
+		}
+		_ = scoped.Close()
+	})
+	if err := persistence.RunEmbeddedMigrationsUp(scoped); err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+	return &testRepo{
+		db:        scoped,
+		queue:     persistence.NewPostgresRepository(scoped),
+		user:      persistence.NewPostgresUserRepository(scoped),
+		autoQueue: persistence.NewPostgresAutoQueueRepository(scoped),
+	}
+}
+
+// newTestHandlers creates Handlers wired to a per-test PostgreSQL schema and
+// a fake yt-dlp.
 func newTestHandlers(t *testing.T) *Handlers {
 	t.Helper()
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-	repo, err := persistence.NewSQLiteRepository(dbPath)
-	if err != nil {
-		t.Fatalf("failed to create repo: %v", err)
-	}
-
-	// Create user repository
-	userRepo := persistence.NewSQLiteUserRepository(repo.DB())
+	r := newTestRepo(t)
 
 	// Create a fake yt-dlp script
 	var ytSvc *youtube.YTDLPService
@@ -54,13 +104,13 @@ EOF
 		ytSvc = youtube.NewYTDLPService("echo") // fallback
 	}
 
-	queueInteractor := queue.NewInteractor(repo, ytSvc)
+	queueInteractor := queue.NewInteractor(r.queue, ytSvc)
 	sessionClock := auth.RealClock{}
 	sessionStore := session.NewInMemoryStore(sessionClock)
-	authInteractor := auth.NewInteractor(userRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, sessionStore, sessionClock)
-	actInteractor := activity.NewInteractor(repo)
-	priorityInteractor := priority.NewInteractor(userRepo, repo)
-	voteInteractor := vote.NewInteractor(repo, userRepo, 0)
+	authInteractor := auth.NewInteractor(r.user, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, sessionStore, sessionClock)
+	actInteractor := activity.NewInteractor(r.queue)
+	priorityInteractor := priority.NewInteractor(r.user, r.queue)
+	voteInteractor := vote.NewInteractor(r.queue, r.user, 0)
 	hub := ws.NewHub(queueInteractor.GetState)
 	go hub.Run()
 
@@ -259,11 +309,7 @@ func TestHandleSearchYouTube_Success(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-	repo, err := persistence.NewSQLiteRepository(dbPath)
-	if err != nil {
-		t.Fatalf("failed to create repo: %v", err)
-	}
+	r := newTestRepo(t)
 
 	// Create a fake yt-dlp script that returns search results
 	script := filepath.Join(dir, "fake-ytdlp")
@@ -276,16 +322,13 @@ EOF
 	os.WriteFile(script, []byte(content), 0755)
 	ytSvc := youtube.NewYTDLPService(script)
 
-	// Create user repository
-	userRepo := persistence.NewSQLiteUserRepository(repo.DB())
-
-	queueInteractor := queue.NewInteractor(repo, ytSvc)
+	queueInteractor := queue.NewInteractor(r.queue, ytSvc)
 	sessionClock := auth.RealClock{}
 	sessionStore := session.NewInMemoryStore(sessionClock)
-	authInteractor := auth.NewInteractor(userRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, sessionStore, sessionClock)
-	actInteractor := activity.NewInteractor(repo)
-	priorityInteractor := priority.NewInteractor(userRepo, repo)
-	voteInteractor := vote.NewInteractor(repo, userRepo, 0)
+	authInteractor := auth.NewInteractor(r.user, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, sessionStore, sessionClock)
+	actInteractor := activity.NewInteractor(r.queue)
+	priorityInteractor := priority.NewInteractor(r.user, r.queue)
+	voteInteractor := vote.NewInteractor(r.queue, r.user, 0)
 	hub := ws.NewHub(queueInteractor.GetState)
 	go hub.Run()
 
@@ -336,13 +379,7 @@ func TestHandleSearchYouTube_EmptyQuery(t *testing.T) {
 func newTestHandlersWithStore(t *testing.T) (*Handlers, repository.UserRepository, auth.SessionStore) {
 	t.Helper()
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-	repo, err := persistence.NewSQLiteRepository(dbPath)
-	if err != nil {
-		t.Fatalf("failed to create repo: %v", err)
-	}
-
-	userRepo := persistence.NewSQLiteUserRepository(repo.DB())
+	r := newTestRepo(t)
 
 	var ytSvc *youtube.YTDLPService
 	if runtime.GOOS != "windows" {
@@ -358,17 +395,17 @@ EOF
 		ytSvc = youtube.NewYTDLPService("echo")
 	}
 
-	queueInteractor := queue.NewInteractor(repo, ytSvc)
+	queueInteractor := queue.NewInteractor(r.queue, ytSvc)
 	sessionClock := auth.RealClock{}
 	sessionStore := session.NewInMemoryStore(sessionClock)
-	authInteractor := auth.NewInteractor(userRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, sessionStore, sessionClock)
-	actInteractor := activity.NewInteractor(repo)
-	priorityInteractor := priority.NewInteractor(userRepo, repo)
-	voteInteractor := vote.NewInteractor(repo, userRepo, 0)
+	authInteractor := auth.NewInteractor(r.user, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, sessionStore, sessionClock)
+	actInteractor := activity.NewInteractor(r.queue)
+	priorityInteractor := priority.NewInteractor(r.user, r.queue)
+	voteInteractor := vote.NewInteractor(r.queue, r.user, 0)
 	hub := ws.NewHub(queueInteractor.GetState)
 	go hub.Run()
 
-	return NewHandlers(queueInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, hub), userRepo, sessionStore
+	return NewHandlers(queueInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, hub), r.user, sessionStore
 }
 
 func intPtr(v int) *int {
@@ -424,7 +461,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 type testContext struct {
 	t               *testing.T
 	dir             string
-	repo            *persistence.SQLiteRepository
+	repo            *testRepo
 	userRepo        repository.UserRepository
 	sessionClock    auth.RealClock
 	sessionStore    auth.SessionStore
@@ -445,13 +482,7 @@ type testContext struct {
 func newTestContext(t *testing.T) *testContext {
 	t.Helper()
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-	repo, err := persistence.NewSQLiteRepository(dbPath)
-	if err != nil {
-		t.Fatalf("failed to create repo: %v", err)
-	}
-
-	userRepo := persistence.NewSQLiteUserRepository(repo.DB())
+	r := newTestRepo(t)
 
 	var ytSvc *youtube.YTDLPService
 	if runtime.GOOS != "windows" {
@@ -469,19 +500,20 @@ EOF
 		ytSvc = youtube.NewYTDLPService("echo")
 	}
 
-	queueInteractor := queue.NewInteractor(repo, ytSvc)
+	queueInteractor := queue.NewInteractor(r.queue, ytSvc)
 	sessionClock := auth.RealClock{}
 	sessionStore := session.NewInMemoryStore(sessionClock)
-	authInteractor := auth.NewInteractor(userRepo, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, sessionStore, sessionClock)
-	actInteractor := activity.NewInteractor(repo)
-	priorityInteractor := priority.NewInteractor(userRepo, repo)
-	voteInteractor := vote.NewInteractor(repo, userRepo, 0)
+	authInteractor := auth.NewInteractor(r.user, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, sessionStore, sessionClock)
+	actInteractor := activity.NewInteractor(r.queue)
+	priorityInteractor := priority.NewInteractor(r.user, r.queue)
+	voteInteractor := vote.NewInteractor(r.queue, r.user, 0)
 	mockHub := &mockBroadcaster{}
 
 	handlers := NewHandlers(queueInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, mockHub)
 
 	ctx := context.Background()
 
+	userRepo := r.user
 	guestUser := &entity.User{
 		Email:       "guest@urekamedia.vn",
 		DisplayName: "GuestOne",
@@ -555,7 +587,7 @@ EOF
 	return &testContext{
 		t:               t,
 		dir:             dir,
-		repo:            repo,
+		repo:            r,
 		userRepo:        userRepo,
 		sessionClock:    sessionClock,
 		sessionStore:    sessionStore,
@@ -835,8 +867,8 @@ func TestHandleRemoveSong_HTTP(t *testing.T) {
 			t.Fatalf("failed to get state: %v", err)
 		}
 		mockQR := &failingQueueRepo{
-			QueueRepository: tc.repo,
-			saveErr:         errors.New("sqlite save failure"),
+			QueueRepository: tc.repo.queue,
+			saveErr:         errors.New("save failure"),
 		}
 		tc.handlers.queue = queue.NewInteractor(mockQR, nil)
 		err = mockQR.QueueRepository.Save(ctx, state)

@@ -98,8 +98,9 @@ func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 	}
 
 	// 2. Initialize Infrastructure
-	// Backend selection: PostgreSQL when DATABASE_URL is set, SQLite otherwise.
-	// The SQLite fallback is retained for R02/R03 per ADR 002 §13.
+	// PostgreSQL only: the SQLite runtime fallback was removed in R03 once the
+	// data migration (cmd/migrate-data) verified successful. The backend
+	// refuses to start without DATABASE_URL.
 	queueRepo, userRepo, autoQueueRepo, dbHandle, err := initRepositories(cfg)
 	if err != nil {
 		return nil, nil, nil, err
@@ -117,11 +118,9 @@ func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 	// Run embedded PostgreSQL schema migrations defensively on backend startup.
 	// The db-init Compose job is authoritative; this is belt-and-braces for
 	// `go run ./cmd/server` and CI. ErrNoChange is not an error.
-	if cfg.DatabaseURL != "" {
-		if err := persistence.RunEmbeddedMigrationsUp(dbHandle); err != nil {
-			cleanup()
-			return nil, nil, nil, err
-		}
+	if err := persistence.RunEmbeddedMigrationsUp(dbHandle); err != nil {
+		cleanup()
+		return nil, nil, nil, err
 	}
 
 	ytService := youtube.NewYTDLPService(cfg.YTDLPPath)
@@ -216,10 +215,12 @@ func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 	return mux, cfg, cleanup, nil
 }
 
-// initRepositories selects the PostgreSQL backend when cfg.DatabaseURL is
-// set, otherwise the SQLite fallback. The returned *sql.DB is non-nil for
-// the PostgreSQL path so the caller can close it on shutdown; it is nil for
-// the SQLite path because SQLiteRepository owns its handle internally.
+// initRepositories opens the PostgreSQL backend. The R03 migration removed
+// the SQLite runtime fallback; this function now fails fast when no
+// DATABASE_URL is configured so a misconfigured deploy cannot accidentally
+// start with no persistence at all.
+//
+// The returned *sql.DB is non-nil so the caller can close it on shutdown.
 func initRepositories(cfg *config.Config) (
 	queueRepo repository.QueueRepository,
 	userRepo repository.UserRepository,
@@ -227,29 +228,20 @@ func initRepositories(cfg *config.Config) (
 	db *sql.DB,
 	err error,
 ) {
-	if cfg.DatabaseURL != "" {
-		db, err = sql.Open("pgx", cfg.DatabaseURL)
-		if err != nil {
-			return nil, nil, nil, nil, err
-		}
-		if err = db.Ping(); err != nil {
-			_ = db.Close()
-			return nil, nil, nil, nil, err
-		}
-
-		pgQueue := persistence.NewPostgresRepository(db)
-		pgUser := persistence.NewPostgresUserRepository(db)
-		pgAutoQueue := persistence.NewPostgresAutoQueueRepository(db)
-		return pgQueue, pgUser, pgAutoQueue, db, nil
+	if cfg.DatabaseURL == "" {
+		return nil, nil, nil, nil, errors.New("DATABASE_URL (or POSTGRES_HOST/_USER/_PASSWORD/_DB) is required: SQLite fallback was removed in R03")
 	}
-
-	// SQLite fallback (preserved per ADR 002 §13 / R02/R03).
-	sqliteRepo, err := persistence.NewSQLiteRepository(cfg.DBPath)
+	db, err = sql.Open("pgx", cfg.DatabaseURL)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	return sqliteRepo,
-		persistence.NewSQLiteUserRepository(sqliteRepo.DB()),
-		persistence.NewSQLiteAutoQueueRepository(sqliteRepo.DB()),
-		nil, nil
+	if err = db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, nil, nil, nil, err
+	}
+
+	pgQueue := persistence.NewPostgresRepository(db)
+	pgUser := persistence.NewPostgresUserRepository(db)
+	pgAutoQueue := persistence.NewPostgresAutoQueueRepository(db)
+	return pgQueue, pgUser, pgAutoQueue, db, nil
 }
