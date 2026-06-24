@@ -6,21 +6,21 @@
 
 ## 1. Context
 
-The application currently persists all state in SQLite via the `modernc.org/sqlite` pure-Go driver, opened by `persistence.NewSQLiteRepository(cfg.DBPath)` in [`cmd/server/main.go:95`](../../cmd/server/main.go#L95) and initialized through `(*SQLiteRepository).init()` in [`internal/infrastructure/persistence/sqlite_repository.go:39`](../../internal/infrastructure/persistence/sqlite_repository.go#L39).
+The application currently persists all state in SQLite via the `modernc.org/sqlite` pure-Go driver, opened by `persistence.NewSQLiteRepository(cfg.DBPath)` in [`cmd/server/main.go:95`](../../../cmd/server/main.go#L95) and initialized through `(*SQLiteRepository).init()` in [`internal/infrastructure/persistence/sqlite_repository.go:39`](../../../internal/infrastructure/persistence/sqlite_repository.go#L39).
 
 Current on-disk composition (reconstructed from `init()` and adjacent repos):
 
 | Storage concern | SQLite location | Source |
 | --- | --- | --- |
-| Queue state | `queue_state` (single row, `id = 1`, JSON blob) | [sqlite_repository.go:41-45](../../internal/infrastructure/persistence/sqlite_repository.go#L41) |
-| Activities | `activities` (append-only, autoincrement id) | [sqlite_repository.go:47-53](../../internal/infrastructure/persistence/sqlite_repository.go#L47) |
-| Users | `users` (email UNIQUE, role, priority_balance) | [sqlite_repository.go:55-64](../../internal/infrastructure/persistence/sqlite_repository.go#L55) |
-| User sessions | `user_sessions` (`UNIQUE(user_id, session_date)`) | [sqlite_repository.go:66-74](../../internal/infrastructure/persistence/sqlite_repository.go#L66) |
-| Priority transactions | `priority_transactions` (FK to `users`) | [sqlite_repository.go:76-86](../../internal/infrastructure/persistence/sqlite_repository.go#L76) |
-| Auto-queue config | `auto_queue_config` (single row, `id = 1`) | [sqlite_repository.go:88-93](../../internal/infrastructure/persistence/sqlite_repository.go#L88) |
-| Play history | `play_history` (autoincrement id, `played_at` index, 50-row cap trigger) | [sqlite_repository.go:95-110](../../internal/infrastructure/persistence/sqlite_repository.go#L95) |
+| Queue state | `queue_state` (single row, `id = 1`, JSON blob) | [sqlite_repository.go:41-45](../../../internal/infrastructure/persistence/sqlite_repository.go#L41) |
+| Activities | `activities` (append-only, autoincrement id) | [sqlite_repository.go:47-53](../../../internal/infrastructure/persistence/sqlite_repository.go#L47) |
+| Users | `users` (email UNIQUE, role, priority_balance) | [sqlite_repository.go:55-64](../../../internal/infrastructure/persistence/sqlite_repository.go#L55) |
+| User sessions | `user_sessions` (`UNIQUE(user_id, session_date)`) | [sqlite_repository.go:66-74](../../../internal/infrastructure/persistence/sqlite_repository.go#L66) |
+| Priority transactions | `priority_transactions` (FK to `users`) | [sqlite_repository.go:76-86](../../../internal/infrastructure/persistence/sqlite_repository.go#L76) |
+| Auto-queue config | `auto_queue_config` (single row, `id = 1`) | [sqlite_repository.go:88-93](../../../internal/infrastructure/persistence/sqlite_repository.go#L88) |
+| Play history | `play_history` (autoincrement id, `played_at` index, 50-row cap trigger) | [sqlite_repository.go:95-110](../../../internal/infrastructure/persistence/sqlite_repository.go#L95) |
 
-The user repo ([`internal/infrastructure/persistence/sqlite_user_repository.go:22`](../../internal/infrastructure/persistence/sqlite_user_repository.go#L22)) and the auto-queue repo ([`internal/infrastructure/persistence/auto_queue_repo.go:22`](../../internal/infrastructure/persistence/auto_queue_repo.go#L22)) share the same `*sql.DB` handle exposed by `SQLiteRepository.DB()`. Configuration is loaded from environment variables by `config.Load()` in [`internal/infrastructure/config/config.go:23`](../../internal/infrastructure/config/config.go#L23), with `DBPath` defaulting to `./.localdb/music_queue.db`. The runtime container is `music-queue-backend` and the volume `backend-db:/app/data` is declared in [`docker-compose.yml:19`](../../docker-compose.yml#L19).
+The user repo ([`internal/infrastructure/persistence/sqlite_user_repository.go:22`](../../../internal/infrastructure/persistence/sqlite_user_repository.go#L22)) and the auto-queue repo ([`internal/infrastructure/persistence/auto_queue_repo.go:22`](../../../internal/infrastructure/persistence/auto_queue_repo.go#L22)) share the same `*sql.DB` handle exposed by `SQLiteRepository.DB()`. Configuration is loaded from environment variables by `config.Load()` in [`internal/infrastructure/config/config.go:23`](../../../internal/infrastructure/config/config.go#L23), with `DBPath` defaulting to `./.localdb/music_queue.db`. The runtime container is `music-queue-backend` and the volume `backend-db:/app/data` is declared in [`docker-compose.yml:19`](../../../docker-compose.yml#L19).
 
 ADR 001 — Room Architecture and Contracts ([`001-room-architecture-and-contracts.md`](./001-room-architecture-and-contracts.md)) established the room domain, lifecycle, lease model, REST/WebSocket contract direction, and §11/§12 of that ADR explicitly require PostgreSQL to be adopted early unless R01 (this sprint) surfaces a blocking reason.
 
@@ -28,6 +28,25 @@ ADR 001 — Room Architecture and Contracts ([`001-room-architecture-and-contrac
 
 1. **PostgreSQL is confirmed as the target relational store** for the multi-room transformation. No blocking reason was found.
 2. **golang-migrate** is the schema migration tool. Migrations are versioned, SQL-based, embedded into the backend binary, and applied at process start.
+
+### Schema migration execution ownership
+
+There are three potential entry points for schema migration. Exactly one is authoritative per environment, and the others are explicitly either absent or idempotent no-ops against the same shared embedded migration set:
+
+| Entry point | Compose | Non-Compose (local `go run` / CI) | Authoritative? |
+| --- | --- | --- | --- |
+| `db-init` one-shot job (R02-built, runs `cmd/migrate-schema up`) | ✅ Runs `migrate-schema up` against `$DATABASE_URL` before `backend` starts. | ❌ Not used. | ✅ Authoritative in Compose. |
+| `backend` process startup hook calling `migrate.Up()` against `embed.FS` | ✅ Called as a defensive belt-and-braces, **after** `db-init` has succeeded. | ✅ Authoritative when running `go run ./cmd/server` outside Compose. | ✅ Authoritative in non-Compose. |
+| `cmd/migrate-schema` CLI (operator) | Available; not run by Compose. | Available; not run by CI / local by default. | Operator-driven only. |
+
+**No race or drift is possible** because:
+
+- All three paths read from the **same** `embed.FS` of `.up.sql` / `.down.sql` files. There is no second copy of the migrations on disk that can drift.
+- `golang-migrate` writes applied versions to the `schema_migrations` table inside the same PostgreSQL database. The first path to run acquires the advisory lock / version-table lock and applies the missing versions; subsequent paths see an up-to-date `schema_migrations` and exit as a no-op (`ErrNoChange`).
+- `db-init` declares `depends_on: postgres: condition: service_healthy` and exits 0 on success; `backend` declares `depends_on: db-init: condition: service_completed_successfully`. So in Compose, `backend`'s startup `migrate.Up()` cannot race `db-init` — by the time the backend process exists, `db-init` has already committed the schema (or exited non-zero and aborted the stack).
+- The `backend` startup `migrate.Up()` is intentional belt-and-braces: it costs one extra round-trip (`SELECT MAX(version) FROM schema_migrations`) per process start and guarantees correctness if anyone ever runs `go run ./cmd/server` against a Compose-managed database by mistake.
+
+The **data** migration CLI (`cmd/migrate-data`, R03) is **not** part of the schema-migration ownership above. It assumes R02's schema is already in place; it never applies schema migrations.
 3. **Local development** uses a `docker-compose` PostgreSQL 16 service with a named volume and a developer-friendly default password, overridable by `.env`.
 4. **Deterministic tests** use a dedicated per-run PostgreSQL schema (template + `CREATE SCHEMA`) inside a single PostgreSQL container; tests own schema lifecycle and never touch the developer's database.
 5. **Production** uses managed PostgreSQL (RDS / Cloud SQL / self-hosted equivalent) and reads the DSN from a single `DATABASE_URL` env var. No credentials are baked into Compose, Dockerfiles, or the binary.
@@ -73,7 +92,7 @@ Decision: **`golang-migrate/migrate` v4**, invoked as a library from the backend
 | Embedding | Migrations live under `internal/infrastructure/persistence/migrations/postgres/` and are embedded into the binary via `embed.FS`. The same embed is reused by the CLI subcommand. |
 | Apply | `migrate.Up()` runs at backend startup. Migrations are idempotent against the `schema_migrations` table; reruns are no-ops. |
 | Baseline | The first applied version creates the `schema_migrations` table and the initial schema (users, sessions, priority_transactions, activities, queue_state, auto_queue_config, play_history). The initial schema mirrors the existing SQLite shape 1:1 in PostgreSQL types. |
-| CLI surface | `cmd/migrate/main.go` exposes `up`, `down <version>`, `force <version>`, `version`. The same library is used for all three call sites. |
+| CLI surface | **`cmd/migrate-schema/main.go`** (schema-only) exposes `up`, `down <version>`, `force <version>`, `version`. This CLI is owned by R02 and is the only authoritative CLI for *schema* migration. The data migration CLI is a separate binary, **`cmd/migrate-data/main.go`**, owned by R03 (see §11). The two CLIs do not share a name and do not share a surface; the old ambiguous `cmd/migrate` name is not used. |
 | Database/sql compatibility | The `pgx5` driver registers with `database/sql` as `pgx`, so the existing `*sql.DB`-based repositories do not need to change their signatures. |
 | Write barrier | All migrations are written for PostgreSQL semantics. No SQLite-specific syntax is preserved in the new files. |
 
@@ -112,7 +131,7 @@ Decision: **A single shared PostgreSQL container, with each `go test` run using 
 | Determinism | The schema is unique per `go test` invocation. No two runs share state. Tests cannot accidentally read a developer's local data because they do not touch the `public` schema. |
 | Go test glue | `DATABASE_URL` is set to a DSN pointing at the test container; `search_path` is set on the connection (libpq option) so the `*sql.DB` is automatically scoped to the throwaway schema. No new package-level globals are introduced. |
 | CI | GitHub Actions / CI runs the same `make test` target, which spins up a `postgres:16` service in the job, sets `DATABASE_URL` to the in-job service, and runs `go test ./...`. The CI service is provisioned by the workflow YAML; this is a workflow change, not a runtime code change, and is finalized in R02. |
-| Re-running the SQLite path | The current `go test ./...` was already blocked by an unrelated `letsencrypt-backend/accounts: permission denied` blocker in `PROJECT_STATE.md`; that blocker is orthogonal. R02 is expected to fix or document it independently. |
+| Re-running the SQLite path | The current `go test ./...` was already blocked by an unrelated `letsencrypt-backend/accounts: permission denied` blocker in `PROJECT_STATE.md`; that blocker is orthogonal to R02's parity gate. R02 owns resolving it for the full-suite run when the fix is a fixture-path permission change inside the test harness; otherwise R02 keeps a documented scoped-fallback verification (see §12). |
 
 ## 7. Production environment variables and secret-handling assumptions
 
@@ -133,9 +152,9 @@ Decision: **A single `DATABASE_URL` env var is the production source of truth fo
 
 ## 8. Docker Compose design plan (R02 implements; R01 documents only)
 
-Decision: **Add a `postgres` service, a `db-init` one-shot job, and a `postgres-data` volume. Add `DATABASE_URL` (and overrides) to the `backend` environment. The current `backend-db` volume is retained for the duration of R02's dual-write/cutover window and removed at the end of R02.**
+Decision: **Add a `postgres` service, a `db-init` one-shot job, and a `postgres-data` volume. Add `DATABASE_URL` (and overrides) to the `backend` environment. The current `backend-db` volume and the SQLite source file (`music_queue.db`) are retained untouched for the duration of R02's cutover window AND through R03, because R03 is the sprint that actually copies that data into PostgreSQL. The SQLite source path, the `backend-db` volume, and the `DB_PATH`/SQLite fallback are only removed at the end of R03 (after R03 has migrated and verified the data), never at the end of R02.**
 
-```
+```yaml
 services:
   postgres:
     image: postgres:16-alpine
@@ -192,10 +211,10 @@ volumes:
 | Compose version | Continues to use `version: '3.8'`. No `version` bump required for `condition: service_healthy` / `service_completed_successfully`. |
 | Service ordering | `postgres` is the foundation. `db-init` waits for `postgres` healthy, runs `migrate up`, and exits 0 on success. `backend` waits for both `postgres` healthy and `db-init` success. |
 | `Dockerfile.migrate` | A small multi-stage image that copies the migrations directory and the `cmd/migrate` binary, then runs `./migrate up` on container start. It is `restart: "no"` and exits cleanly. |
-| Existing `backend-db` volume | Retained during R02's cutover window. R02 documents when to remove it (after the cutover commit is live and verified). |
+| Existing `backend-db` volume | Retained during R02's cutover window AND through R03. R03 is the only sprint authorized to remove it, and only after R03 has successfully migrated and verified the SQLite data in PostgreSQL. R02 does NOT remove it. |
 | Existing `letsencrypt` volumes | Unchanged. Out of scope. |
 | Port collisions | `POSTGRES_PORT` defaults to `5432`; explicitly documented to avoid host-port collisions with `BACKEND_PORT` (`443`/`1111`) and `FRONTEND_*_PORT` (`80`/`443`). |
-| Backward compatibility for old setups | The backend continues to support the existing `DB_PATH` (SQLite) **for the duration of R02 only**, gated by `DATABASE_URL` being empty. R03 forces `DATABASE_URL` and removes the `DB_PATH` fallback path. |
+| Backward compatibility for old setups | The backend continues to support the existing `DB_PATH` (SQLite) **for the duration of R02 AND R03**, gated by `DATABASE_URL` being empty. R03 is the only sprint authorized to force `DATABASE_URL` and remove the `DB_PATH` / SQLite source path, and only after R03's data migration has been verified. R02 does NOT remove the SQLite source path or the `DB_PATH` fallback. |
 
 ## 9. Backup and rollback assumptions
 
@@ -264,7 +283,7 @@ Decision: **A one-shot, idempotent, offline CLI that reads from the existing SQL
 
 1. Stop the backend.
 2. Take a `sqlite3 .dump` of the current database and copy it to a safe location.
-3. Run the migration CLI: `lmq-migrate up --sqlite ./music_queue.db --postgres $DATABASE_URL`.
+3. Run the data copy CLI (R03-owned, distinct from R02's schema CLI): `lmq-migrate-data up --sqlite ./music_queue.db --postgres $DATABASE_URL`.
 4. Inspect the integrity report.
 5. Start the backend against the new `DATABASE_URL`.
 6. Verify the dashboard renders the same queue state as before.
@@ -300,18 +319,26 @@ R02's acceptance gate is: **run the closed Sprint 003 verification commands (or 
 - `cd frontend && npm run build` — PASS
 - `docker compose config` — PASS
 
+### R02 verification gate — pre-existing letsencrypt permission blocker
+
+The pre-existing `letsencrypt-backend/accounts: permission denied` blocker documented in `PROJECT_STATE.md` is orthogonal to R02's parity gate: it is a filesystem-permission issue in the existing letsencrypt test fixture path, not a R02-introduced regression. R02's policy on this blocker is:
+
+- **Default (R02 owns the fix):** R02 resolves the blocker for the full-suite run when the fix is a fixture-path permission change inside the test harness (no secret material exposed, no production volume-mount change). The full-suite `go test ./...` must pass before R02 closes.
+- **Scoped fallback (pre-existing blocker remains):** If the fix requires changing operator permissions or production Compose volume mounts, R02 escalates that work to a separate ops sprint and keeps a scoped fallback verification: the parity subset above (queue interactor, user/priority/session usecases, HTTP delivery on non-le paths, the new PostgreSQL repository conformance tests, DSN-redaction log test, `docker compose config`) must still PASS. The full-suite shrink is recorded as a known deviation in the R02 verification log, not silently dropped from the gate.
+
 ## 13. Separation of responsibilities: R02 vs R03 vs R06
 
 | Concern | R02 (PostgreSQL Foundation) | R03 (Data Migration) | R06 (Room-Scoped Persistence) |
 | --- | --- | --- | --- |
-| Driver swap | ✅ Adds `pgx`. Removes `modernc.org/sqlite` (or keeps the SQLite path gated by `DATABASE_URL` for the cutover window). | Uses the new driver only. | Uses the new driver only. |
+| Driver swap | ✅ Adds `pgx`. **Keeps `modernc.org/sqlite` available** behind the `DB_PATH` / SQLite source path through R02 AND R03. R02 does NOT delete or make unavailable the SQLite source data needed by R03. The SQLite path is gated by `DATABASE_URL` being empty for the duration of R02. | ✅ Authoritative: `DATABASE_URL` is required and the `DB_PATH` / SQLite source path is removed at the end of R03 (after R03 verifies the data migration). | Uses the new driver only. |
 | Migrations up to v1 | ✅ Creates initial schema mirroring current SQLite shape. | Reuses the v1 schema. | Reuses the v1 schema plus R06's room-scoped migrations. |
-| Repository implementation | ✅ Adds `*PostgresQueueRepository`, `*PostgresUserRepository`, `*PostgresAutoQueueRepository`. | None. | None. |
-| Wiring in `main.go` | ✅ Replaces `persistence.NewSQLiteRepository` with `persistence.NewPostgresRepository`. | None. | None. |
-| Docker Compose | ✅ Adds `postgres` and `db-init` services. Updates `backend` to depend on both. | None. | None. |
-| `.env.example` | ✅ Adds `POSTGRES_*` and `DATABASE_URL` defaults with explicit "do not use in production" comments. | None. | None. |
+| Repository implementation | ✅ Adds `*PostgresQueueRepository`, `*PostgresUserRepository`, `*PostgresAutoQueueRepository`. The SQLite implementations (`*SQLiteRepository`, `*SQLiteUserRepository`, `*SQLiteAutoQueueRepository`) and their tests are retained on disk through R03 and removed by R03, not by R02. | None. | None. |
+| Wiring in `main.go` | ✅ Adds `persistence.NewPostgresRepository` and the runtime selection (`DATABASE_URL` → Postgres; empty `DATABASE_URL` → SQLite fallback). R02 keeps the existing `persistence.NewSQLiteRepository(cfg.DBPath)` call live and gated; R02 does NOT remove it. | ✅ Removes the `persistence.NewSQLiteRepository(cfg.DBPath)` call and the `DB_PATH` config path after the data migration is verified. Forces `DATABASE_URL`. | None. |
+| Docker Compose | ✅ Adds `postgres` and `db-init` services. Updates `backend` to depend on both. The existing `backend-db` volume and SQLite source mount remain. | ✅ Removes the `backend-db` volume and any SQLite source mount from `docker-compose.yml` only after R03 verifies the data migration. | None. |
+| `.env.example` | ✅ Adds `POSTGRES_*` and `DATABASE_URL` defaults with explicit "do not use in production" comments. Keeps the existing SQLite-related comments for R02/R03. | ✅ Removes the SQLite-only `DB_PATH` defaults and comments from `.env.example` after R03 verifies the data migration. | None. |
 | CI | ✅ Adds a `postgres:16` service to the workflow and sets `DATABASE_URL` in the test job. | None. | None. |
-| Data migration CLI | ❌ | ✅ Implements the CLI in `cmd/migrate/main.go`. | Reuses the CLI with a `--room-id` flag. |
+| Schema migration CLI (`cmd/migrate-schema`) | ✅ Implements the schema migration CLI in `cmd/migrate-schema/main.go` (subcommands: `up`, `down <version>`, `force <version>`, `version`). | None. | None. |
+| Data copy CLI (`cmd/migrate-data`) | ❌ | ✅ Implements the SQLite-to-PostgreSQL data copy CLI in `cmd/migrate-data/main.go`. Reuses R02's embedded `embed.FS` only for the destination PostgreSQL schema (it does NOT re-run schema migrations; it assumes R02's schema is already in place). | Reuses the CLI with a `--room-id` flag to re-tag rows with `room_id`. |
 | Data copy | ❌ | ✅ Copies all 7 tables into PostgreSQL. | Reuses the pipeline to re-tag rows with `room_id`. |
 | Identity remap | ❌ | ✅ Maps `users.id` to PostgreSQL `BIGSERIAL`, preserves `legacy_id`. | Drops the `legacy_id` column. |
 | Room-scoped columns | ❌ | ❌ | ✅ Adds `room_id` to `queue_state`, `activities`, `auto_queue_config`, `play_history`. |

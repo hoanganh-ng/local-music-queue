@@ -17,10 +17,10 @@ The sprint is documentation-only. No runtime code, no Docker Compose file change
 ## Current behavior
 
 - The application persists all state in SQLite via the pure-Go `modernc.org/sqlite` driver.
-- `persistence.NewSQLiteRepository(cfg.DBPath)` is constructed in [`cmd/server/main.go:95`](../../cmd/server/main.go#L95) and initializes seven tables plus one index and one trigger ([`internal/infrastructure/persistence/sqlite_repository.go:39`](../../internal/infrastructure/persistence/sqlite_repository.go#L39)).
-- The user repo ([`internal/infrastructure/persistence/sqlite_user_repository.go:22`](../../internal/infrastructure/persistence/sqlite_user_repository.go#L22)) and the auto-queue repo ([`internal/infrastructure/persistence/auto_queue_repo.go:22`](../../internal/infrastructure/persistence/auto_queue_repo.go#L22)) share the same `*sql.DB` handle.
-- Configuration is loaded by `config.Load()` ([`internal/infrastructure/config/config.go:23`](../../internal/infrastructure/config/config.go#L23)). `DBPath` defaults to `./.localdb/music_queue.db`; no `DATABASE_URL` is read.
-- The backend container `music-queue-backend` mounts `backend-db:/app/data` ([`docker-compose.yml:19`](../../docker-compose.yml#L19)). There is no `postgres` service.
+- `persistence.NewSQLiteRepository(cfg.DBPath)` is constructed in [`cmd/server/main.go:95`](../../../cmd/server/main.go#L95) and initializes seven tables plus one index and one trigger ([`internal/infrastructure/persistence/sqlite_repository.go:39`](../../../internal/infrastructure/persistence/sqlite_repository.go#L39)).
+- The user repo ([`internal/infrastructure/persistence/sqlite_user_repository.go:22`](../../../internal/infrastructure/persistence/sqlite_user_repository.go#L22)) and the auto-queue repo ([`internal/infrastructure/persistence/auto_queue_repo.go:22`](../../../internal/infrastructure/persistence/auto_queue_repo.go#L22)) share the same `*sql.DB` handle.
+- Configuration is loaded by `config.Load()` ([`internal/infrastructure/config/config.go:23`](../../../internal/infrastructure/config/config.go#L23)). `DBPath` defaults to `./.localdb/music_queue.db`; no `DATABASE_URL` is read.
+- The backend container `music-queue-backend` mounts `backend-db:/app/data` ([`docker-compose.yml:19`](../../../docker-compose.yml#L19)). There is no `postgres` service.
 - The 19 REST endpoints and the 16-event WebSocket envelope are unchanged from the closed Sprint 003 baseline. There is no room context.
 - ADR 001 ([`documents/00-project-management/ADRS/001-room-architecture-and-contracts.md`](../ADRS/001-room-architecture-and-contracts.md)) established the room contracts and required PostgreSQL to be planned and implemented early, with R01 being the design sprint that must return a blocking reason if PostgreSQL is rejected.
 
@@ -139,7 +139,7 @@ The ADR should follow the structural pattern established by ADR 001:
 18. Out of scope
 19. Verification
 
-Use the same link style as ADR 001: cross-repo file links with the correct relative prefix from the ADR path (e.g. `../../cmd/server/main.go`); nearby doc links without the extra prefix.
+Use the same link style as ADR 001: cross-repo file links with the correct relative prefix from the ADR path (e.g. `../../../cmd/server/main.go`); nearby doc links without the extra prefix.
 
 ## Execution Note
 
@@ -152,16 +152,27 @@ Use the same link style as ADR 001: cross-repo file links with the correct relat
 ### Decisions Made
 
 - PostgreSQL is confirmed as the target relational store. No blocking reason was found.
-- `golang-migrate/migrate` v4 with the `pgx5` driver source is the migration tool. Migrations are SQL files, embedded via `embed.FS`, applied at process start, and exposed as a `cmd/migrate` CLI.
+- `golang-migrate/migrate` v4 with the `pgx5` driver source is the migration tool. Migrations are SQL files, embedded via `embed.FS`, applied at process start. The schema migration CLI is `cmd/migrate-schema/main.go` (R02-owned, subcommands: `up`, `down <version>`, `force <version>`, `version`). The data copy CLI is a separate binary, `cmd/migrate-data/main.go` (R03-owned). The two CLIs do not share a name or surface.
 - Local development uses a `postgres:16-alpine` Compose service with a named volume, healthcheck, and `DATABASE_URL` derived from `.env`. The default password is dev-only.
 - Tests use a per-run `CREATE SCHEMA` inside a shared test PostgreSQL container. `TestMain` owns schema lifecycle; `search_path` scopes the `*sql.DB`. CI provisions a `postgres:16` service in the job.
 - Production uses a single `DATABASE_URL` env var. No credentials are committed. Logs redact the password. TLS is required; `verify-full` is the design target.
-- Docker Compose gains a `postgres` service, a `db-init` one-shot job (`Dockerfile.migrate` running `migrate up`), and the `backend` service depends on both. The change is design-only in this sprint.
+- Docker Compose gains a `postgres` service, a `db-init` one-shot job (`Dockerfile.migrate` running `cmd/migrate-schema up`), and the `backend` service depends on both. The change is design-only in this sprint. The existing `backend-db` volume and SQLite source mount are **retained** through R02 AND R03; R03 (not R02) removes them after verifying the data migration.
 - Backups are `pg_dump --format=custom`, nightly, 7-day retention minimum. Pre-migration snapshot retention is 30 days. Rollback is restore-only.
 - The `*sql.DB` boundary and the existing `QueueRepository`, `UserRepository`, `AutoQueueRepository` interfaces are preserved. Only the concrete implementation changes. SQLite types are mapped to PostgreSQL (`INTEGER`/`AUTOINCREMENT` → `BIGSERIAL`, `DATETIME` → `TIMESTAMPTZ`, `INTEGER(0/1)` → `BOOLEAN`). The 50-row `play_history` cap trigger becomes a server-side `DELETE` after each insert.
-- The SQLite-to-PostgreSQL data migration is a one-shot, idempotent, offline CLI that copies all seven tables inside a single transaction, with an `lmq_migration` advisory lock and a per-table integrity report.
+- The SQLite-to-PostgreSQL data migration is a one-shot, idempotent, offline CLI (`cmd/migrate-data`) that copies all seven tables inside a single transaction, with an `lmq_migration` advisory lock and a per-table integrity report. It assumes R02's schema is already in place; it never applies schema migrations.
 - R02 must preserve the current single-context behavior (19 REST endpoints, `/ws`, 16-event envelope, in-memory vote/auto-queue). R02's acceptance gate is parity against the closed Sprint 003 baseline.
-- R02 owns the driver swap and the `postgres` / `db-init` Compose services. R03 owns the data migration CLI. R06 owns the `room_id` columns, the migrated-room bootstrap, and the per-room play history cap. The ADR's §13 spells out the table of ownership.
+- R02 owns the driver swap, the `postgres` / `db-init` Compose services, and the schema migration CLI (`cmd/migrate-schema`). R02 does **not** delete the SQLite source path, the `DB_PATH` fallback, the `backend-db` volume, or the SQLite repository implementations; those are removed by R03 only, after R03 verifies the data migration. R03 owns the data copy CLI (`cmd/migrate-data`). R06 owns the `room_id` columns, the migrated-room bootstrap, and the per-room play history cap. The ADR's §13 spells out the table of ownership.
+
+### Schema migration execution ownership
+
+The schema migration has three potential entry points; exactly one is authoritative per environment, the others are either absent or idempotent no-ops against the same embedded migration set:
+
+- **`db-init` one-shot job** (`Dockerfile.migrate` running `cmd/migrate-schema up`) — authoritative in Compose. Declares `depends_on: postgres: condition: service_healthy` and exits 0 on success.
+- **`backend` process startup hook** calling `migrate.Up()` against the same `embed.FS` — authoritative in non-Compose (`go run ./cmd/server`, CI). Called defensively in Compose as belt-and-braces, **after** `db-init` has succeeded.
+- **`cmd/migrate-schema` CLI** — operator-driven only.
+
+No race or drift is possible: all three paths read from the same `embed.FS`, and `golang-migrate`'s `schema_migrations` table serializes applies. In Compose, `backend` cannot race `db-init` because `backend` declares `depends_on: db-init: condition: service_completed_successfully`. The data migration CLI (`cmd/migrate-data`, R03) is separate and does not apply schema migrations; it assumes R02's schema is already in place.
+
 - The ADR's risk register names 14 risks and the mitigation for each. The deferred-work list is the same as ADR 001's plus connection pooler, read replicas, and online schema migration tooling.
 
 ### Decisions Deferred
@@ -195,6 +206,13 @@ Use the same link style as ADR 001: cross-repo file links with the correct relat
 - Confirmation: no runtime, frontend, backend, configuration, deployment, migration, or test file was modified.
 - Confirmation: PostgreSQL implementation, the data migration CLI, the Docker Compose change, the `.env.example` extension, the CI workflow change, and the schema migrations are NOT started.
 - Confirmation: `ROOM_EPIC_SPRINT_SEQUENCE.md` was not modified (no contradiction, typo, or link/status correction was needed in this sprint).
+
+## R02 verification gate — letsencrypt permission blocker
+
+The R02 acceptance gate lists `go test ./...` PASS against the deterministic PostgreSQL test schema and `go test -race ./...` PASS (see ADR 002 §12 and §16). The pre-existing `letsencrypt-backend/accounts: permission denied` blocker documented in `PROJECT_STATE.md` is **orthogonal to R02's parity gate** because it is a filesystem-permission issue in the existing letsencrypt test fixture path, not a R02-introduced regression. R02 owns resolving that blocker for the full-suite tests if and only if the blocker blocks R02's parity run; otherwise the documented fallback is:
+
+- **Scoped fallback verification (pre-existing blocker remains):** R02 runs the parity subset listed in ADR 002 §12 that does not touch the letsencrypt fixture path (queue interactor, user/priority/session usecases, HTTP delivery on the non-le test paths, the new PostgreSQL repository conformance tests, DSN-redaction log test, and `docker compose config`). The full-suite `go test ./...` is documented in the sprint log as "blocked by pre-existing letsencrypt permission; out of R02 scope; tracked separately." R02 does not silently shrink the acceptance gate; the shrink is recorded as a known deviation in the verification results.
+- **Resolution path:** R02 owns resolving the letsencrypt permission blocker for the full-suite run when the blocker can be fixed with a fixture-path permission change inside the test harness (no secret material is exposed). If the fix requires changing operator permissions or volume mounts in production Compose, it is escalated to a separate ops sprint and R02 keeps the scoped fallback.
 
 ## Verification points
 
