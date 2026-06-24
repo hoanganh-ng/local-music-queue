@@ -29,6 +29,31 @@
       </div>
     </header>
 
+    <div
+      v-if="voteNotifications.showCta.value"
+      class="browser-notif-cta glass-panel"
+      role="region"
+      aria-label="Enable browser notifications"
+    >
+      <span class="cta-icon" aria-hidden="true">🔔</span>
+      <span class="cta-message">
+        Enable browser notifications to see vote updates when this tab is in the background.
+      </span>
+      <button
+        class="cta-enable-btn"
+        @click="onEnableBrowserNotifications"
+      >
+        Enable
+      </button>
+      <button
+        class="cta-dismiss-btn"
+        @click="voteNotifications.dismissCta"
+        aria-label="Dismiss notification prompt"
+      >
+        ×
+      </button>
+    </div>
+
     <main class="dashboard-content">
 
       <!-- Left Column: Up Next only -->
@@ -85,9 +110,11 @@ import SubmitForm from '../components/forms/SubmitForm.vue'
 import ToastContainer from '../components/ui/ToastContainer.vue'
 import ConfirmDialog from '../components/ui/ConfirmDialog.vue'
 import { useToast } from '../composables/useToast'
+import { useVoteBrowserNotifications } from '../composables/useVoteBrowserNotifications'
 
 const router = useRouter()
 const toast = useToast()
+const voteNotifications = useVoteBrowserNotifications()
 
 const currentUser = computed(() => globalStore.currentUser)
 const isHost = computed(() => currentUser.value?.role === 'host')
@@ -163,6 +190,14 @@ function handleVoteEvent(event) {
     return
   }
   shownVoteNotifications.add(key)
+
+  // Optional browser notification (additive; toast path below unchanged).
+  let notifTitle = 'Vote update'
+  if (event.type === 'vote_resolved') {
+    notifTitle = data.outcome === 'passed' ? 'Vote passed' : 'Vote expired'
+  }
+  const notifBody = description.length > 120 ? description.slice(0, 117) + '...' : description
+  voteNotifications.notifyVote(key, notifTitle, notifBody)
 
   if (event.type === 'vote_resolved' && data.outcome === 'passed') {
     toast.success(description)
@@ -259,6 +294,10 @@ const toggleAutoQueue = async () => {
     console.error("Failed to toggle auto-queue:", e)
     toast.error('Could not update radio mode.')
   }
+}
+
+function onEnableBrowserNotifications() {
+  voteNotifications.requestPermission()
 }
 </script>
 
@@ -424,6 +463,61 @@ const toggleAutoQueue = async () => {
 .radio-mode-toggle.active .toggle-slider {
   transform: translateX(16px);
   background: var(--accent);
+}
+
+.browser-notif-cta {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  border-radius: var(--radius-md);
+  border-color: rgba(0, 212, 255, 0.34);
+  background: rgba(0, 212, 255, 0.08);
+  font-size: 0.875rem;
+  color: var(--text-main);
+}
+
+.cta-icon {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.cta-message {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.cta-enable-btn {
+  background: var(--accent);
+  color: #0a0a0a;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.35rem 0.9rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.cta-enable-btn:hover {
+  background: var(--accent-hover);
+}
+
+.cta-dismiss-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.25rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0.1rem 0.4rem;
+  transition: color 0.2s ease;
+}
+
+.cta-dismiss-btn:hover {
+  color: var(--text-main);
 }
 
 .dashboard-content {

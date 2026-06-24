@@ -8,6 +8,7 @@ const {
   mockToast,
   mockPush,
   wsMockState,
+  voteNotificationsMock,
 } = vi.hoisted(() => ({
   mockToast: {
     success: vi.fn(),
@@ -20,6 +21,16 @@ const {
     voteEventCallback: null,
     unsubscribeSongAdded: vi.fn(),
     unsubscribeVoteEvent: vi.fn(),
+  },
+  voteNotificationsMock: {
+    unsupported: { value: false },
+    permission: { value: 'granted' },
+    dismissed: { value: true },
+    showCta: { value: false },
+    canNotify: { value: true },
+    requestPermission: vi.fn().mockResolvedValue('granted'),
+    dismissCta: vi.fn(),
+    notifyVote: vi.fn(),
   },
 }))
 
@@ -55,6 +66,10 @@ vi.mock('../../composables/useToast', () => ({
   useToast: () => mockToast,
 }))
 
+vi.mock('../../composables/useVoteBrowserNotifications', () => ({
+  useVoteBrowserNotifications: () => voteNotificationsMock,
+}))
+
 describe('DashboardView', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -62,6 +77,16 @@ describe('DashboardView', () => {
     globalStore.clearUser()
     wsMockState.songAddedCallback = null
     wsMockState.voteEventCallback = null
+    // Reset composable mock to defaults before each test
+    voteNotificationsMock.unsupported.value = false
+    voteNotificationsMock.permission.value = 'granted'
+    voteNotificationsMock.dismissed.value = true
+    voteNotificationsMock.showCta.value = false
+    voteNotificationsMock.canNotify.value = true
+    voteNotificationsMock.requestPermission.mockClear()
+    voteNotificationsMock.requestPermission.mockResolvedValue('granted')
+    voteNotificationsMock.dismissCta.mockClear()
+    voteNotificationsMock.notifyVote.mockClear()
     vi.clearAllMocks()
   })
 
@@ -101,6 +126,11 @@ describe('DashboardView', () => {
     })
 
     expect(mockToast.info).toHaveBeenCalledWith('Alice voted to skip "Song One" (1/2)')
+    expect(voteNotificationsMock.notifyVote).toHaveBeenCalledWith(
+      'vote_updated|skip:song-1|2026-06-20T10:00:00Z|1',
+      'Vote update',
+      'Alice voted to skip "Song One" (1/2)'
+    )
   })
 
   it('suppresses initial-sync vote update notifications', () => {
@@ -123,6 +153,7 @@ describe('DashboardView', () => {
 
     expect(mockToast.info).not.toHaveBeenCalled()
     expect(mockToast.success).not.toHaveBeenCalled()
+    expect(voteNotificationsMock.notifyVote).not.toHaveBeenCalled()
   })
 
   it('ignores vote events without an activity description', () => {
@@ -174,6 +205,16 @@ describe('DashboardView', () => {
 
     expect(mockToast.success).toHaveBeenCalledWith('vote to skip "Song One" passed')
     expect(mockToast.info).toHaveBeenCalledWith('vote to skip "Song Two" expired')
+    expect(voteNotificationsMock.notifyVote).toHaveBeenCalledWith(
+      'vote_resolved|skip:song-1|passed|2026-06-20T10:00:01Z',
+      'Vote passed',
+      'vote to skip "Song One" passed'
+    )
+    expect(voteNotificationsMock.notifyVote).toHaveBeenCalledWith(
+      'vote_resolved|skip:song-2|expired|2026-06-20T10:00:02Z',
+      'Vote expired',
+      'vote to skip "Song Two" expired'
+    )
   })
 
   it('deduplicates vote updates and resolutions by their logical event keys', () => {
@@ -280,5 +321,81 @@ describe('DashboardView', () => {
     const right = wrapper.find('.col-right')
     expect(right.exists()).toBe(true)
     expect(right.findComponent({ name: 'ActivityLog' }).exists()).toBe(true)
+  })
+
+  it('truncates long descriptions in browser notification body to 117 chars + ellipsis', () => {
+    shallowMount(DashboardView)
+
+    const longDescription = 'A'.repeat(150)
+    wsMockState.voteEventCallback({
+      type: 'vote_updated',
+      data: {
+        session: {
+          id: 'skip:song-1',
+          created_at: '2026-06-20T10:00:00Z',
+          voted_by: { 1: true },
+        },
+        activity: { description: longDescription },
+      },
+    })
+
+    expect(mockToast.info).toHaveBeenCalledWith(longDescription)
+    expect(voteNotificationsMock.notifyVote).toHaveBeenCalledWith(
+      expect.any(String),
+      'Vote update',
+      'A'.repeat(117) + '...'
+    )
+  })
+
+  it('hides the browser-notif CTA banner when unsupported', () => {
+    voteNotificationsMock.unsupported.value = true
+    voteNotificationsMock.showCta.value = false
+    const wrapper = shallowMount(DashboardView)
+    expect(wrapper.find('.browser-notif-cta').exists()).toBe(false)
+  })
+
+  it('hides the browser-notif CTA banner when permission is already granted', () => {
+    voteNotificationsMock.permission.value = 'granted'
+    voteNotificationsMock.showCta.value = false
+    const wrapper = shallowMount(DashboardView)
+    expect(wrapper.find('.browser-notif-cta').exists()).toBe(false)
+  })
+
+  it('hides the browser-notif CTA banner when permission is denied', () => {
+    voteNotificationsMock.permission.value = 'denied'
+    voteNotificationsMock.showCta.value = false
+    const wrapper = shallowMount(DashboardView)
+    expect(wrapper.find('.browser-notif-cta').exists()).toBe(false)
+  })
+
+  it('shows the CTA banner when permission is default and not dismissed', () => {
+    voteNotificationsMock.permission.value = 'default'
+    voteNotificationsMock.showCta.value = true
+    const wrapper = shallowMount(DashboardView)
+    const cta = wrapper.find('.browser-notif-cta')
+    expect(cta.exists()).toBe(true)
+    expect(cta.find('.cta-enable-btn').exists()).toBe(true)
+    expect(cta.find('.cta-dismiss-btn').exists()).toBe(true)
+  })
+
+  it('CTA Enable button calls requestPermission', async () => {
+    voteNotificationsMock.showCta.value = true
+    const wrapper = shallowMount(DashboardView)
+    const enableBtn = wrapper.find('.cta-enable-btn')
+    expect(enableBtn.exists()).toBe(true)
+
+    await enableBtn.trigger('click')
+
+    expect(voteNotificationsMock.requestPermission).toHaveBeenCalledTimes(1)
+  })
+
+  it('CTA dismiss button calls dismissCta', async () => {
+    voteNotificationsMock.showCta.value = true
+    const wrapper = shallowMount(DashboardView)
+    const dismissBtn = wrapper.find('.cta-dismiss-btn')
+
+    await dismissBtn.trigger('click')
+
+    expect(voteNotificationsMock.dismissCta).toHaveBeenCalledTimes(1)
   })
 })

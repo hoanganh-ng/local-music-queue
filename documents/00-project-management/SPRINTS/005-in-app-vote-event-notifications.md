@@ -38,7 +38,58 @@ Add accessible in-app toast notifications for live `vote_updated` and `vote_reso
 - User notification preferences.
 - Optional notification sounds and vibration.
 
-## Verification
+## Follow-up: Optional browser notifications (accepted before sprint close)
+
+### Follow-up scope
+
+- Add an opt-in browser/system `Notification` API for live vote events as a
+  frontend-only enhancement.
+- Preserve existing in-app toast behavior, `initial_sync` suppression, and
+  vote event deduplication unchanged.
+- Detect `Notification` API support and current permission on Dashboard load.
+- Auto-enable browser notifications when permission is already `'granted'`
+  (no persistent user toggle).
+- Show a one-time dismissible CTA banner only when permission is `'default'`.
+- Never re-prompt when permission is `'denied'`.
+- Persist a local "dismissed/requested" flag under
+  `lmq_browser_notifications_dismissed` so the CTA does not repeatedly
+  reappear.
+- Do not change backend REST or WebSocket payload contracts.
+- Do not introduce service workers or push notifications in this sprint.
+
+### Follow-up behavior
+
+- A new composable `useVoteBrowserNotifications` owns all `Notification` API
+  interaction (feature detection, permission, dismissed state, click-to-focus).
+  `services/websocket.js` is not modified and remains UI-agnostic.
+- `DashboardView.vue` calls `notifyVote(...)` from inside `handleVoteEvent`,
+  after the existing dedupe `Set` write. The toast path below is unchanged.
+- The composable's `canNotify` gate requires: supported, permission
+  `'granted'`, and `document.hidden === true`. There is no user opt-out
+  toggle — granting permission IS opting in.
+- `showCta` is true only when: supported, permission `'default'`, and the
+  dismissed flag is not set. Once the user clicks Enable (requesting
+  permission) or dismiss (×), the flag is written and the banner never
+  reappears.
+- Title is short and derived from event type/outcome (`"Vote update"`,
+  `"Vote passed"`, `"Vote expired"`). Body is `activity.description`
+  truncated to 117 characters plus `...`.
+- Notification `tag` reuses the existing `voteNotificationKey()` so the
+  operating system dedupes repeated notifications.
+- Notification click handler calls `window.focus()` then `notification.close()`.
+- Permission is re-synced on `document.visibilitychange` so revocation in
+  browser settings is picked up automatically.
+
+### Follow-up implementation notes
+
+- Composable module-level refs follow the existing `useToast`/`useConfirm`
+  pattern.
+- A single `document.visibilitychange` listener is installed at module scope
+  with an `installed` guard for HMR safety.
+- The `notifyVote(tag, title, body)` API is event-shape-agnostic; the caller
+  passes the already-computed dedupe key.
+
+## Verification (initial sprint close)
 
 - Branch: `dev`
 - Review-fix base commit: `31706d7d0e973a6627194529cd188baa0a509f8e`
@@ -61,8 +112,30 @@ Add accessible in-app toast notifications for live `vote_updated` and `vote_reso
 - `git diff --check` — PASS
   - No output.
 - `git status --short --branch` — PASS
-  - `## dev...origin/dev`
-  - ` M documents/00-project-management/SPRINTS/005-in-app-vote-event-notifications.md`
-  - ` M frontend/src/services/__tests__/websocket.spec.js`
-  - ` M frontend/src/services/websocket.js`
-  - ` M frontend/src/views/__tests__/DashboardView.spec.js`
+
+  ```text
+  ## dev...origin/dev
+   M documents/00-project-management/SPRINTS/005-in-app-vote-event-notifications.md
+   M frontend/src/services/__tests__/websocket.spec.js
+   M frontend/src/services/websocket.js
+   M frontend/src/views/__tests__/DashboardView.spec.js
+  ```
+
+### Follow-up verification
+
+- `cd frontend && npm run test:unit -- --run src/composables/__tests__/useVoteBrowserNotifications.spec.js src/views/__tests__/DashboardView.spec.js src/services/__tests__/websocket.spec.js` — PASS
+- `cd frontend && npm run test:unit -- --run` — PASS
+  - full Vitest suite, no regressions
+- `cd frontend && npm run build` — PASS
+  - Vite production build completed successfully.
+- `grep -n "Notification" frontend/src/services/websocket.js` — empty
+  - UI-agnostic invariant preserved.
+- `git diff --check` — PASS
+  - No output.
+- `git status --short --branch` — recorded before commit (see Expected Output
+  in the follow-up plan).
+- Backend contracts unchanged: no files under `internal/`, `cmd/`, or other
+  backend directories were modified.
+- Browser API limitation: when `Notification` is not exposed by the browser
+  (or by jsdom during tests), the toggle button is hidden via `v-if` and
+  `unsupported.value === true` is honored. No fallback path is rendered.
