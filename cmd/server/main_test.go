@@ -23,10 +23,11 @@ func TestSetupApp(t *testing.T) {
 		os.Unsetenv("YTDLP_PATH")
 	}()
 
-	mux, cfg, err := setupApp()
+	mux, cfg, cleanup, err := setupApp()
 	if err != nil {
 		t.Fatalf("setupApp failed: %v", err)
 	}
+	defer cleanup()
 
 	if mux == nil {
 		t.Fatal("Expected mux to be non-nil")

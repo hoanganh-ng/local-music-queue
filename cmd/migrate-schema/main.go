@@ -4,7 +4,7 @@
 // Subcommands:
 //
 //	up              Apply all pending migrations.
-//	down <version>  Step down by <version> versions.
+//	down <steps>    Step down by <steps> versions (positive integer).
 //	force <version> Set schema_migrations version without running migrations.
 //	                Use only to recover from a dirty state.
 //	version         Print the current applied schema version.
@@ -65,12 +65,12 @@ func main() {
 
 	case "down":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "error: down requires <version>")
+			fmt.Fprintln(os.Stderr, "error: down requires <steps>")
 			os.Exit(2)
 		}
 		steps, err := strconv.Atoi(os.Args[2])
 		if err != nil || steps < 1 {
-			fmt.Fprintln(os.Stderr, "error: <version> must be a positive integer")
+			fmt.Fprintln(os.Stderr, "error: <steps> must be a positive integer")
 			os.Exit(2)
 		}
 		if err := persistence.RunEmbeddedMigrationsDown(db, steps); err != nil {

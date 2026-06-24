@@ -29,10 +29,11 @@ import (
 )
 
 func main() {
-	mux, cfg, err := setupApp()
+	mux, cfg, cleanup, err := setupApp()
 	if err != nil {
 		log.Fatalf("Failed to setup application: %v", err)
 	}
+	defer cleanup()
 
 	// Start Server
 	server := &http.Server{
@@ -57,7 +58,7 @@ func main() {
 	}
 }
 
-func setupApp() (*http.ServeMux, *config.Config, error) {
+func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 	// 1. Load configuration
 	cfg := config.Load()
 	log.Printf("Starting Local Music Queue server on port %s", cfg.Port)
@@ -93,7 +94,7 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// 2. Initialize Infrastructure
@@ -101,10 +102,16 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	// The SQLite fallback is retained for R02/R03 per ADR 002 §13.
 	queueRepo, userRepo, autoQueueRepo, dbHandle, err := initRepositories(cfg)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	if dbHandle != nil {
-		defer dbHandle.Close()
+	// dbHandle is non-nil only for the PostgreSQL path. The *sql.DB must stay
+	// open for the entire server lifetime, so its Close is owned by main via
+	// the cleanup closure returned below — closing it here would invalidate
+	// every repository handle before ListenAndServe runs.
+	cleanup := func() {
+		if dbHandle != nil {
+			_ = dbHandle.Close()
+		}
 	}
 
 	// Run embedded PostgreSQL schema migrations defensively on backend startup.
@@ -112,7 +119,8 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	// `go run ./cmd/server` and CI. ErrNoChange is not an error.
 	if cfg.DatabaseURL != "" {
 		if err := persistence.RunEmbeddedMigrationsUp(dbHandle); err != nil {
-			return nil, nil, err
+			cleanup()
+			return nil, nil, nil, err
 		}
 	}
 
@@ -205,7 +213,7 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	// WebSocket
 	mux.HandleFunc("/ws", hub.RegisterHandler)
 
-	return mux, cfg, nil
+	return mux, cfg, cleanup, nil
 }
 
 // initRepositories selects the PostgreSQL backend when cfg.DatabaseURL is

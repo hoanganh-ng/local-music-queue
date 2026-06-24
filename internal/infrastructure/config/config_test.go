@@ -46,10 +46,11 @@ func TestRedactDSN(t *testing.T) {
 }
 
 func TestLoad_DatabaseURLSelection(t *testing.T) {
-	// Skip dotenv loading so tests don't pick up the local .env file.
-	t.Setenv("APP_ENV", "test")
-
-	cleanEnv := []string{
+	// envKeys are the variables each subtest must control. Each subtest
+	// snapshots the outer value via t.Setenv / os.Unsetenv and restores on
+	// cleanup, so subtests cannot pollute one another or the surrounding
+	// test process.
+	envKeys := []string{
 		"DATABASE_URL",
 		"POSTGRES_HOST",
 		"POSTGRES_PORT",
@@ -64,20 +65,32 @@ func TestLoad_DatabaseURLSelection(t *testing.T) {
 		"ADMIN_PIN",
 		"YTDLP_PATH",
 	}
-	saved := map[string]string{}
-	for _, k := range cleanEnv {
-		saved[k] = os.Getenv(k)
-		os.Unsetenv(k)
-	}
-	defer func() {
-		for k, v := range saved {
-			if v != "" {
-				os.Setenv(k, v)
-			}
+
+	// isolateEnv clears every envKeys entry inside the calling subtest and
+	// installs a t.Cleanup hook that restores the values the subtest's
+	// parent observed.
+	isolateEnv := func(t *testing.T) {
+		t.Helper()
+		// Skip dotenv loading so tests don't pick up the local .env file.
+		t.Setenv("APP_ENV", "test")
+		saved := map[string]string{}
+		for _, k := range envKeys {
+			saved[k] = os.Getenv(k)
+			os.Unsetenv(k)
 		}
-	}()
+		t.Cleanup(func() {
+			for k, v := range saved {
+				if v != "" {
+					os.Setenv(k, v)
+				} else {
+					os.Unsetenv(k)
+				}
+			}
+		})
+	}
 
 	t.Run("DATABASE_URL takes precedence", func(t *testing.T) {
+		isolateEnv(t)
 		os.Setenv("DATABASE_URL", "postgres://lmq:devpassword@localhost:5432/lmq?sslmode=disable")
 		os.Setenv("POSTGRES_HOST", "should-be-ignored")
 		os.Setenv("POSTGRES_PASSWORD", "should-be-ignored")
@@ -94,7 +107,13 @@ func TestLoad_DatabaseURLSelection(t *testing.T) {
 		}
 	})
 
-	t.Run("POSTGRES_HOST builds DSN when DATABASE_URL is empty", func(t *testing.T) {
+	t.Run("POSTGRES_HOST builds DSN when DATABASE_URL is unset", func(t *testing.T) {
+		isolateEnv(t)
+		// Defensive: explicitly assert DATABASE_URL is unset so this case
+		// cannot pass by accident if a prior subtest leaked the var.
+		if v := os.Getenv("DATABASE_URL"); v != "" {
+			t.Fatalf("subtest precondition violated: DATABASE_URL=%q", v)
+		}
 		os.Setenv("POSTGRES_HOST", "localhost")
 		os.Setenv("POSTGRES_PORT", "5432")
 		os.Setenv("POSTGRES_USER", "lmq")
@@ -115,10 +134,7 @@ func TestLoad_DatabaseURLSelection(t *testing.T) {
 	})
 
 	t.Run("Empty DATABASE_URL and POSTGRES_HOST signals SQLite fallback", func(t *testing.T) {
-		// Defensive: ensure no leak from prior subtests.
-		for _, k := range []string{"DATABASE_URL", "POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "POSTGRES_SSLMODE"} {
-			os.Unsetenv(k)
-		}
+		isolateEnv(t)
 		cfg := Load()
 		if cfg.DatabaseURL != "" {
 			t.Fatalf("expected empty DatabaseURL (SQLite fallback), got %s", cfg.DatabaseURL)
