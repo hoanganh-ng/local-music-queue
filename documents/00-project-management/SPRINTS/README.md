@@ -4,11 +4,15 @@ This directory contains documentation for active and past sprints.
 
 ## Sprint Index
 
-| Sprint | Title                              | Status   |
-|--------|------------------------------------|----------|
-| 001    | Authoritative Project Baseline     | Closed   |
-| 002    | Trustworthy Verification Baseline  | Closed   |
-| 003    | Trusted Owned-Song Removal         | Closed   |
+| Sprint | Title                              | Status         |
+|--------|------------------------------------|----------------|
+| 001    | Authoritative Project Baseline     | Closed         |
+| 002    | Trustworthy Verification Baseline  | Closed         |
+| 003    | Trusted Owned-Song Removal         | Closed         |
+| 004    | Authoritative Playback Advancement | Closed         |
+| 005    | In-App Vote Event Notifications    | Closed         |
+| 006    | Room Architecture ADR / R00        | Closed         |
+| 007    | PostgreSQL Migration Design / R01  | In progress    |
 
 ## File Naming
 Sprint files must follow the format: `XXX-sprint-name.md` (e.g., `001-authoritative-project-baseline.md`).
