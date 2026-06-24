@@ -103,10 +103,15 @@ func TestPostgresMigration_DownThenUp(t *testing.T) {
 		t.Errorf("expected version=0 after down, got %d", v)
 	}
 
-	// queue_state should be gone.
+	// queue_state should be gone. Scoped to the test schema so the query
+	// does not pick up queue_state left behind by concurrent test schemas
+	// or earlier failed runs that did not clean up.
 	var exists bool
 	if err := db.QueryRowContext(context.Background(),
-		`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'queue_state')`,
+		`SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema = current_schema() AND table_name = 'queue_state'
+		)`,
 	).Scan(&exists); err != nil {
 		t.Fatalf("query queue_state: %v", err)
 	}
