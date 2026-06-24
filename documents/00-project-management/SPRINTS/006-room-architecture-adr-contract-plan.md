@@ -160,6 +160,61 @@ Create a focused ADR at:
 
 The ADR should be practical, decision-oriented, and explicit about what is decided now versus deferred to later sprints.
 
+## Execution Note
+
+The ADR was authored and saved to `documents/00-project-management/ADRS/001-room-architecture-and-contracts.md`. The sprint document was updated to record the ADR location and verification results. No runtime, frontend, backend, configuration, deployment, or test files were modified.
+
+### ADR Location
+
+- [`documents/00-project-management/ADRS/001-room-architecture-and-contracts.md`](../ADRS/001-room-architecture-and-contracts.md)
+
+### Decisions Made
+
+- Move from one implicit global room to explicit rooms; single-process scope for the first implementation.
+- No permanent `main` room, no hidden default source of truth.
+- Existing global app state migrates into one real room named by the Product Owner at migration time.
+- Room lifecycle: create → active → archived (terminal). Archived rooms reject mutations.
+- Roles per room: host, admin, guest. Exactly one host per active room.
+- Host = person; player = device holding the active player lease. Admin cannot prevent archive when the player lease expires.
+- Player lease: 60 s expiry, 20 s heartbeat cadence, 30 s grace before archive; admin cannot claim or release host's lease.
+- Invite model: hashed token, 7-day default expiry, configurable max_uses, host-or-admin revocation.
+- REST route shape moves to `/api/rooms/{roomId}/...`; old global routes transition through a compatibility shim to `410 Gone` in R14.
+- WebSocket connection shape moves to `/ws/rooms/{roomId}`; `user_id` query parameter removed; identity taken from authenticated session.
+- Per-room sequence numbers and per-room `ConnectedCount()`; per-room `full_sync`.
+- `room_archived` event shape defined at ADR level.
+- Reconnect after archive must create or join a new room.
+- Persistence: rooms, members, invites, queue state, activities, auto-queue config, play history become room-scoped in PostgreSQL (R06).
+- Users, user sessions, priority transactions, and daily priority balance stay account-scoped for the first room implementation.
+- Vote sessions stay in-memory per room for the first room implementation.
+- Frontend adds `Welcome`, `CreateRoom`, `Invite` modal, and `JoinRoom` views; room context stored in `globalStore.activeRoom` and persisted in `localStorage` under `lmq_active_room`.
+- YouTube iframe renders only for the active player-lease holder; backend is the source of truth for lease.
+- Error codes added: 409 (archived/duplicate), 410 (retired/exhausted), 403 (forbidden), 404 (unknown; generic for invites).
+
+### Decisions Deferred
+
+- Cross-process / multi-instance room coordination.
+- Persisted vote sessions.
+- Room-scoped priority balances (per-room token economy).
+- Slug rename, archive recovery / un-archive.
+- Per-song row storage in place of the JSON blob.
+- Strong backend authorization on every endpoint (R13).
+- Anonymous (read-only) room views.
+- Cross-room moderation tools (global admin).
+
+### Verification Results
+
+- `git diff --check` — PASS (no whitespace/indent warnings)
+- `git status --short --branch` — see commit-time output below.
+
+```text
+## dev...origin/dev
+ M documents/00-project-management/ADRS/001-room-architecture-and-contracts.md
+ M documents/00-project-management/SPRINTS/006-room-architecture-adr-contract-plan.md
+```
+
+- Confirmation: no runtime behavior changed.
+- Confirmation: PostgreSQL and room implementation were NOT started.
+
 Recommended ADR sections:
 
 1. Context
