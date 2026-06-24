@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress — documentation-only. Awaiting Architect review and Product Owner approval.
+Closed — Architect reviewed and Product Owner approved. Documentation-only closure pass.
 
 ## Sprint name
 
@@ -206,6 +206,10 @@ No race or drift is possible: all three paths read from the same `embed.FS`, and
 - Confirmation: no runtime, frontend, backend, configuration, deployment, migration, or test file was modified.
 - Confirmation: PostgreSQL implementation, the data migration CLI, the Docker Compose change, the `.env.example` extension, the CI workflow change, and the schema migrations are NOT started.
 - Confirmation: `ROOM_EPIC_SPRINT_SEQUENCE.md` was not modified (no contradiction, typo, or link/status correction was needed in this sprint).
+
+### Closure Pass (Documentation-Only)
+
+> **Closure update:** Sprint 007 / R01 is closed as a documentation-only sprint. The ADR status was updated to `Accepted — Architect reviewed and Product Owner approved`. The ADR is the authoritative input for R02 (PostgreSQL Foundation). No runtime, frontend, backend, configuration, deployment, migration, or test file was modified in this closure pass. Sprint R02 was activated after R01 closure and is itself closed in `documents/00-project-management/SPRINTS/008-postgresql-foundation-with-existing-behavior-preserved.md`. R03 (SQLite-to-PostgreSQL Data Migration) is the next sprint to shape.
 
 ## R02 verification gate — letsencrypt permission blocker
 
