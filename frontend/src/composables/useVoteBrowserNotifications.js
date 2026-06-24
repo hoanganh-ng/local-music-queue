@@ -58,13 +58,14 @@ const showCta = computed(() => {
   return permission.value === 'default'
 })
 
-// canNotify: granted (auto-enabled) AND document hidden.
-// There is no user opt-out toggle by design — granting means opting in.
+// canNotify: granted (auto-enabled). There is no user opt-out toggle by
+// design — granting means opting in. document.hidden is read directly inside
+// notifyVote at call-time because it's not a reactive value and we don't want
+// a stale computed when the tab transitions between hidden and visible.
 const canNotify = computed(() => {
   if (unsupported.value) return false
   if (permission.value !== 'granted') return false
-  if (typeof document === 'undefined') return false
-  return document.hidden === true
+  return true
 })
 
 async function requestPermission() {
@@ -83,7 +84,17 @@ async function requestPermission() {
     }
     return Ctor.permission
   }
-  const result = await Ctor.requestPermission()
+  let result
+  try {
+    result = await Ctor.requestPermission()
+  } catch {
+    // Defensive: browser may reject or throw if the prompt was dismissed,
+    // closed, or the API isn't actually usable despite detection.
+    permission.value = 'denied'
+    writeDismissed(true)
+    dismissed.value = true
+    return 'denied'
+  }
   permission.value = result
   // Whether granted or denied, the user has answered — don't re-prompt.
   writeDismissed(true)
@@ -98,6 +109,9 @@ function dismissCta() {
 
 function notifyVote(tag, title, body) {
   if (!canNotify.value) return
+  // document.hidden is non-reactive; read it at call-time so visibility
+  // transitions between hidden and visible are honored immediately.
+  if (typeof document !== 'undefined' && document.hidden !== true) return
   const Ctor = detectNotificationCtor()
   if (!Ctor) return
   try {

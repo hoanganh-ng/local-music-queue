@@ -137,5 +137,5 @@ Add accessible in-app toast notifications for live `vote_updated` and `vote_reso
 - Backend contracts unchanged: no files under `internal/`, `cmd/`, or other
   backend directories were modified.
 - Browser API limitation: when `Notification` is not exposed by the browser
-  (or by jsdom during tests), the toggle button is hidden via `v-if` and
+  (or by jsdom during tests), the CTA banner is hidden via `v-if` and
   `unsupported.value === true` is honored. No fallback path is rendered.
