@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -17,6 +18,10 @@ type Config struct {
 	AdminPIN  string
 	DBPath    string
 	YTDLPPath string
+
+	// DatabaseURL selects the PostgreSQL backend when non-empty.
+	// When empty, the SQLite fallback (DBPath) is used.
+	DatabaseURL string
 }
 
 // Load loads the configuration from environment variables with defaults.
@@ -35,14 +40,93 @@ func Load() *Config {
 		}
 	}
 
-	return &Config{
-		Port:      getEnv("PORT", "1111"),
-		ClientPIN: getEnv("CLIENT_PIN", "5555"),
-		HostPIN:   getEnv("HOST_PIN", "9512"),
-		AdminPIN:  getEnv("ADMIN_PIN", "1598"),
-		DBPath:    getEnv("DB_PATH", "./.localdb/music_queue.db"),
-		YTDLPPath: getEnv("YTDLP_PATH", "yt-dlp"),
+	databaseURL := buildDatabaseURL()
+	if databaseURL != "" {
+		log.Printf("PostgreSQL backend selected (DATABASE_URL host redacted: %s)", RedactDSN(databaseURL))
+	} else {
+		log.Printf("SQLite backend selected (DB_PATH=%s)", getEnv("DB_PATH", "./.localdb/music_queue.db"))
 	}
+
+	return &Config{
+		Port:        getEnv("PORT", "1111"),
+		ClientPIN:   getEnv("CLIENT_PIN", "5555"),
+		HostPIN:     getEnv("HOST_PIN", "9512"),
+		AdminPIN:    getEnv("ADMIN_PIN", "1598"),
+		DBPath:      getEnv("DB_PATH", "./.localdb/music_queue.db"),
+		YTDLPPath:   getEnv("YTDLP_PATH", "yt-dlp"),
+		DatabaseURL: databaseURL,
+	}
+}
+
+// buildDatabaseURL constructs the PostgreSQL DSN from environment variables.
+//
+// DATABASE_URL takes precedence. When absent, POSTGRES_HOST/POSTGRES_PORT/
+// POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB/POSTGRES_SSLMODE overrides are
+// honored. Returns "" when neither is set, signaling the SQLite fallback.
+func buildDatabaseURL() string {
+	if raw := getEnv("DATABASE_URL", ""); raw != "" {
+		return strings.TrimSpace(raw)
+	}
+	host := getEnv("POSTGRES_HOST", "")
+	if host == "" {
+		return ""
+	}
+	user := getEnv("POSTGRES_USER", "")
+	password := getEnv("POSTGRES_PASSWORD", "")
+	dbname := getEnv("POSTGRES_DB", "")
+	port := getEnv("POSTGRES_PORT", "5432")
+	sslmode := getEnv("POSTGRES_SSLMODE", "disable")
+
+	u := &url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(user, password),
+		Host:   host + ":" + port,
+		Path:   "/" + dbname,
+	}
+	q := u.Query()
+	q.Set("sslmode", sslmode)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// RedactDSN returns a copy of the DSN with the password component replaced
+// by "***". It is safe to call on any string; non-DSN strings are returned
+// verbatim unless a `password=` token is present, in which case the token's
+// value is redacted.
+func RedactDSN(dsn string) string {
+	if dsn == "" {
+		return ""
+	}
+	u, err := url.Parse(dsn)
+	if err == nil && u.User != nil {
+		if _, hasPassword := u.User.Password(); hasPassword {
+			u.User = url.UserPassword(u.User.Username(), "***")
+			return u.String()
+		}
+		// URL parsed but no password — nothing to redact.
+		return dsn
+	}
+	// Either unparseable or no userinfo — try a raw password= token match.
+	return redactRawPassword(dsn)
+}
+
+// redactRawPassword replaces the value of the first `password=` token with
+// "***". Whitespace or end-of-string ends the token.
+func redactRawPassword(s string) string {
+	const key = "password="
+	idx := strings.Index(s, key)
+	if idx < 0 {
+		return s
+	}
+	rest := s[idx+len(key):]
+	end := len(rest)
+	for i, r := range rest {
+		if r == ' ' || r == '\t' || r == '\n' || r == '&' {
+			end = i
+			break
+		}
+	}
+	return s[:idx+len(key)] + "***" + rest[end:]
 }
 
 func loadDotEnv(path string) error {

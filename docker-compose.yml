@@ -1,6 +1,40 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: music-queue-postgres
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  db-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.migrate
+    container_name: music-queue-db-init
+    environment:
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - app-network
+
   backend:
     build:
       context: .
@@ -15,9 +49,18 @@ services:
       - DUCKDNS_DOMAIN=${DUCKDNS_DOMAIN}
       - DUCKDNS_TOKEN=${DUCKDNS_TOKEN}
       - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL}
+      # When DATABASE_URL is set the backend uses PostgreSQL. The SQLite
+      # source path and backend-db volume remain mounted for R02/R03 only
+      # and are removed by R03 once the data migration is verified.
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
     volumes:
       - backend-db:/app/data
       - backend-letsencrypt:/etc/letsencrypt
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
     restart: unless-stopped
     networks:
       - app-network
@@ -54,6 +97,8 @@ networks:
 
 volumes:
   backend-db:
+    driver: local
+  postgres-data:
     driver: local
   backend-letsencrypt:
     driver: local

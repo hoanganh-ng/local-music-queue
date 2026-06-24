@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log"
 	"net/http"
@@ -10,7 +11,9 @@ import (
 
 	delivery "local-music-queue/internal/delivery/http"
 	"local-music-queue/internal/delivery/ws"
+	"local-music-queue/internal/domain"
 	"local-music-queue/internal/domain/entity"
+	"local-music-queue/internal/domain/repository"
 	"local-music-queue/internal/infrastructure/config"
 	"local-music-queue/internal/infrastructure/persistence"
 	"local-music-queue/internal/infrastructure/session"
@@ -21,6 +24,8 @@ import (
 	usecasePriority "local-music-queue/internal/usecase/priority"
 	usecaseQueue "local-music-queue/internal/usecase/queue"
 	usecaseVote "local-music-queue/internal/usecase/vote"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func main() {
@@ -92,13 +97,24 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	}
 
 	// 2. Initialize Infrastructure
-	repo, err := persistence.NewSQLiteRepository(cfg.DBPath)
+	// Backend selection: PostgreSQL when DATABASE_URL is set, SQLite otherwise.
+	// The SQLite fallback is retained for R02/R03 per ADR 002 §13.
+	queueRepo, userRepo, autoQueueRepo, dbHandle, err := initRepositories(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
+	if dbHandle != nil {
+		defer dbHandle.Close()
+	}
 
-	// Initialize user repository
-	userRepo := persistence.NewSQLiteUserRepository(repo.DB())
+	// Run embedded PostgreSQL schema migrations defensively on backend startup.
+	// The db-init Compose job is authoritative; this is belt-and-braces for
+	// `go run ./cmd/server` and CI. ErrNoChange is not an error.
+	if cfg.DatabaseURL != "" {
+		if err := persistence.RunEmbeddedMigrationsUp(dbHandle); err != nil {
+			return nil, nil, err
+		}
+	}
 
 	ytService := youtube.NewYTDLPService(cfg.YTDLPPath)
 
@@ -107,16 +123,15 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	sessionStore := session.NewInMemoryStore(sessionClock)
 
 	// 3. Initialize Usecases
-	qInteractor := usecaseQueue.NewInteractor(repo, ytService)
+	qInteractor := usecaseQueue.NewInteractor(queueRepo, ytService)
 	authInteractor := usecaseAuth.NewInteractor(userRepo, googleClientID, hostEmails, adminEmails, sessionStore, sessionClock)
-	actInteractor := usecaseActivity.NewInteractor(repo)
-	priorityInteractor := usecasePriority.NewInteractor(userRepo, repo)
-	voteInteractor := usecaseVote.NewInteractor(repo, userRepo, 0) // 0 = default 30s expiry
+	actInteractor := usecaseActivity.NewInteractor(queueRepo)
+	priorityInteractor := usecasePriority.NewInteractor(userRepo, queueRepo)
+	voteInteractor := usecaseVote.NewInteractor(queueRepo, userRepo, 0) // 0 = default 30s expiry
 
 	// Initialize auto-queue components
-	autoQueueRepo := persistence.NewSQLiteAutoQueueRepository(repo.DB())
 	ytRelatedFetcher := youtube.NewYtDlpRelatedFetcher(cfg.YTDLPPath, 10)
-	autoQueueInteractor := usecaseAutoQueue.NewInteractor(autoQueueRepo, repo, ytRelatedFetcher)
+	autoQueueInteractor := usecaseAutoQueue.NewInteractor(autoQueueRepo, queueRepo, ytRelatedFetcher)
 
 	// Wire auto-queue into queue interactor
 	qInteractor.SetAutoQueueTrigger(autoQueueInteractor)
@@ -191,4 +206,42 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 	mux.HandleFunc("/ws", hub.RegisterHandler)
 
 	return mux, cfg, nil
+}
+
+// initRepositories selects the PostgreSQL backend when cfg.DatabaseURL is
+// set, otherwise the SQLite fallback. The returned *sql.DB is non-nil for
+// the PostgreSQL path so the caller can close it on shutdown; it is nil for
+// the SQLite path because SQLiteRepository owns its handle internally.
+func initRepositories(cfg *config.Config) (
+	queueRepo repository.QueueRepository,
+	userRepo repository.UserRepository,
+	autoQueueRepo domain.AutoQueueRepository,
+	db *sql.DB,
+	err error,
+) {
+	if cfg.DatabaseURL != "" {
+		db, err = sql.Open("pgx", cfg.DatabaseURL)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+		if err = db.Ping(); err != nil {
+			_ = db.Close()
+			return nil, nil, nil, nil, err
+		}
+
+		pgQueue := persistence.NewPostgresRepository(db)
+		pgUser := persistence.NewPostgresUserRepository(db)
+		pgAutoQueue := persistence.NewPostgresAutoQueueRepository(db)
+		return pgQueue, pgUser, pgAutoQueue, db, nil
+	}
+
+	// SQLite fallback (preserved per ADR 002 §13 / R02/R03).
+	sqliteRepo, err := persistence.NewSQLiteRepository(cfg.DBPath)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	return sqliteRepo,
+		persistence.NewSQLiteUserRepository(sqliteRepo.DB()),
+		persistence.NewSQLiteAutoQueueRepository(sqliteRepo.DB()),
+		nil, nil
 }

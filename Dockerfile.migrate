@@ -1,0 +1,29 @@
+# Build stage for the schema migration CLI.
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /app
+
+RUN apk add --no-cache git gcc musl-dev
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo \
+    -o /out/migrate-schema ./cmd/migrate-schema
+
+# Final stage: small runtime image that runs the schema CLI.
+FROM alpine:latest
+
+RUN apk add --no-cache ca-certificates
+
+WORKDIR /app
+
+# Pull in the embedded migration FS via the compiled binary.
+COPY --from=builder /out/migrate-schema /app/migrate-schema
+
+# The CLI reads DATABASE_URL (or MIGRATE_DATABASE_URL) at runtime.
+ENV DATABASE_URL=""
+
+CMD ["/app/migrate-schema", "up"]
