@@ -2,7 +2,7 @@
 
 ## Status
 
-In progress — Product Owner approved activation.
+Closed — Architect reviewed and Product Owner approved. Documentation-only closure pass.
 
 ## Sprint name
 
@@ -179,10 +179,6 @@ The following issues identified during review were corrected in the ADR:
 5. **ADR status** — Front-matter status is now `Proposed — awaiting Architect review and Product Owner approval`. The ADR no longer claims `Accepted` while still under review.
 6. **Broken relative links** — Cross-repo links in §1 (`internal/...`, `cmd/...`, `frontend/...`) now use the correct `../../../` prefix from the ADR path. Links to nearby docs (`../ROOM_EPIC_SPRINT_SEQUENCE.md`, `../PROJECT_STATE.md`) remain unchanged.
 
-### ADR Location
-
-- [`documents/00-project-management/ADRS/001-room-architecture-and-contracts.md`](../ADRS/001-room-architecture-and-contracts.md)
-
 ### Decisions Made
 
 - Move from one implicit global room to explicit rooms; single-process scope for the first implementation.
@@ -216,7 +212,11 @@ The following issues identified during review were corrected in the ADR:
 - Anonymous (read-only) room views.
 - Cross-room moderation tools (global admin).
 
-### Verification Results
+### Closure Pass (Documentation-Only)
+
+> **Closure update:** Sprint 006 / R00 is closed as a documentation-only sprint. The ADR status was updated to `Accepted — Architect reviewed and Product Owner approved`. No runtime, frontend, backend, configuration, deployment, or test files were modified. PostgreSQL and room implementation have not been started. Sprint R01 has not been activated.
+
+## Verification Results
 
 - `git diff --check` — PASS (no whitespace/indent warnings)
 - `git status --short --branch` — see commit-time output below.
@@ -225,6 +225,7 @@ The following issues identified during review were corrected in the ADR:
 ## dev...origin/dev
  M documents/00-project-management/ADRS/001-room-architecture-and-contracts.md
  M documents/00-project-management/SPRINTS/006-room-architecture-adr-contract-plan.md
+ M documents/00-project-management/SPRINTS/active.md
 ```
 
 - Confirmation: no runtime behavior changed.

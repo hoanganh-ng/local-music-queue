@@ -1,7 +1,7 @@
 # Active Sprint
 
-**Sprint 006 / R00 — Room Architecture ADR and Contract Plan** is the active sprint.
+There is currently no active sprint.
 
-See [006-room-architecture-adr-contract-plan.md](./006-room-architecture-adr-contract-plan.md).
+Sprint 006 / R00 — Room Architecture ADR and Contract Plan is closed. See [006-room-architecture-adr-contract-plan.md](./006-room-architecture-adr-contract-plan.md) for the closure record.
 
-Sprint 005 — In-App Vote Event Notifications is closed. See [005-in-app-vote-event-notifications.md](./005-in-app-vote-event-notifications.md) for the closure record.
+The next planned sprint is **Sprint R01 — PostgreSQL Migration Design** (not yet activated).

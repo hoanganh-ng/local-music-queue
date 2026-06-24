@@ -1,6 +1,6 @@
 # ADR 001 — Room Architecture and Contracts
 
-- Status: Proposed — awaiting Architect review and Product Owner approval (Sprint 006 / R00 deliverable)
+- Status: Accepted — Architect reviewed and Product Owner approved
 - Date: 2026-06-24
 - Scope: Defines the room domain, room-scoped REST and WebSocket contracts, persistence and migration direction, PostgreSQL timing, frontend flow, authorization caveats, and the transition strategy for the existing global API. This ADR is a contract plan; it does not authorize runtime implementation in this sprint.
 
