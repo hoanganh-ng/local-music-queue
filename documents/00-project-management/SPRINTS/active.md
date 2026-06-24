@@ -1,10 +1,7 @@
 # Active Sprint
 
-There is currently no active sprint.
+**Sprint 006 / R00 — Room Architecture ADR and Contract Plan** is the active sprint.
 
-Sprint 005 — In-App Vote Event Notifications is closed. See
-[005-in-app-vote-event-notifications.md](./005-in-app-vote-event-notifications.md)
-for the closure record.
+See [006-room-architecture-adr-contract-plan.md](./006-room-architecture-adr-contract-plan.md).
 
-The next planned sprint is **Sprint R00 — Room Architecture ADR and
-Contract Plan**. Sprint R00 has not been activated yet.
+Sprint 005 — In-App Vote Event Notifications is closed. See [005-in-app-vote-event-notifications.md](./005-in-app-vote-event-notifications.md) for the closure record.
