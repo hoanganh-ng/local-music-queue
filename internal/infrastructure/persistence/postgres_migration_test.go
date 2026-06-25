@@ -100,8 +100,8 @@ func TestPostgresMigration_DownThenUp(t *testing.T) {
 		t.Fatalf("migrate up: %v", err)
 	}
 
-	// Step down one version. We are now at v3 (0001 + 0002 + 0003); stepping
-	// down 1 lands us at v2 with only the 0003 changes reverted.
+	// Step down one version. We are now at v4 (0001 + 0002 + 0003 + 0004; 0004
+	// reverted on down); stepping down 1 lands us at v3 with 0004 changes reverted.
 	if err := RunEmbeddedMigrationsDown(db, 1); err != nil {
 		t.Fatalf("migrate down 1: %v", err)
 	}
@@ -110,20 +110,21 @@ func TestPostgresMigration_DownThenUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if v != 2 {
-		t.Errorf("expected version=2 after down 1, got %d", v)
+	if v != 3 {
+		t.Errorf("expected version=3 after down 1, got %d", v)
 	}
 
-	// Step down two more to fully revert. queue_state is dropped with 0001.
-	if err := RunEmbeddedMigrationsDown(db, 2); err != nil {
-		t.Fatalf("migrate down 2 (final): %v", err)
+	// Step down three more to fully revert all four migrations. queue_state
+	// is dropped by 0001_initial.down.sql.
+	if err := RunEmbeddedMigrationsDown(db, 3); err != nil {
+		t.Fatalf("migrate down 3 (final): %v", err)
 	}
 	v, _, err = EmbeddedMigrationsVersion(db)
 	if err != nil {
 		t.Fatalf("read version: %v", err)
 	}
 	if v != 0 {
-		t.Errorf("expected version=0 after down 3, got %d", v)
+		t.Errorf("expected version=0 after down 4, got %d", v)
 	}
 
 	// queue_state should be gone. Scoped to the test schema so the query
@@ -142,7 +143,7 @@ func TestPostgresMigration_DownThenUp(t *testing.T) {
 		t.Errorf("expected queue_state dropped after down")
 	}
 
-	// Re-apply: the schema must come back to version 3.
+	// Re-apply: the schema must come back to version 4.
 	if err := RunEmbeddedMigrationsUp(db); err != nil {
 		t.Fatalf("re-migrate up: %v", err)
 	}
@@ -150,8 +151,8 @@ func TestPostgresMigration_DownThenUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if v != 3 {
-		t.Errorf("expected version=3 after re-up, got %d", v)
+	if v != 4 {
+		t.Errorf("expected version=4 after re-up, got %d", v)
 	}
 }
 
