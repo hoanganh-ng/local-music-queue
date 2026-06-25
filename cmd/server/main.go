@@ -223,76 +223,41 @@ func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 	mux.HandleFunc("GET /api/rooms", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomHandlers.HandleListRooms(w, r, actorFromCtx(r.Context()))
 	}))
-	mux.HandleFunc("GET /api/rooms/{roomId}", roomAuth(func(w http.ResponseWriter, r *http.Request) {
-		id, err := strconv.ParseInt(r.PathValue("roomId"), 10, 64)
-		if err != nil {
-			http.Error(w, "invalid room id", http.StatusBadRequest)
-			return
-		}
-		roomHandlers.HandleGetRoom(w, r, id, actorFromCtx(r.Context()))
+	mux.HandleFunc("GET /api/rooms/{slug}", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomHandlers.HandleGetRoom(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
-	mux.HandleFunc("GET /api/rooms/{roomId}/members", roomAuth(func(w http.ResponseWriter, r *http.Request) {
-		id, err := strconv.ParseInt(r.PathValue("roomId"), 10, 64)
-		if err != nil {
-			http.Error(w, "invalid room id", http.StatusBadRequest)
-			return
-		}
-		roomHandlers.HandleListMembers(w, r, id, actorFromCtx(r.Context()))
+	mux.HandleFunc("GET /api/rooms/{slug}/members", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomHandlers.HandleListMembers(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
-	mux.HandleFunc("POST /api/rooms/{roomId}/members/{userId}/promote", roomAuth(func(w http.ResponseWriter, r *http.Request) {
-		roomID, err := strconv.ParseInt(r.PathValue("roomId"), 10, 64)
-		if err != nil {
-			http.Error(w, "invalid room id", http.StatusBadRequest)
-			return
-		}
+	mux.HandleFunc("POST /api/rooms/{slug}/members/{userId}/promote", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		userID, err := strconv.Atoi(r.PathValue("userId"))
 		if err != nil {
 			http.Error(w, "invalid user id", http.StatusBadRequest)
 			return
 		}
-		roomHandlers.HandlePromoteMember(w, r, roomID, actorFromCtx(r.Context()), userID)
+		roomHandlers.HandlePromoteMember(w, r, r.PathValue("slug"), actorFromCtx(r.Context()), userID)
 	}))
-	mux.HandleFunc("POST /api/rooms/{roomId}/members/{userId}/demote", roomAuth(func(w http.ResponseWriter, r *http.Request) {
-		roomID, err := strconv.ParseInt(r.PathValue("roomId"), 10, 64)
-		if err != nil {
-			http.Error(w, "invalid room id", http.StatusBadRequest)
-			return
-		}
+	mux.HandleFunc("POST /api/rooms/{slug}/members/{userId}/demote", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		userID, err := strconv.Atoi(r.PathValue("userId"))
 		if err != nil {
 			http.Error(w, "invalid user id", http.StatusBadRequest)
 			return
 		}
-		roomHandlers.HandleDemoteMember(w, r, roomID, actorFromCtx(r.Context()), userID)
+		roomHandlers.HandleDemoteMember(w, r, r.PathValue("slug"), actorFromCtx(r.Context()), userID)
 	}))
-	mux.HandleFunc("POST /api/rooms/{roomId}/invites", roomAuth(func(w http.ResponseWriter, r *http.Request) {
-		id, err := strconv.ParseInt(r.PathValue("roomId"), 10, 64)
-		if err != nil {
-			http.Error(w, "invalid room id", http.StatusBadRequest)
-			return
-		}
-		roomHandlers.HandleCreateInvite(w, r, id, actorFromCtx(r.Context()))
+	mux.HandleFunc("POST /api/rooms/{slug}/invites", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomHandlers.HandleCreateInvite(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
-	mux.HandleFunc("GET /api/rooms/{roomId}/invites", roomAuth(func(w http.ResponseWriter, r *http.Request) {
-		id, err := strconv.ParseInt(r.PathValue("roomId"), 10, 64)
-		if err != nil {
-			http.Error(w, "invalid room id", http.StatusBadRequest)
-			return
-		}
-		roomHandlers.HandleListInvites(w, r, id, actorFromCtx(r.Context()))
+	mux.HandleFunc("GET /api/rooms/{slug}/invites", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomHandlers.HandleListInvites(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
-	mux.HandleFunc("DELETE /api/rooms/{roomId}/invites/{inviteId}", roomAuth(func(w http.ResponseWriter, r *http.Request) {
-		roomID, err := strconv.ParseInt(r.PathValue("roomId"), 10, 64)
-		if err != nil {
-			http.Error(w, "invalid room id", http.StatusBadRequest)
-			return
-		}
+	mux.HandleFunc("DELETE /api/rooms/{slug}/invites/{inviteId}", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		inviteID, err := strconv.ParseInt(r.PathValue("inviteId"), 10, 64)
 		if err != nil {
 			http.Error(w, "invalid invite id", http.StatusBadRequest)
 			return
 		}
-		roomHandlers.HandleRevokeInvite(w, r, roomID, inviteID, actorFromCtx(r.Context()))
+		roomHandlers.HandleRevokeInvite(w, r, r.PathValue("slug"), inviteID, actorFromCtx(r.Context()))
 	}))
 	mux.HandleFunc("POST /api/invites/{token}/redeem", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomHandlers.HandleRedeemInvite(w, r, r.PathValue("token"), actorFromCtx(r.Context()))

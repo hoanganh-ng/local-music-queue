@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"local-music-queue/internal/domain/entity"
+	"local-music-queue/internal/domain/repository"
 )
 
 // PostgresRoomRepository implements repository.RoomRepository on PostgreSQL.
@@ -301,6 +302,55 @@ func (r *PostgresRoomRepository) IncrementInviteUseCount(ctx context.Context, in
 		return fmt.Errorf("increment use count: %w", err)
 	}
 	return nil
+}
+
+// RedeemInviteAtomic performs the member-insert + use-count-increment
+// inside a single transaction. The conditional UPDATE on room_invites uses
+// `(max_uses = 0 OR use_count < max_uses)` so the row is only bumped when
+// the invite still has capacity; if it is already at the limit, RowsAffected
+// is 0 and we surface ErrInviteExhausted. The transaction is rolled back on
+// any error so the member row never persists when the invite cannot be
+// consumed.
+func (r *PostgresRoomRepository) RedeemInviteAtomic(ctx context.Context, inviteID int64, roomID int64, userID int, role entity.RoomMemberRole, maxUses int, now time.Time) (*entity.RoomMember, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// First, try the conditional increment. maxUses is part of the WHERE so
+	// a concurrent redeemer that bumps use_count to max_uses makes this
+	// statement affect 0 rows and we surface ErrInviteExhausted.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE room_invites SET use_count = use_count + 1
+		 WHERE id = $1 AND ($2 = 0 OR use_count < $2)`,
+		inviteID, maxUses)
+	if err != nil {
+		return nil, fmt.Errorf("conditional increment: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return nil, repository.ErrInviteExhausted
+	}
+
+	// Increment succeeded; insert the member row. If this fails, the
+	// transaction rolls back, undoing the use-count bump.
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO room_members (room_id, user_id, role, joined_at)
+		 VALUES ($1, $2, $3, $4)`,
+		roomID, userID, role, now,
+	); err != nil {
+		return nil, fmt.Errorf("insert member: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+
+	return r.GetMember(ctx, roomID, userID)
 }
 
 // --- helpers ---

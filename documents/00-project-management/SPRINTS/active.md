@@ -1,6 +1,6 @@
 # Active Sprint
 
-Sprint 010 / R04 — Room Domain, Invite, Membership, and Lifecycle is the currently authorized sprint. See [010-room-domain-invite-membership-lifecycle.md](./010-room-domain-invite-membership-lifecycle.md) for the sprint record.
+Sprint 010 / R04 — Room Domain, Invite, Membership, and Lifecycle is the currently authorized sprint (in progress — pending Product Owner acceptance of the R04 closure pass). See [010-room-domain-invite-membership-lifecycle.md](./010-room-domain-invite-membership-lifecycle.md) for the sprint record.
 
 Sprint 009 / R03 — SQLite-to-PostgreSQL Data Migration is closed. See [009-sqlite-to-postgresql-data-migration.md](./009-sqlite-to-postgresql-data-migration.md).
 

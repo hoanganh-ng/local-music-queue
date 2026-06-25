@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strconv"
 	"time"
 
 	"local-music-queue/internal/domain/entity"
@@ -13,10 +12,13 @@ import (
 	"local-music-queue/internal/usecase/room"
 )
 
-// RoomHandlers wires the 10 room REST endpoints. Actor identity is supplied
-// by the routing wrapper (main.go) which resolves the bearer token via
-// auth.Interactor.ResolveSession. A 0 actor means no session, and the
-// handler returns 401 for endpoints that require an actor.
+// RoomHandlers wires the room REST endpoints. Actor identity is supplied by
+// the routing wrapper (main.go) which resolves the bearer token via
+// auth.Interactor.ResolveSession. A 0 actor means no session, and the handler
+// returns 401 for endpoints that require an actor.
+//
+// Per ADR 001 §6, the URL-safe slug is the external room identifier. Numeric
+// DB ids are internal only and never exposed in routes.
 //
 // All handlers map interactor sentinel errors to documented status codes;
 // no handler reads role strings from request bodies.
@@ -102,13 +104,17 @@ func (h *RoomHandlers) HandleListRooms(w http.ResponseWriter, r *http.Request, a
 	writeJSON(w, http.StatusOK, rooms)
 }
 
-// HandleGetRoom: GET /api/rooms/{roomId} — returns a single room.
-func (h *RoomHandlers) HandleGetRoom(w http.ResponseWriter, r *http.Request, roomID int64, actorUserID int) {
+// HandleGetRoom: GET /api/rooms/{slug} — returns a single room by slug.
+func (h *RoomHandlers) HandleGetRoom(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
 	if actorUserID == 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	roomObj, err := h.inter.GetRoom(r.Context(), roomID)
+	if !entity.IsValidSlug(slug) {
+		http.Error(w, "invalid room slug", http.StatusBadRequest)
+		return
+	}
+	roomObj, err := h.inter.GetRoomBySlug(r.Context(), slug)
 	if err != nil {
 		writeRoomError(w, err)
 		return
@@ -116,13 +122,14 @@ func (h *RoomHandlers) HandleGetRoom(w http.ResponseWriter, r *http.Request, roo
 	writeJSON(w, http.StatusOK, roomObj)
 }
 
-// HandleListMembers: GET /api/rooms/{roomId}/members — host-only by interactor.
-func (h *RoomHandlers) HandleListMembers(w http.ResponseWriter, r *http.Request, roomID int64, actorUserID int) {
+// HandleListMembers: GET /api/rooms/{slug}/members — any active member may
+// list members per ADR 001. Host/admin gate is enforced by the interactor.
+func (h *RoomHandlers) HandleListMembers(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
 	if actorUserID == 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	members, err := h.inter.ListMembers(r.Context(), roomID)
+	members, err := h.inter.ListMembers(r.Context(), slug, actorUserID)
 	if err != nil {
 		writeRoomError(w, err)
 		return
@@ -133,36 +140,38 @@ func (h *RoomHandlers) HandleListMembers(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, members)
 }
 
-// HandlePromoteMember: POST /api/rooms/{roomId}/members/{userId}/promote —
-// host promotes a guest to admin.
-func (h *RoomHandlers) HandlePromoteMember(w http.ResponseWriter, r *http.Request, roomID int64, actorUserID int, targetUserID int) {
+// HandlePromoteMember: POST /api/rooms/{slug}/members/{userId}/promote —
+// host promotes a guest to admin. The new role is derived from the route
+// suffix ("promote" / "demote") and never trusted from the request body.
+func (h *RoomHandlers) HandlePromoteMember(w http.ResponseWriter, r *http.Request, slug string, actorUserID int, targetUserID int) {
 	if actorUserID == 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if err := h.inter.PromoteMember(r.Context(), roomID, actorUserID, targetUserID, "admin"); err != nil {
+	if err := h.inter.PromoteMember(r.Context(), slug, actorUserID, targetUserID, "admin"); err != nil {
 		writeRoomError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// HandleDemoteMember: POST /api/rooms/{roomId}/members/{userId}/demote —
+// HandleDemoteMember: POST /api/rooms/{slug}/members/{userId}/demote —
 // host demotes an admin to guest.
-func (h *RoomHandlers) HandleDemoteMember(w http.ResponseWriter, r *http.Request, roomID int64, actorUserID int, targetUserID int) {
+func (h *RoomHandlers) HandleDemoteMember(w http.ResponseWriter, r *http.Request, slug string, actorUserID int, targetUserID int) {
 	if actorUserID == 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if err := h.inter.DemoteMember(r.Context(), roomID, actorUserID, targetUserID, "guest"); err != nil {
+	if err := h.inter.DemoteMember(r.Context(), slug, actorUserID, targetUserID, "guest"); err != nil {
 		writeRoomError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// HandleCreateInvite: POST /api/rooms/{roomId}/invites — host mints a new invite.
-func (h *RoomHandlers) HandleCreateInvite(w http.ResponseWriter, r *http.Request, roomID int64, actorUserID int) {
+// HandleCreateInvite: POST /api/rooms/{slug}/invites — host/admin mints a
+// new invite. Role check is enforced by the interactor.
+func (h *RoomHandlers) HandleCreateInvite(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
 	if actorUserID == 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -178,7 +187,7 @@ func (h *RoomHandlers) HandleCreateInvite(w http.ResponseWriter, r *http.Request
 	if req.ExpiresAt.IsZero() {
 		req.ExpiresAt = time.Time{}
 	}
-	plaintext, inv, err := h.inter.CreateInvite(r.Context(), roomID, actorUserID, req.MaxUses, req.ExpiresAt)
+	plaintext, inv, err := h.inter.CreateInvite(r.Context(), slug, actorUserID, req.MaxUses, req.ExpiresAt)
 	if err != nil {
 		writeRoomError(w, err)
 		return
@@ -194,14 +203,14 @@ func (h *RoomHandlers) HandleCreateInvite(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// HandleListInvites: GET /api/rooms/{roomId}/invites — host-only listing
+// HandleListInvites: GET /api/rooms/{slug}/invites — host/admin listing
 // of invites for a room. The token hash is never serialized.
-func (h *RoomHandlers) HandleListInvites(w http.ResponseWriter, r *http.Request, roomID int64, actorUserID int) {
+func (h *RoomHandlers) HandleListInvites(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
 	if actorUserID == 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	invites, err := h.inter.ListInvites(r.Context(), roomID, actorUserID)
+	invites, err := h.inter.ListInvites(r.Context(), slug, actorUserID)
 	if err != nil {
 		writeRoomError(w, err)
 		return
@@ -233,14 +242,14 @@ func (h *RoomHandlers) HandleListInvites(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, out)
 }
 
-// HandleRevokeInvite: POST /api/rooms/{roomId}/invites/{inviteId}/revoke —
-// host revokes an invite.
-func (h *RoomHandlers) HandleRevokeInvite(w http.ResponseWriter, r *http.Request, roomID int64, inviteID int64, actorUserID int) {
+// HandleRevokeInvite: POST /api/rooms/{slug}/invites/{inviteId}/revoke —
+// host/admin revokes an invite.
+func (h *RoomHandlers) HandleRevokeInvite(w http.ResponseWriter, r *http.Request, slug string, inviteID int64, actorUserID int) {
 	if actorUserID == 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if _, err := h.inter.RevokeInvite(r.Context(), roomID, actorUserID, inviteID); err != nil {
+	if _, err := h.inter.RevokeInvite(r.Context(), slug, actorUserID, inviteID); err != nil {
 		writeRoomError(w, err)
 		return
 	}
@@ -289,11 +298,4 @@ func writeJSON(w http.ResponseWriter, status int, body interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
-}
-
-// parseRoomID parses {roomId} from path params. The route registration in
-// main.go supplies the int64 directly; this helper exists for tests and
-// for any direct router use that takes a string.
-func parseRoomID(s string) (int64, error) {
-	return strconv.ParseInt(s, 10, 64)
 }

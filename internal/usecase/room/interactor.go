@@ -32,6 +32,9 @@ var (
 // DefaultInviteExpiry is the documented default invite lifetime (ADR 001 §7).
 const DefaultInviteExpiry = 7 * 24 * time.Hour
 
+// MaxInviteLifetime caps invite expiry override at 30 days from creation.
+const MaxInviteLifetime = 30 * 24 * time.Hour
+
 // Interactor owns the room, invite, and membership use cases.
 type Interactor struct {
 	repo repository.RoomRepository
@@ -75,9 +78,13 @@ func (i *Interactor) CreateRoom(ctx context.Context, slug, name string, creatorU
 	return room, nil
 }
 
-// GetRoom fetches a room by ID.
-func (i *Interactor) GetRoom(ctx context.Context, roomID int64) (*entity.Room, error) {
-	room, err := i.repo.GetRoomByID(ctx, roomID)
+// GetRoomBySlug fetches a room by its slug (the external identifier per
+// ADR 001 §6).
+func (i *Interactor) GetRoomBySlug(ctx context.Context, slug string) (*entity.Room, error) {
+	if !entity.IsValidSlug(slug) {
+		return nil, ErrInvalidSlug
+	}
+	room, err := i.repo.GetRoomBySlug(ctx, slug)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrRoomNotFound
@@ -92,26 +99,68 @@ func (i *Interactor) ListRooms(ctx context.Context, status entity.RoomStatus) ([
 	return i.repo.ListRooms(ctx, status)
 }
 
-// ListMembers returns members of an active room.
-func (i *Interactor) ListMembers(ctx context.Context, roomID int64) ([]entity.RoomMember, error) {
-	if _, err := i.requireActiveRoom(ctx, roomID); err != nil {
-		return nil, err
+// ListMembers returns members of an active room. Caller must be a member
+// of the room (any role) per ADR 001 §7.
+func (i *Interactor) ListMembers(ctx context.Context, slug string, actorUserID int) ([]entity.RoomMember, error) {
+	if !entity.IsValidSlug(slug) {
+		return nil, ErrInvalidSlug
 	}
-	return i.repo.ListMembers(ctx, roomID)
+	room, err := i.repo.GetRoomBySlug(ctx, slug)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrRoomNotFound
+		}
+		return nil, fmt.Errorf("get room: %w", err)
+	}
+	// Membership check: actor must be a member of the room.
+	if _, err := i.repo.GetMember(ctx, room.ID, actorUserID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrForbidden
+		}
+		return nil, fmt.Errorf("get member: %w", err)
+	}
+	if room.Status != entity.RoomStatusActive {
+		return nil, ErrArchived
+	}
+	return i.repo.ListMembers(ctx, room.ID)
 }
 
-// CreateInvite validates the room is active, mints a random opaque token,
-// persists only its hash, and returns the plaintext to the caller. The
-// stored invite row never contains the plaintext.
-func (i *Interactor) CreateInvite(ctx context.Context, roomID int64, creatorUserID int, maxUses int, expiresAt time.Time) (string, *entity.RoomInvite, error) {
-	if _, err := i.requireActiveRoom(ctx, roomID); err != nil {
-		return "", nil, err
+// CreateInvite validates the slug, rejects past or out-of-range expiry,
+// rejects negative max_uses, requires actor to be host or admin member of
+// the room, requires the room to be active, mints a random opaque token,
+// persists only its hash, and returns the plaintext to the caller.
+func (i *Interactor) CreateInvite(ctx context.Context, slug string, actorUserID int, maxUses int, expiresAt time.Time) (string, *entity.RoomInvite, error) {
+	if !entity.IsValidSlug(slug) {
+		return "", nil, ErrInvalidSlug
 	}
 	if maxUses < 0 {
 		return "", nil, fmt.Errorf("max_uses: %w", ErrInvalidSlug)
 	}
+	room, err := i.repo.GetRoomBySlug(ctx, slug)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil, ErrRoomNotFound
+		}
+		return "", nil, fmt.Errorf("get room: %w", err)
+	}
+	// Membership/role check: only host or admin members can mint invites.
+	if err := i.requireHostOrAdmin(ctx, room.ID, actorUserID); err != nil {
+		return "", nil, err
+	}
+	if room.Status != entity.RoomStatusActive {
+		return "", nil, ErrArchived
+	}
+	now := i.now()
 	if expiresAt.IsZero() {
-		expiresAt = i.now().Add(DefaultInviteExpiry)
+		expiresAt = now.Add(DefaultInviteExpiry)
+	}
+	// Reject past expiry.
+	if !expiresAt.After(now) {
+		return "", nil, fmt.Errorf("expires_at must be in the future: %w", ErrInvalidSlug)
+	}
+	// Reject expiry more than MaxInviteLifetime from creation.
+	if expiresAt.Sub(now) > MaxInviteLifetime {
+		return "", nil, fmt.Errorf("expires_at must be within %s of creation: %w", MaxInviteLifetime, ErrInvalidSlug)
 	}
 	plaintext, err := generateInviteToken()
 	if err != nil {
@@ -119,10 +168,10 @@ func (i *Interactor) CreateInvite(ctx context.Context, roomID int64, creatorUser
 	}
 	hash := hashInviteToken(plaintext)
 	inv := &entity.RoomInvite{
-		RoomID:    roomID,
+		RoomID:    room.ID,
 		TokenHash: hash,
-		CreatedBy: creatorUserID,
-		CreatedAt: i.now(),
+		CreatedBy: actorUserID,
+		CreatedAt: now,
 		ExpiresAt: expiresAt,
 		MaxUses:   maxUses,
 		UseCount:  0,
@@ -133,33 +182,53 @@ func (i *Interactor) CreateInvite(ctx context.Context, roomID int64, creatorUser
 	return plaintext, inv, nil
 }
 
-// ListInvites returns invites for a room. Host-only.
-func (i *Interactor) ListInvites(ctx context.Context, roomID int64, actorUserID int) ([]entity.RoomInvite, error) {
-	if err := i.requireHost(ctx, roomID, actorUserID); err != nil {
+// ListInvites returns invites for a room. Host or admin only.
+func (i *Interactor) ListInvites(ctx context.Context, slug string, actorUserID int) ([]entity.RoomInvite, error) {
+	if !entity.IsValidSlug(slug) {
+		return nil, ErrInvalidSlug
+	}
+	room, err := i.repo.GetRoomBySlug(ctx, slug)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrRoomNotFound
+		}
+		return nil, fmt.Errorf("get room: %w", err)
+	}
+	if err := i.requireHostOrAdmin(ctx, room.ID, actorUserID); err != nil {
 		return nil, err
 	}
-	if _, err := i.requireActiveRoom(ctx, roomID); err != nil {
-		return nil, err
+	if room.Status != entity.RoomStatusActive {
+		return nil, ErrArchived
 	}
-	return i.repo.ListInvites(ctx, roomID)
+	return i.repo.ListInvites(ctx, room.ID)
 }
 
-// RevokeInvite marks an invite as revoked. Host-only.
-func (i *Interactor) RevokeInvite(ctx context.Context, roomID int64, actorUserID int, inviteID int64) (*entity.RoomInvite, error) {
-	if err := i.requireHost(ctx, roomID, actorUserID); err != nil {
+// RevokeInvite marks an invite as revoked. Host or admin only.
+func (i *Interactor) RevokeInvite(ctx context.Context, slug string, actorUserID int, inviteID int64) (*entity.RoomInvite, error) {
+	if !entity.IsValidSlug(slug) {
+		return nil, ErrInvalidSlug
+	}
+	room, err := i.repo.GetRoomBySlug(ctx, slug)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrRoomNotFound
+		}
+		return nil, fmt.Errorf("get room: %w", err)
+	}
+	if err := i.requireHostOrAdmin(ctx, room.ID, actorUserID); err != nil {
 		return nil, err
 	}
-	if _, err := i.requireActiveRoom(ctx, roomID); err != nil {
-		return nil, err
+	if room.Status != entity.RoomStatusActive {
+		return nil, ErrArchived
 	}
 	now := i.now()
-	if err := i.repo.RevokeInvite(ctx, roomID, inviteID, now); err != nil {
+	if err := i.repo.RevokeInvite(ctx, room.ID, inviteID, now); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrInviteNotFound
 		}
 		return nil, fmt.Errorf("revoke: %w", err)
 	}
-	return i.repo.GetInviteByID(ctx, roomID, inviteID)
+	return i.repo.GetInviteByID(ctx, room.ID, inviteID)
 }
 
 // RedeemInvite validates the token hash, expiry, revocation, and use limit;
@@ -167,6 +236,10 @@ func (i *Interactor) RevokeInvite(ctx context.Context, roomID int64, actorUserID
 // membership. Idempotent for already-member users. All failure modes return
 // ErrInviteInvalid (or ErrInviteExhausted) without leaking whether the token
 // existed.
+//
+// Atomicity: the AddMember + IncrementInviteUseCount steps happen inside a
+// single repository transaction guarded by a SQL-side check that rejects
+// use_count beyond max_uses, preventing concurrent max_uses overrun.
 func (i *Interactor) RedeemInvite(ctx context.Context, plaintext string, userID int) (*entity.RoomMember, error) {
 	hash := hashInviteToken(plaintext)
 	inv, err := i.repo.GetInviteByTokenHash(ctx, hash)
@@ -183,9 +256,6 @@ func (i *Interactor) RedeemInvite(ctx context.Context, plaintext string, userID 
 	if !now.Before(inv.ExpiresAt) {
 		return nil, ErrInviteInvalid
 	}
-	if inv.MaxUses > 0 && inv.UseCount >= inv.MaxUses {
-		return nil, ErrInviteExhausted
-	}
 
 	room, err := i.repo.GetRoomByID(ctx, inv.RoomID)
 	if err != nil {
@@ -195,35 +265,57 @@ func (i *Interactor) RedeemInvite(ctx context.Context, plaintext string, userID 
 		return nil, ErrArchived
 	}
 
-	// Idempotent: existing member is returned untouched.
+	// Idempotent: existing member is returned untouched (no use_count bump).
 	if existing, err := i.repo.GetMember(ctx, inv.RoomID, userID); err == nil {
 		return existing, nil
 	}
 
-	if err := i.repo.AddMember(ctx, inv.RoomID, userID, entity.RoomRoleGuest, now); err != nil {
-		return nil, fmt.Errorf("add guest: %w", err)
+	// Atomic: AddMember + IncrementInviteUseCount in one transaction. The
+	// SQL guard rejects an increment that would exceed max_uses so concurrent
+	// redemptions cannot overrun. The member insert happens FIRST; if the
+	// use-count update fails (e.g., max_uses already reached by a concurrent
+	// redeemer), the transaction is rolled back and no member is left behind.
+	member, err := i.repo.RedeemInviteAtomic(ctx, inv.ID, inv.RoomID, userID, entity.RoomRoleGuest, inv.MaxUses, now)
+	if err != nil {
+		if errors.Is(err, repository.ErrInviteExhausted) {
+			return nil, ErrInviteExhausted
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			// Invite was deleted/revoked between the read and the atomic op.
+			return nil, ErrInviteInvalid
+		}
+		return nil, fmt.Errorf("redeem: %w", err)
 	}
-	if err := i.repo.IncrementInviteUseCount(ctx, inv.ID); err != nil {
-		return nil, fmt.Errorf("increment use count: %w", err)
-	}
-	return i.repo.GetMember(ctx, inv.RoomID, userID)
+	return member, nil
 }
 
-// PromoteMember: host promotes target from guest to admin.
-func (i *Interactor) PromoteMember(ctx context.Context, roomID int64, actorUserID int, targetUserID int, newRole string) error {
+// PromoteMember: host promotes target from guest to admin. The newRole arg
+// is currently always "admin" (set by the handler from the route); it is
+// re-validated here and never trusted from the request body.
+func (i *Interactor) PromoteMember(ctx context.Context, slug string, actorUserID int, targetUserID int, newRole string) error {
+	if !entity.IsValidSlug(slug) {
+		return ErrInvalidSlug
+	}
+	room, err := i.repo.GetRoomBySlug(ctx, slug)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrRoomNotFound
+		}
+		return fmt.Errorf("get room: %w", err)
+	}
 	if actorUserID == targetUserID {
 		return ErrForbidden
 	}
-	if err := i.requireHost(ctx, roomID, actorUserID); err != nil {
+	if err := i.requireHost(ctx, room.ID, actorUserID); err != nil {
 		return err
 	}
-	if _, err := i.requireActiveRoom(ctx, roomID); err != nil {
-		return err
+	if room.Status != entity.RoomStatusActive {
+		return ErrArchived
 	}
 	if newRole != "admin" {
 		return fmt.Errorf("promote target must be admin: %w", ErrInvalidSlug)
 	}
-	target, err := i.repo.GetMember(ctx, roomID, targetUserID)
+	target, err := i.repo.GetMember(ctx, room.ID, targetUserID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrMemberNotFound
@@ -233,24 +325,34 @@ func (i *Interactor) PromoteMember(ctx context.Context, roomID int64, actorUserI
 	if target.Role != entity.RoomRoleGuest {
 		return fmt.Errorf("promote requires guest: %w", ErrInvalidSlug)
 	}
-	return i.repo.UpdateMemberRole(ctx, roomID, targetUserID, entity.RoomRoleAdmin, i.now())
+	return i.repo.UpdateMemberRole(ctx, room.ID, targetUserID, entity.RoomRoleAdmin, i.now())
 }
 
 // DemoteMember: host demotes target from admin to guest.
-func (i *Interactor) DemoteMember(ctx context.Context, roomID int64, actorUserID int, targetUserID int, newRole string) error {
+func (i *Interactor) DemoteMember(ctx context.Context, slug string, actorUserID int, targetUserID int, newRole string) error {
+	if !entity.IsValidSlug(slug) {
+		return ErrInvalidSlug
+	}
+	room, err := i.repo.GetRoomBySlug(ctx, slug)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrRoomNotFound
+		}
+		return fmt.Errorf("get room: %w", err)
+	}
 	if actorUserID == targetUserID {
 		return ErrForbidden
 	}
-	if err := i.requireHost(ctx, roomID, actorUserID); err != nil {
+	if err := i.requireHost(ctx, room.ID, actorUserID); err != nil {
 		return err
 	}
-	if _, err := i.requireActiveRoom(ctx, roomID); err != nil {
-		return err
+	if room.Status != entity.RoomStatusActive {
+		return ErrArchived
 	}
 	if newRole != "guest" {
 		return fmt.Errorf("demote target must be guest: %w", ErrInvalidSlug)
 	}
-	target, err := i.repo.GetMember(ctx, roomID, targetUserID)
+	target, err := i.repo.GetMember(ctx, room.ID, targetUserID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrMemberNotFound
@@ -260,7 +362,7 @@ func (i *Interactor) DemoteMember(ctx context.Context, roomID int64, actorUserID
 	if target.Role != entity.RoomRoleAdmin {
 		return fmt.Errorf("demote requires admin: %w", ErrInvalidSlug)
 	}
-	return i.repo.UpdateMemberRole(ctx, roomID, targetUserID, entity.RoomRoleGuest, i.now())
+	return i.repo.UpdateMemberRole(ctx, room.ID, targetUserID, entity.RoomRoleGuest, i.now())
 }
 
 // ArchiveRoom is the internal-only archive method for tests and R05
@@ -271,18 +373,20 @@ func (i *Interactor) ArchiveRoom(ctx context.Context, roomID int64) error {
 
 // --- helpers ---
 
-func (i *Interactor) requireActiveRoom(ctx context.Context, roomID int64) (*entity.Room, error) {
-	room, err := i.repo.GetRoomByID(ctx, roomID)
+// requireHostOrAdmin enforces the host/admin gate for invite creation,
+// listing, and revocation.
+func (i *Interactor) requireHostOrAdmin(ctx context.Context, roomID int64, actorUserID int) error {
+	member, err := i.repo.GetMember(ctx, roomID, actorUserID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrRoomNotFound
+			return ErrForbidden
 		}
-		return nil, fmt.Errorf("get room: %w", err)
+		return fmt.Errorf("get member: %w", err)
 	}
-	if room.Status != entity.RoomStatusActive {
-		return nil, ErrArchived
+	if member.Role != entity.RoomRoleHost && member.Role != entity.RoomRoleAdmin {
+		return ErrForbidden
 	}
-	return room, nil
+	return nil
 }
 
 func (i *Interactor) requireHost(ctx context.Context, roomID int64, actorUserID int) error {

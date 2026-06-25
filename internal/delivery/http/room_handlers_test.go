@@ -164,21 +164,46 @@ func TestRoomHandler_ListRooms(t *testing.T) {
 
 func TestRoomHandler_GetRoom_NotFound404(t *testing.T) {
 	rh, _, _ := newRoomHandlers(t)
-	req := httptest.NewRequest(http.MethodGet, "/api/rooms/999", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/rooms/missing-room", nil)
 	rr := httptest.NewRecorder()
-	rh.HandleGetRoom(rr, req, 999, 1)
+	rh.HandleGetRoom(rr, req, "missing-room", 1)
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", rr.Code)
 	}
 }
 
+func TestRoomHandler_GetRoom_InvalidSlug400(t *testing.T) {
+	rh, _, _ := newRoomHandlers(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/rooms/BadSlug", nil)
+	rr := httptest.NewRecorder()
+	rh.HandleGetRoom(rr, req, "BadSlug", 1)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid slug, got %d", rr.Code)
+	}
+}
+
 func TestRoomHandler_ListMembers_Unauthorized401(t *testing.T) {
 	rh, _, _ := newRoomHandlers(t)
-	req := httptest.NewRequest(http.MethodGet, "/api/rooms/1/members", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/rooms/lounge/members", nil)
 	rr := httptest.NewRecorder()
-	rh.HandleListMembers(rr, req, 1, 0) // actor=0 (unauthenticated)
+	rh.HandleListMembers(rr, req, "lounge", 0) // actor=0 (unauthenticated)
 	if rr.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", rr.Code)
+	}
+}
+
+func TestRoomHandler_ListMembers_NonMember403(t *testing.T) {
+	rh, _, db := newRoomHandlers(t)
+	host := seedUser(t, db, "h@example.com", entity.RoleHost)
+	outsider := seedUser(t, db, "o@example.com", entity.RoleGuest)
+	if _, err := rh.inter.CreateRoom(context.Background(), "lounge", "Lounge", host); err != nil {
+		t.Fatalf("CreateRoom: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/rooms/lounge/members", nil)
+	rr := httptest.NewRecorder()
+	rh.HandleListMembers(rr, req, "lounge", outsider)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for non-member, got %d", rr.Code)
 	}
 }
 
@@ -190,9 +215,13 @@ func TestRoomHandler_PromoteNonHostForbidden(t *testing.T) {
 
 	// Create room and seed members directly via the repo.
 	ctx := context.Background()
-	room1, err := rh.inter.CreateRoom(ctx, "lounge", "Lounge", host)
-	if err != nil {
+	if _, err := rh.inter.CreateRoom(ctx, "lounge", "Lounge", host); err != nil {
 		t.Fatalf("CreateRoom: %v", err)
+	}
+	// Look up the room ID via slug so we can seed members under the same ID.
+	room1, err := rh.inter.Repo().GetRoomBySlug(ctx, "lounge")
+	if err != nil {
+		t.Fatalf("GetRoomBySlug: %v", err)
 	}
 	if err := rh.inter.Repo().AddMember(ctx, room1.ID, admin, entity.RoomRoleAdmin, time.Now()); err != nil {
 		t.Fatalf("AddMember admin: %v", err)
@@ -202,11 +231,28 @@ func TestRoomHandler_PromoteNonHostForbidden(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPost,
-		fmt.Sprintf("/api/rooms/%d/members/%d/promote", room1.ID, guest), nil)
+		fmt.Sprintf("/api/rooms/%s/members/%d/promote", "lounge", guest), nil)
 	rr := httptest.NewRecorder()
-	rh.HandlePromoteMember(rr, req, room1.ID, guest /*actor is non-host*/, guest)
+	rh.HandlePromoteMember(rr, req, "lounge", guest /*actor is non-host*/, guest)
 	if rr.Code != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", rr.Code)
+	}
+}
+
+func TestRoomHandler_CreateInvite_NonHostForbidden(t *testing.T) {
+	rh, _, db := newRoomHandlers(t)
+	host := seedUser(t, db, "h@example.com", entity.RoleHost)
+	outsider := seedUser(t, db, "o@example.com", entity.RoleGuest)
+	if _, err := rh.inter.CreateRoom(context.Background(), "lounge", "Lounge", host); err != nil {
+		t.Fatalf("CreateRoom: %v", err)
+	}
+	body, _ := json.Marshal(map[string]int{"max_uses": 1})
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/lounge/invites", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rh.HandleCreateInvite(rr, req, "lounge", outsider)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for non-member creating invite, got %d", rr.Code)
 	}
 }
 
