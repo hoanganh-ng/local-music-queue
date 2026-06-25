@@ -395,9 +395,11 @@ var (
 		var q repository.QueueRepository = (*PostgresRepository)(nil)
 		var u repository.UserRepository = (*PostgresUserRepository)(nil)
 		var a domain.AutoQueueRepository = (*PostgresAutoQueueRepository)(nil)
+		var r repository.RoomRepository = (*PostgresRoomRepository)(nil)
 		_ = q
 		_ = u
 		_ = a
+		_ = r
 		return nil
 	}()
 	_ = errors.New
