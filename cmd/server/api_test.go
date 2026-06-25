@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,9 +17,15 @@ import (
 	"github.com/gorilla/websocket"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	deliveryhttp "local-music-queue/internal/delivery/http"
+	"local-music-queue/internal/delivery/ws"
+	"local-music-queue/internal/domain/entity"
 	"local-music-queue/internal/infrastructure/persistence"
 )
 
+// apiTestDB opens a per-test throwaway PostgreSQL schema, applies embedded
+// migrations, and returns a DSN scoped to that schema. Skips when PG is
+// unreachable.
 func apiTestDB(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("LMQ_TEST_DATABASE_URL")
@@ -59,40 +64,43 @@ func apiTestDB(t *testing.T) string {
 	return dsn + "&search_path=" + schema
 }
 
-func TestAPIIntegration(t *testing.T) {
-	// TODO(r03+): this test predates the PIN-deprecation change in
-	// HandleLogin (which now returns 400 for any PIN-based login) and
-	// the existing assertions no longer hold. It will be rewritten when
-	// the test harness can mint a real session via the Google Sign-In
-	// flow or against a non-deprecated login path. Skipping rather than
-	// deleting so the scaffolding around setupApp + httptest.Server
-	// remains available for the next iteration.
-	t.Skip("TestAPIIntegration is awaiting a non-deprecated login flow; see TODO")
+// fakeYTDLPScript writes a tiny shell script that emits a fake video metadata
+// JSON line so the queue interactor's yt-dlp call succeeds.
+func fakeYTDLPScript(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := dir + "/fake-ytdlp"
+	content := `#!/bin/sh
+cat <<'EOF'
+{"id":"test123","title":"Test Song","uploader":"Artist","duration":180.0,"thumbnail":"thumb.jpg","webpage_url":"https://youtube.com/watch?v=test123"}
+EOF
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write fake-ytdlp: %v", err)
+	}
+	return script
+}
 
-	// 1. Setup Environment — PostgreSQL only since R03.
+// TestAPIIntegration_ServerStarts proves the server can boot against the
+// real PostgreSQL backend and that the resulting mux serves CORS preflight
+// requests on a known route.
+func TestAPIIntegration_ServerStarts(t *testing.T) {
 	scopedDSN := apiTestDB(t)
 
-	// YTDLP_PATH must point at an executable for cfg.Validate() to pass;
-	// fall back to /bin/true if not set in the environment.
 	ytPath := os.Getenv("YTDLP_PATH")
 	if ytPath == "" {
-		ytPath = "/bin/true"
+		ytPath = fakeYTDLPScript(t)
 	}
 	os.Setenv("DATABASE_URL", scopedDSN)
 	os.Setenv("YTDLP_PATH", ytPath)
-	os.Setenv("CLIENT_PIN", "1111")
-	os.Setenv("HOST_PIN", "2222")
-	defer func() {
+	t.Cleanup(func() {
 		os.Unsetenv("DATABASE_URL")
 		os.Unsetenv("YTDLP_PATH")
-		os.Unsetenv("CLIENT_PIN")
-		os.Unsetenv("HOST_PIN")
-	}()
+	})
 
-	// 2. Start Server
 	mux, _, cleanup, err := setupApp()
 	if err != nil {
-		t.Fatalf("Failed to setup app: %v", err)
+		t.Fatalf("setupApp: %v", err)
 	}
 	defer cleanup()
 
@@ -100,106 +108,151 @@ func TestAPIIntegration(t *testing.T) {
 	defer server.Close()
 
 	client := server.Client()
-
-	// 3. Test CORS Headers
-	t.Run("CORS Headers", func(t *testing.T) {
-		req, _ := http.NewRequest(http.MethodOptions, server.URL+"/api/auth", nil)
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatalf("OPTIONS request failed: %v", err)
-		}
-		if resp.Header.Get("Access-Control-Allow-Origin") != "*" {
-			t.Errorf("Expected CORS header, got %s", resp.Header.Get("Access-Control-Allow-Origin"))
-		}
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("Expected 200 OK for OPTIONS, got %d", resp.StatusCode)
-		}
-	})
-
-	// 4. Test Auth API
-	t.Run("Auth Login", func(t *testing.T) {
-		loginData := map[string]string{"pin": "1111", "display_name": "TestUser"}
-		body, _ := json.Marshal(loginData)
-		resp, err := client.Post(server.URL+"/api/auth", "application/json", bytes.NewBuffer(body))
-		if err != nil {
-			t.Fatalf("POST /api/auth failed: %v", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("Expected 200 OK, got %d", resp.StatusCode)
-		}
-
-		var result map[string]interface{}
-		json.NewDecoder(resp.Body).Decode(&result)
-		if result["display_name"] != "TestUser" {
-			t.Errorf("Expected TestUser, got %v", result["display_name"])
-		}
-	})
-
-	// 5. Test WebSocket & Queue Add Broadcast
-	t.Run("WebSocket Broadcast on Add", func(t *testing.T) {
-		// Connect to WebSocket
-		wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
-		ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-		if err != nil {
-			t.Fatalf("WS connection failed: %v", err)
-		}
-		defer ws.Close()
-
-		// Channel to receive messages
-		msgChan := make(chan []byte, 1)
-		go func() {
-			_, message, err := ws.ReadMessage()
-			if err == nil {
-				msgChan <- message
-			}
-		}()
-
-		// Add a song via HTTP
-		addBody := map[string]string{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "added_by": "TestUser"}
-		body, _ := json.Marshal(addBody)
-		resp, err := client.Post(server.URL+"/api/queue/add", "application/json", bytes.NewBuffer(body))
-		if err != nil {
-			t.Fatalf("POST /api/queue/add failed: %v", err)
-		}
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("Expected 200 OK for add, got %d", resp.StatusCode)
-		}
-
-		// Wait for WS message
-		select {
-		case msg := <-msgChan:
-			if !strings.Contains(string(msg), "queue_updated") {
-				t.Errorf("Expected queue_updated message, got %s", string(msg))
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("Timeout waiting for WebSocket broadcast")
-		}
-	})
-
-	// 6. Test Get Queue
-	t.Run("Get Queue", func(t *testing.T) {
-		resp, err := client.Get(server.URL + "/api/queue")
-		if err != nil {
-			t.Fatalf("GET /api/queue failed: %v", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("Expected 200 OK, got %d", resp.StatusCode)
-		}
-
-		var queue map[string]interface{}
-		json.NewDecoder(resp.Body).Decode(&queue)
-		songs := queue["songs"].([]interface{})
-		if len(songs) == 0 {
-			t.Error("Expected at least one song in queue")
-		}
-	})
+	req, _ := http.NewRequest(http.MethodOptions, server.URL+"/api/auth", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("OPTIONS /api/auth: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("OPTIONS /api/auth status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("CORS Allow-Origin = %q, want *", got)
+	}
 }
 
-func dumpBody(r io.Reader) string {
-	b, _ := io.ReadAll(r)
-	return string(b)
+// TestAPIIntegration_QueueREST exercises the queue add + get round trip
+// against the real PostgreSQL backend via the real handlers and mux wired
+// by setupApp. The PIN login path is intentionally avoided; the test uses
+// the AddSong handler which (per handlers.go) accepts an `added_by` field
+// directly without requiring a session.
+func TestAPIIntegration_QueueREST(t *testing.T) {
+	scopedDSN := apiTestDB(t)
+
+	ytPath := os.Getenv("YTDLP_PATH")
+	if ytPath == "" {
+		ytPath = fakeYTDLPScript(t)
+	}
+	os.Setenv("DATABASE_URL", scopedDSN)
+	os.Setenv("YTDLP_PATH", ytPath)
+	t.Cleanup(func() {
+		os.Unsetenv("DATABASE_URL")
+		os.Unsetenv("YTDLP_PATH")
+	})
+
+	mux, _, cleanup, err := setupApp()
+	if err != nil {
+		t.Fatalf("setupApp: %v", err)
+	}
+	defer cleanup()
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	addBody, _ := json.Marshal(deliveryhttp.AddSongRequest{
+		URL:     "https://www.youtube.com/watch?v=test123",
+		AddedBy: "IntegrationTester",
+	})
+	addReq, _ := http.NewRequest(http.MethodPost, server.URL+"/api/queue/add", bytes.NewReader(addBody))
+	addReq.Header.Set("Content-Type", "application/json")
+	addResp, err := server.Client().Do(addReq)
+	if err != nil {
+		t.Fatalf("POST /api/queue/add: %v", err)
+	}
+	defer addResp.Body.Close()
+	if addResp.StatusCode != http.StatusOK {
+		t.Errorf("POST /api/queue/add status = %d, want 200", addResp.StatusCode)
+	}
+
+	getResp, err := server.Client().Get(server.URL + "/api/queue")
+	if err != nil {
+		t.Fatalf("GET /api/queue: %v", err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Errorf("GET /api/queue status = %d, want 200", getResp.StatusCode)
+	}
+
+	var got entity.Queue
+	if err := json.NewDecoder(getResp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode queue: %v", err)
+	}
+	if len(got.Songs) == 0 {
+		t.Errorf("expected at least 1 song after add; got 0")
+	}
+}
+
+// TestAPIIntegration_WebSocketBroadcast proves the real WebSocket hub
+// (wired by setupApp) broadcasts a song_added event when POST /api/queue/add
+// is invoked. This is the regression coverage the R03 fix-pass needed in
+// place of the deprecated PIN login path.
+func TestAPIIntegration_WebSocketBroadcast(t *testing.T) {
+	scopedDSN := apiTestDB(t)
+
+	ytPath := os.Getenv("YTDLP_PATH")
+	if ytPath == "" {
+		ytPath = fakeYTDLPScript(t)
+	}
+	os.Setenv("DATABASE_URL", scopedDSN)
+	os.Setenv("YTDLP_PATH", ytPath)
+	t.Cleanup(func() {
+		os.Unsetenv("DATABASE_URL")
+		os.Unsetenv("YTDLP_PATH")
+	})
+
+	mux, _, cleanup, err := setupApp()
+	if err != nil {
+		t.Fatalf("setupApp: %v", err)
+	}
+	defer cleanup()
+
+	server := httptest.NewServer(requestLogger(enableCORS(mux)))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	wsConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer wsConn.Close()
+
+	if err := wsConn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if _, _, err := wsConn.ReadMessage(); err != nil {
+		t.Fatalf("read initial sync: %v", err)
+	}
+
+	msgChan := make(chan []byte, 1)
+	go func() {
+		_, message, rerr := wsConn.ReadMessage()
+		if rerr == nil {
+			msgChan <- message
+		}
+	}()
+
+	addBody, _ := json.Marshal(deliveryhttp.AddSongRequest{
+		URL:     "https://www.youtube.com/watch?v=test123",
+		AddedBy: "WSTester",
+	})
+	addReq, _ := http.NewRequest(http.MethodPost, server.URL+"/api/queue/add", bytes.NewReader(addBody))
+	addReq.Header.Set("Content-Type", "application/json")
+	addResp, err := server.Client().Do(addReq)
+	if err != nil {
+		t.Fatalf("POST /api/queue/add: %v", err)
+	}
+	addResp.Body.Close()
+	if addResp.StatusCode != http.StatusOK {
+		t.Errorf("POST /api/queue/add status = %d, want 200", addResp.StatusCode)
+	}
+
+	select {
+	case msg := <-msgChan:
+		if !strings.Contains(string(msg), ws.EventSongAdded) {
+			t.Errorf("expected broadcast containing %q, got: %s", ws.EventSongAdded, string(msg))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for song_added broadcast")
+	}
 }

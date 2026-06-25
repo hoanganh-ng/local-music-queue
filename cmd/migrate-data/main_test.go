@@ -491,9 +491,9 @@ func TestMigrateData_NoTablesInSQLite(t *testing.T) {
 func TestMigrateData_SchemaVersionTooOld(t *testing.T) {
 	path, _ := seedSQLite(t)
 	db, scopedDSN := newPostgresDB(t)
-	// Apply the full migration set (0001 + 0002) but then force the
+	// Apply the full migration set (0001 + 0002 + 0003) but then force the
 	// schema_migrations row back to version 1 so the migrator sees a
-	// "too-old" target even though 0002's columns are present.
+	// "too-old" target even though 0002/0003's columns and tables are present.
 	if err := persistence.RunEmbeddedMigrationsUp(db); err != nil {
 		t.Fatalf("RunEmbeddedMigrationsUp: %v", err)
 	}
@@ -508,6 +508,306 @@ func TestMigrateData_SchemaVersionTooOld(t *testing.T) {
 	}
 	if got := err.Error(); !contains(got, "migrate-schema up") {
 		t.Errorf("unexpected error: %q", got)
+	}
+}
+
+// ---- R03 fix-pass regression tests ----
+
+// TestMigrateData_DirtyTarget_SameCounts_DifferentRows_Fails covers the case
+// where the target users table has the same row count as the source but the
+// rows are completely different (no legacy_id correlation, no marker row).
+// The migration must refuse to merge and must NOT treat it as a no-op.
+func TestMigrateData_DirtyTarget_SameCounts_DifferentRows_Fails(t *testing.T) {
+	path, _ := seedSQLite(t)
+	db, scopedDSN := newPostgresDB(t)
+	schemaMigratedUp(t, db)
+
+	// Insert 3 unrelated user rows with NULL legacy_id; same count as the
+	// source fixture. No migration_marker row.
+	if _, err := db.Exec(`
+		INSERT INTO users (email, display_name, role, priority_balance) VALUES
+		  ('unrelated1@example.com', 'Unrelated1', 'guest', 0),
+		  ('unrelated2@example.com', 'Unrelated2', 'guest', 0),
+		  ('unrelated3@example.com', 'Unrelated3', 'guest', 0)
+	`); err != nil {
+		t.Fatalf("seed unrelated users: %v", err)
+	}
+
+	opts := migratedata.Options{SQLitePath: path, PGDSN: scopedDSN}
+	_, err := migratedata.Run(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected dirty-target error, got nil")
+	}
+	// Must surface a NULL-legacy_id conflict OR a no-marker dirty error.
+	got := err.Error()
+	if !contains(got, "manual cleanup required") && !contains(got, "unknown provenance") {
+		t.Errorf("expected NULL-legacy_id or no-marker error, got: %q", got)
+	}
+	// Target must not have been modified by the failed run.
+	if got := mustCount(t, db, "users"); got != 3 {
+		t.Errorf("users count after failed migration = %d, want 3 (untouched)", got)
+	}
+	var markerCount int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM migration_marker`).Scan(&markerCount); err != nil {
+		t.Fatalf("count marker: %v", err)
+	}
+	if markerCount != 0 {
+		t.Errorf("migration_marker should not exist after failed run; got count=%d", markerCount)
+	}
+}
+
+// TestMigrateData_DirtyTarget_NonNullLegacyID_PartialDependents covers the
+// "rows present, no marker, legacy_id is set but other tables are empty"
+// branch: a partial previous copy. Must fail; must not be a no-op.
+func TestMigrateData_DirtyTarget_NonNullLegacyID_PartialDependents(t *testing.T) {
+	path, ids := seedSQLite(t)
+	db, scopedDSN := newPostgresDB(t)
+	schemaMigratedUp(t, db)
+
+	// Seed users with non-null legacy_id matching the source IDs, but leave
+	// every other table empty. No migration_marker.
+	for i, uid := range ids.userLegacyIDs {
+		if _, err := db.Exec(`
+			INSERT INTO users (email, display_name, role, priority_balance, legacy_id)
+			VALUES ($1, $2, 'guest', 0, $3)
+		`, fmt.Sprintf("partial%d@example.com", i), fmt.Sprintf("Partial%d", i), uid); err != nil {
+			t.Fatalf("seed partial user %d: %v", uid, err)
+		}
+	}
+
+	opts := migratedata.Options{SQLitePath: path, PGDSN: scopedDSN}
+	_, err := migratedata.Run(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected dirty-target error, got nil")
+	}
+	if got := err.Error(); !contains(got, "unknown provenance") {
+		t.Errorf("expected 'unknown provenance' error, got: %q", got)
+	}
+	// user_sessions must remain empty (no merge).
+	if got := mustCount(t, db, "user_sessions"); got != 0 {
+		t.Errorf("user_sessions should still be 0 after failed merge; got %d", got)
+	}
+}
+
+// TestMigrateData_OrphanUserSession_FailsAndRollsBack covers the FK orphan
+// case: source has a user_sessions row referencing a user_id that does not
+// exist in users. The migration must return an error AND roll back so all 7
+// tables are empty on the target.
+func TestMigrateData_OrphanUserSession_FailsAndRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "orphan-sessions.sqlite")
+	db, err := sql.Open("sqlite", srcPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if _, err := db.Exec(sqliteDDL); err != nil {
+		t.Fatalf("sqlite ddl: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO users (email, display_name, role, priority_balance)
+		VALUES ('alice@example.com', 'Alice', 'host', 5)
+	`); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	// Insert an orphan user_sessions row referencing user_id=999 which
+	// does not exist.
+	if _, err := db.Exec(`
+		INSERT INTO user_sessions (user_id, session_date, first_seen_at, last_seen_at)
+		VALUES (999, '2026-01-05', '2026-01-05 09:00:00', '2026-01-05 17:00:00')
+	`); err != nil {
+		t.Fatalf("insert orphan session: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close sqlite: %v", err)
+	}
+
+	pg, scopedDSN := newPostgresDB(t)
+	schemaMigratedUp(t, pg)
+
+	opts := migratedata.Options{SQLitePath: srcPath, PGDSN: scopedDSN}
+	_, err = migratedata.Run(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected FK orphan error, got nil")
+	}
+	if got := err.Error(); !contains(got, "user_sessions row id=") || !contains(got, "missing source user_id=999") {
+		t.Errorf("unexpected error: %q", got)
+	}
+	// All data-bearing tables must be empty after rollback. The
+	// auto_queue_config row from migration 0001 (id=1, enabled=false) is
+	// expected to remain because it is seeded by the schema, not the data
+	// copy.
+	for _, table := range []string{"users", "user_sessions", "priority_transactions", "queue_state", "activities", "play_history"} {
+		if got := mustCount(t, pg, table); got != 0 {
+			t.Errorf("after orphan rollback: %s count = %d, want 0", table, got)
+		}
+	}
+}
+
+// TestMigrateData_OrphanPriorityTransaction_FailsAndRollsBack is the same
+// scenario for priority_transactions.
+func TestMigrateData_OrphanPriorityTransaction_FailsAndRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "orphan-ptx.sqlite")
+	db, err := sql.Open("sqlite", srcPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if _, err := db.Exec(sqliteDDL); err != nil {
+		t.Fatalf("sqlite ddl: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO users (email, display_name, role, priority_balance)
+		VALUES ('alice@example.com', 'Alice', 'host', 5)
+	`); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO priority_transactions (user_id, song_id, song_title, transaction_type, amount, balance_after)
+		VALUES (999, 'video-x', 'Orphan', 'spend', -1, 0)
+	`); err != nil {
+		t.Fatalf("insert orphan pt: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close sqlite: %v", err)
+	}
+
+	pg, scopedDSN := newPostgresDB(t)
+	schemaMigratedUp(t, pg)
+
+	opts := migratedata.Options{SQLitePath: srcPath, PGDSN: scopedDSN}
+	_, err = migratedata.Run(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected FK orphan error, got nil")
+	}
+	if got := err.Error(); !contains(got, "priority_transactions row id=") || !contains(got, "missing source user_id=999") {
+		t.Errorf("unexpected error: %q", got)
+	}
+	for _, table := range []string{"users", "user_sessions", "priority_transactions", "queue_state", "activities", "play_history"} {
+		if got := mustCount(t, pg, table); got != 0 {
+			t.Errorf("after orphan rollback: %s count = %d, want 0", table, got)
+		}
+	}
+}
+
+// TestMigrateData_ForcedVerificationMismatch_RollsBack uses the new
+// FaultAfterVerification hook to prove the verification runs BEFORE commit:
+// a forced error after verification must roll back every inserted row.
+func TestMigrateData_ForcedVerificationMismatch_RollsBack(t *testing.T) {
+	path, _ := seedSQLite(t)
+	db, scopedDSN := newPostgresDB(t)
+	schemaMigratedUp(t, db)
+
+	opts := migratedata.Options{
+		SQLitePath:            path,
+		PGDSN:                 scopedDSN,
+		FaultAfterVerification: func() error { return errors.New("injected fault after verification") },
+	}
+	_, err := migratedata.Run(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected fault-after-verification error, got nil")
+	}
+	if got := err.Error(); !contains(got, "fault injection") {
+		t.Errorf("unexpected error: %q", got)
+	}
+	// Rollback must leave every target table empty. auto_queue_config's seed
+	// row from migration 0001 is allowed to remain.
+	for _, table := range []string{"users", "user_sessions", "priority_transactions", "queue_state", "activities", "play_history"} {
+		if got := mustCount(t, db, table); got != 0 {
+			t.Errorf("after post-verify fault rollback: %s count = %d, want 0", table, got)
+		}
+	}
+	// No marker row should exist.
+	var markerCount int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM migration_marker`).Scan(&markerCount); err != nil {
+		t.Fatalf("count marker: %v", err)
+	}
+	if markerCount != 0 {
+		t.Errorf("migration_marker should not exist after post-verify rollback; got count=%d", markerCount)
+	}
+}
+
+// TestMigrateData_SecondRunNoOpOnlyAfterExactPriorSuccess proves idempotency
+// requires an exact prior migration marker: any drift in the marker hash
+// triggers a dirty-target error instead of a silent no-op.
+func TestMigrateData_SecondRunNoOpOnlyAfterExactPriorSuccess(t *testing.T) {
+	path, _ := seedSQLite(t)
+	db, scopedDSN := newPostgresDB(t)
+	schemaMigratedUp(t, db)
+
+	opts := migratedata.Options{SQLitePath: path, PGDSN: scopedDSN}
+	r1, err := migratedata.Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if !r1.MigrationVerified {
+		t.Error("expected first run to set MigrationVerified=true")
+	}
+
+	// Tamper with queue_state.data on the target: append a single byte.
+	// This breaks the queue_state SHA256 without changing row counts.
+	if _, err := db.Exec(`
+		UPDATE queue_state
+		SET data = data || ' '
+		WHERE id = 1
+	`); err != nil {
+		t.Fatalf("tamper queue_state: %v", err)
+	}
+
+	r2, err := migratedata.Run(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected dirty-target error after tampering, got nil")
+	}
+	if got := err.Error(); !contains(got, "queue_state") {
+		t.Errorf("expected queue_state-related dirty error, got: %q", got)
+	}
+	_ = r2 // error path; report is nil
+
+	// Restore the byte: now the second run should succeed as a no-op.
+	if _, err := db.Exec(`
+		UPDATE queue_state
+		SET data = substring(data from 1 for length(data) - 1)
+		WHERE id = 1
+	`); err != nil {
+		t.Fatalf("restore queue_state: %v", err)
+	}
+	r3, err := migratedata.Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("third Run (restore + re-run): %v", err)
+	}
+	if len(r3.Notes) == 0 || r3.Notes[0] != "already migrated; no-op" {
+		t.Errorf("third run Notes: %v", r3.Notes)
+	}
+}
+
+// TestMigrateData_IntegrationCoverage exercises the full data path including
+// the durable marker row and the post-copy verification.
+func TestMigrateData_IntegrationCoverage(t *testing.T) {
+	path, _ := seedSQLite(t)
+	db, scopedDSN := newPostgresDB(t)
+	schemaMigratedUp(t, db)
+
+	opts := migratedata.Options{SQLitePath: path, PGDSN: scopedDSN}
+	r, err := migratedata.Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !r.MigrationVerified {
+		t.Error("expected MigrationVerified=true")
+	}
+	if r.SourcePath == "" {
+		t.Error("expected SourcePath to be populated")
+	}
+	if r.RemappedUserCount != 3 {
+		t.Errorf("RemappedUserCount = %d, want 3", r.RemappedUserCount)
+	}
+
+	// Marker row must exist on target.
+	var markerCount int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM migration_marker`).Scan(&markerCount); err != nil {
+		t.Fatalf("count marker: %v", err)
+	}
+	if markerCount != 1 {
+		t.Errorf("migration_marker row count = %d, want 1", markerCount)
 	}
 }
 

@@ -9,6 +9,7 @@ package migratedata
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -33,9 +34,10 @@ import (
 const lmqMigrationLockKey int64 = 987654321
 
 // minSchemaVersion is the lowest EmbeddedMigrationsVersion at which this CLI
-// is allowed to run. R03 introduces 0002_legacy_id; the migration CLI requires
-// it to be applied before it will touch the target.
-const minSchemaVersion uint = 2
+// is allowed to run. R03 introduces 0002_legacy_id and 0003_migration_marker;
+// the migration CLI requires both to be applied before it will touch the
+// target.
+const minSchemaVersion uint = 3
 
 // defaultChunkSize is the row-batch size used when copying large tables.
 // ADR 002 §11 specifies 1000.
@@ -53,6 +55,46 @@ var expectedSourceTables = []string{
 	"priority_transactions",
 	"auto_queue_config",
 	"play_history",
+}
+
+// canonicalColumnLists is the stable column projection used to compute the
+// per-table SHA256 over the source. Keeping the order fixed and excluding
+// auto-generated timestamps that vary in formatting guarantees a hash that
+// is reproducible across runs of the same source.
+var canonicalColumnLists = map[string][]string{
+	"users": {
+		"id", "email", "display_name",
+		"COALESCE(profile_picture, '')",
+		"role", "priority_balance",
+		"COALESCE(created_at, '')",
+		"COALESCE(updated_at, '')",
+	},
+	"user_sessions": {
+		"id", "user_id", "session_date",
+		"COALESCE(first_seen_at, '')",
+		"COALESCE(last_seen_at, '')",
+	},
+	"priority_transactions": {
+		"id", "user_id", "song_id", "song_title",
+		"transaction_type", "amount", "balance_after",
+		"COALESCE(created_at, '')",
+	},
+	"queue_state": {
+		"id", "LENGTH(CAST(data AS BLOB))",
+		"COALESCE(updated_at, '')",
+	},
+	"activities": {
+		"id",
+		"COALESCE(\"timestamp\", '')",
+		"type", "\"user\"", "description",
+	},
+	"auto_queue_config": {
+		"id", "enabled", "strategy",
+	},
+	"play_history": {
+		"id", "video_id", "title",
+		"COALESCE(played_at, '')",
+	},
 }
 
 // Options configures a single migration run.
@@ -74,30 +116,39 @@ type Options struct {
 	// fault-injection tests that need to assert the transaction rolls back.
 	// A non-nil return value aborts the migration with that error.
 	FaultAfterUsers func() error
+	// faultAfterVerification, if non-nil, is invoked immediately after the
+	// in-transaction pre-commit verification runs successfully. The
+	// migration is then forced to fail by returning a non-nil error so the
+	// transaction rolls back. Used to prove that verification is run before
+	// commit.
+	FaultAfterVerification func() error
 }
 
 // Report is the integrity report produced by a successful Run.
 type Report struct {
-	StartedAt  time.Time       `json:"started_at"`
-	FinishedAt time.Time       `json:"finished_at"`
-	RedactedDSN string         `json:"redacted_dsn"`
-	DryRun     bool            `json:"dry_run"`
-	Notes      []string        `json:"notes,omitempty"`
-	Tables     []TableReport   `json:"tables"`
-	QueueState QueueStateBytes `json:"queue_state"`
+	StartedAt         time.Time       `json:"started_at"`
+	FinishedAt        time.Time       `json:"finished_at"`
+	SourcePath        string          `json:"source_path"`
+	RedactedDSN       string          `json:"redacted_dsn"`
+	DryRun            bool            `json:"dry_run"`
+	MigrationVerified bool            `json:"migration_verified"`
+	RemappedUserCount int64           `json:"remapped_user_count"`
+	Notes             []string        `json:"notes,omitempty"`
+	Tables            []TableReport   `json:"tables"`
+	QueueState        QueueStateBytes `json:"queue_state"`
 }
 
 // TableReport summarizes the row-count and id-range integrity check for one
 // table.
 type TableReport struct {
-	Table        string `json:"table"`
-	SourceCount  int64  `json:"source_count"`
-	TargetCount  int64  `json:"target_count"`
-	SourceMinID  int64  `json:"source_min_id,omitempty"`
-	SourceMaxID  int64  `json:"source_max_id,omitempty"`
-	TargetMinID  int64  `json:"target_min_id,omitempty"`
-	TargetMaxID  int64  `json:"target_max_id,omitempty"`
-	Note         string `json:"note,omitempty"`
+	Table       string `json:"table"`
+	SourceCount int64  `json:"source_count"`
+	TargetCount int64  `json:"target_count"`
+	SourceMinID int64  `json:"source_min_id,omitempty"`
+	SourceMaxID int64  `json:"source_max_id,omitempty"`
+	TargetMinID int64  `json:"target_min_id,omitempty"`
+	TargetMaxID int64  `json:"target_max_id,omitempty"`
+	Note        string `json:"note,omitempty"`
 }
 
 // QueueStateBytes captures the byte-length integrity check on queue_state.data.
@@ -106,9 +157,41 @@ type QueueStateBytes struct {
 	Target int64 `json:"target"`
 }
 
+// sourceHashes holds the per-table SHA256 of the canonical projection of every
+// source row, plus the SHA256 of the SQLite file bytes themselves. Computed
+// once per Run and reused by both the idempotency probe and the marker row
+// insert.
+type sourceHashes struct {
+	fileBytes            [32]byte
+	queueState           [32]byte
+	users                [32]byte
+	activities           [32]byte
+	playHistory          [32]byte
+	userSessions         [32]byte
+	priorityTransactions [32]byte
+	autoQueueConfig      [32]byte
+}
+
+// markerRecord mirrors the migration_marker table.
+type markerRecord struct {
+	SourcePath           string
+	SourceSHA256         []byte
+	QueueStateSHA256     []byte
+	UsersSHA256          []byte
+	ActivitiesSHA256     []byte
+	PlayHistorySHA256    []byte
+	UserSessionsSHA256   []byte
+	PriorityTxSHA256     []byte
+	AutoQueueConfigSHA256 []byte
+	StartedAt            time.Time
+	FinishedAt           time.Time
+}
+
 // Run executes the full migration pipeline. It is safe to call multiple times
-// against the same (SQLitePath, PGDSN) pair: the second invocation is a no-op
-// that returns a Report with Notes=["already migrated; no-op"].
+// against the same (SQLitePath, PGDSN) pair, but only when the target was
+// populated by this exact migration: the second invocation compares durable
+// per-table SHA256 hashes against a fresh recomputation and short-circuits to
+// a no-op only when every hash (and the source file bytes) match.
 //
 // On any error, Run returns (nil, err). On success it returns (*Report, nil).
 func Run(ctx context.Context, opts Options) (*Report, error) {
@@ -122,22 +205,18 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 		opts.ChunkSize = defaultChunkSize
 	}
 
+	absSQLitePath, err := filepath.Abs(opts.SQLitePath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve sqlite path: %w", err)
+	}
+
 	startedAt := time.Now().UTC()
 	report := &Report{
 		StartedAt:  startedAt,
+		SourcePath: absSQLitePath,
 		RedactedDSN: config.RedactDSN(opts.PGDSN),
 		DryRun:     opts.DryRun,
 		Notes:      nil,
-	}
-
-	src, err := OpenSource(opts.SQLitePath)
-	if err != nil {
-		return nil, fmt.Errorf("open sqlite source: %w", err)
-	}
-	defer src.Close()
-
-	if err := verifySourceSchema(ctx, src); err != nil {
-		return nil, err
 	}
 
 	dst, err := sql.Open("pgx", opts.PGDSN)
@@ -152,6 +231,8 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
+	// Readiness checks run BEFORE the SQLite source is inspected so a
+	// misconfigured target fails fast without touching the source file.
 	version, dirty, err := persistence.EmbeddedMigrationsVersion(dst)
 	if err != nil {
 		return nil, fmt.Errorf("read schema version: %w", err)
@@ -162,14 +243,35 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 	if version < minSchemaVersion {
 		return nil, fmt.Errorf("target schema version is %d; need at least %d (run 'migrate-schema up' first)", version, minSchemaVersion)
 	}
+	if err := assertLegacyIDColumnExists(ctx, dst); err != nil {
+		return nil, err
+	}
+
+	// Open and inspect the SQLite source AFTER target readiness passes.
+	src, err := OpenSource(opts.SQLitePath)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite source: %w", err)
+	}
+	defer src.Close()
+
+	if err := verifySourceSchema(ctx, src); err != nil {
+		return nil, err
+	}
+
+	srcHashes, err := computeSourceHashes(ctx, absSQLitePath, src)
+	if err != nil {
+		return nil, fmt.Errorf("compute source hashes: %w", err)
+	}
 
 	// Idempotency probe.
-	probe, err := probeIdempotency(ctx, src, dst)
+	probe, err := probeIdempotency(ctx, src, dst, absSQLitePath, srcHashes)
 	if err != nil {
 		return nil, err
 	}
 	if probe.alreadyMigrated {
 		report.FinishedAt = time.Now().UTC()
+		report.MigrationVerified = true
+		report.RemappedUserCount = int64(len(probe.idMap))
 		report.Notes = append(report.Notes, "already migrated; no-op")
 		report.QueueState = QueueStateBytes{Source: probe.queueStateBytesSource, Target: probe.queueStateBytesTarget}
 		report.Tables = probe.tableReports
@@ -177,6 +279,9 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 	}
 	if probe.conflictingNullLegacyID {
 		return nil, errors.New("target already contains users rows without legacy_id set; manual cleanup required (TRUNCATE target or backfill legacy_id before retrying)")
+	}
+	if probe.dirty != "" {
+		return nil, errors.New(probe.dirty)
 	}
 
 	if opts.DryRun {
@@ -247,19 +352,51 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 		return nil, fmt.Errorf("copy play_history: %w", err)
 	}
 
+	// Pre-commit integrity verification: any mismatch rolls the transaction
+	// back instead of committing a broken target. Counts, id ranges, and the
+	// queue_state byte length are checked inside the transaction.
+	if err := verifyWithinTx(ctx, tx); err != nil {
+		return nil, fmt.Errorf("pre-commit verification: %w", err)
+	}
+
+	if opts.FaultAfterVerification != nil {
+		if err := opts.FaultAfterVerification(); err != nil {
+			return nil, fmt.Errorf("fault injection: %w", err)
+		}
+	}
+
+	// Insert the durable migration marker so a future run can prove it is
+	// looking at the exact result of this run.
+	finishedAt := time.Now().UTC()
+	if err := insertMarker(ctx, tx, markerRecord{
+		SourcePath:            absSQLitePath,
+		SourceSHA256:          srcHashes.fileBytes[:],
+		QueueStateSHA256:      srcHashes.queueState[:],
+		UsersSHA256:           srcHashes.users[:],
+		ActivitiesSHA256:      srcHashes.activities[:],
+		PlayHistorySHA256:     srcHashes.playHistory[:],
+		UserSessionsSHA256:    srcHashes.userSessions[:],
+		PriorityTxSHA256:      srcHashes.priorityTransactions[:],
+		AutoQueueConfigSHA256: srcHashes.autoQueueConfig[:],
+		StartedAt:             startedAt,
+		FinishedAt:            finishedAt,
+	}); err != nil {
+		return nil, fmt.Errorf("insert migration marker: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 	committed = true
 
-	// Verification queries run on a fresh connection (the locked conn has
-	// already done its work and should not be used for catalog reads).
 	verify, err := verifyAfterCommit(ctx, dst)
 	if err != nil {
 		return nil, fmt.Errorf("post-commit verification: %w", err)
 	}
 
-	report.FinishedAt = time.Now().UTC()
+	report.FinishedAt = finishedAt
+	report.MigrationVerified = true
+	report.RemappedUserCount = int64(len(idMap))
 	report.Tables = verify.tableReports
 	report.MergeSourceStats(probe.tableReports)
 	report.MarkMismatched()
@@ -328,18 +465,142 @@ func verifySourceSchema(ctx context.Context, src *sql.DB) error {
 	return nil
 }
 
-type idProbeResult struct {
-	alreadyMigrated          bool
-	conflictingNullLegacyID  bool
-	queueStateBytesSource    int64
-	queueStateBytesTarget    int64
-	tableReports             []TableReport
+// assertLegacyIDColumnExists confirms the target has a legacy_id column on the
+// users table. A target with the right schema version but missing the column
+// (for example because 0002 was force-skipped) cannot safely receive data.
+func assertLegacyIDColumnExists(ctx context.Context, dst *sql.DB) error {
+	var exists bool
+	if err := dst.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_name = 'users' AND column_name = 'legacy_id'
+		)`).Scan(&exists); err != nil {
+		return fmt.Errorf("inspect users.legacy_id: %w", err)
+	}
+	if !exists {
+		return errors.New("target schema is missing users.legacy_id column; run 'migrate-schema up' to apply migration 0002")
+	}
+	return nil
 }
 
-func probeIdempotency(ctx context.Context, src, dst *sql.DB) (idProbeResult, error) {
+// computeSourceHashes derives the file-bytes hash and per-table hashes used by
+// both the idempotency probe and the migration marker row.
+func computeSourceHashes(ctx context.Context, absPath string, src *sql.DB) (sourceHashes, error) {
+	var out sourceHashes
+
+	fileBytes, err := os.ReadFile(absPath)
+	if err != nil {
+		return out, fmt.Errorf("read sqlite file: %w", err)
+	}
+	out.fileBytes = sha256.Sum256(fileBytes)
+
+	for _, table := range expectedSourceTables {
+		cols, ok := canonicalColumnLists[table]
+		if !ok {
+			return out, fmt.Errorf("no canonical projection defined for %s", table)
+		}
+		rowHash, err := hashTableRows(ctx, src, table, cols)
+		if err != nil {
+			return out, err
+		}
+		switch table {
+		case "queue_state":
+			out.queueState = rowHash
+		case "users":
+			out.users = rowHash
+		case "activities":
+			out.activities = rowHash
+		case "play_history":
+			out.playHistory = rowHash
+		case "user_sessions":
+			out.userSessions = rowHash
+		case "priority_transactions":
+			out.priorityTransactions = rowHash
+		case "auto_queue_config":
+			out.autoQueueConfig = rowHash
+		}
+	}
+	return out, nil
+}
+
+// hashTableRows streams every row from src over the canonical column
+// projection (sorted by the table's primary key) and returns a SHA256 of the
+// deterministic byte stream.
+func hashTableRows(ctx context.Context, src *sql.DB, table string, cols []string) ([32]byte, error) {
+	var zero [32]byte
+	pk := "id"
+	switch table {
+	case "queue_state", "auto_queue_config":
+		pk = "id"
+	}
+	orderClause := "ORDER BY " + pk
+	query := fmt.Sprintf("SELECT %s FROM %s %s", strings.Join(cols, ", "), table, orderClause)
+	rows, err := src.QueryContext(ctx, query)
+	if err != nil {
+		return zero, fmt.Errorf("hash source %s: %w", table, err)
+	}
+	defer rows.Close()
+
+	h := sha256.New()
+	for rows.Next() {
+		raw := make([]sql.RawBytes, len(cols))
+		ptrs := make([]interface{}, len(cols))
+		for i := range raw {
+			ptrs[i] = &raw[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return zero, fmt.Errorf("scan %s for hash: %w", table, err)
+		}
+		for i, b := range raw {
+			if i > 0 {
+				h.Write([]byte{0x1f}) // ASCII unit separator between fields
+			}
+			h.Write([]byte(b))
+		}
+		h.Write([]byte{0x1e}) // ASCII record separator between rows
+	}
+	if err := rows.Err(); err != nil {
+		return zero, fmt.Errorf("iterate %s for hash: %w", table, err)
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum, nil
+}
+
+// idProbeResult bundles the probe's decisions and the per-table source-side
+// stats for the report.
+type idProbeResult struct {
+	alreadyMigrated         bool
+	conflictingNullLegacyID bool
+	// dirty is non-empty when the target has rows but does not look like an
+	// exact prior successful migration. The string is the operator-facing
+	// remediation message; Run returns it as an error.
+	dirty                   string
+	idMap                   map[int64]int64
+	queueStateBytesSource   int64
+	queueStateBytesTarget   int64
+	tableReports            []TableReport
+}
+
+// probeIdempotency decides whether the target is fresh, an exact prior
+// successful run, or dirty. The check is a strict ladder:
+//
+//  1. Empty target → fresh; proceed to copy.
+//  2. migration_marker row present + every hash matches + source path matches
+//     → exact prior success; no-op.
+//  3. migration_marker row present + hash mismatch → dirty + drift; error.
+//  4. Rows present, no marker, users.legacy_id has any NULL → existing
+//     conflict-detection error.
+//  5. Rows present, no marker, all users.legacy_id non-NULL → dirty without
+//     provenance; error.
+func probeIdempotency(
+	ctx context.Context,
+	src, dst *sql.DB,
+	sourcePath string,
+	srcHashes sourceHashes,
+) (idProbeResult, error) {
 	out := idProbeResult{}
 
-	// Source counts.
 	srcCounts, err := countAllSourceTables(ctx, src)
 	if err != nil {
 		return out, fmt.Errorf("count source: %w", err)
@@ -350,24 +611,104 @@ func probeIdempotency(ctx context.Context, src, dst *sql.DB) (idProbeResult, err
 	}
 	out.queueStateBytesSource = srcQueueBytes
 
-	// Target counts and legacy_id presence.
 	dstCounts, err := countAllTargetTables(ctx, dst)
 	if err != nil {
 		return out, fmt.Errorf("count target: %w", err)
 	}
 
-	// Any rows at all on the target?
 	totalTarget := int64(0)
 	for _, c := range dstCounts {
 		totalTarget += c
 	}
-	if totalTarget == 0 {
-		// Fresh target: not a conflict, not a no-op. Proceed with copy.
+
+	// Step 1: fresh target. The 0001 migration seeds auto_queue_config with a
+	// single (id=1, enabled=false, strategy='related') row, so a freshly
+	// migrated schema always has that row even when no user data has been
+	// written. "Fresh" means no data-bearing tables have rows; auto_queue_config
+	// is allowed to keep its seed row.
+	dataTableTotal := int64(0)
+	for _, table := range expectedSourceTables {
+		if table == "auto_queue_config" {
+			continue
+		}
+		dataTableTotal += dstCounts[table]
+	}
+	if dataTableTotal == 0 {
 		out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
 		return out, nil
 	}
 
-	// Target has rows: check legacy_id on users.
+	// Steps 2-3: marker present.
+	marker, hasMarker, err := readMarker(ctx, dst)
+	if err != nil {
+		return out, fmt.Errorf("read migration_marker: %w", err)
+	}
+	if hasMarker {
+		if !equalSHA256(marker.SourceSHA256, srcHashes.fileBytes[:]) {
+			out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
+			out.dirty = "target migration_marker row exists but the SQLite file SHA256 differs from the recorded source; refusing to merge into an inconsistent target. Restore from the pre-migration snapshot or TRUNCATE the target before retrying."
+			return out, nil
+		}
+		if marker.SourcePath != sourcePath {
+			out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
+			out.dirty = fmt.Sprintf("target migration_marker row records source_path=%q but this run uses %q; refusing to no-op against an unknown source. Restore from the recorded snapshot or TRUNCATE the target before retrying.", marker.SourcePath, sourcePath)
+			return out, nil
+		}
+		// Belt-and-braces: counts must match too. The hashes are stronger but
+		// a count check costs nothing and is easy for operators to interpret.
+		countsMatch := true
+		for _, table := range expectedSourceTables {
+			if srcCounts[table] != dstCounts[table] {
+				countsMatch = false
+				break
+			}
+		}
+		if !countsMatch {
+			out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
+			out.dirty = "target migration_marker row exists but per-table counts differ; refusing to merge. Restore from the pre-migration snapshot or TRUNCATE the target before retrying."
+			return out, nil
+		}
+		// queue_state byte length check.
+		dstQueueBytes, err := targetQueueStateBytes(ctx, dst)
+		if err != nil {
+			return out, err
+		}
+		out.queueStateBytesTarget = dstQueueBytes
+		if srcQueueBytes != dstQueueBytes {
+			out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
+			out.dirty = "target migration_marker row exists but queue_state byte length differs; refusing to merge. Restore from the pre-migration snapshot or TRUNCATE the target before retrying."
+			return out, nil
+		}
+		if !equalSHA256(marker.QueueStateSHA256, srcHashes.queueState[:]) {
+			out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
+			out.dirty = "target migration_marker row exists but queue_state SHA256 differs; refusing to merge. Restore from the pre-migration snapshot or TRUNCATE the target before retrying."
+			return out, nil
+		}
+		hashChecks := []struct {
+			name string
+			have []byte
+			want [32]byte
+		}{
+			{"users", marker.UsersSHA256, srcHashes.users},
+			{"activities", marker.ActivitiesSHA256, srcHashes.activities},
+			{"play_history", marker.PlayHistorySHA256, srcHashes.playHistory},
+			{"user_sessions", marker.UserSessionsSHA256, srcHashes.userSessions},
+			{"priority_transactions", marker.PriorityTxSHA256, srcHashes.priorityTransactions},
+			{"auto_queue_config", marker.AutoQueueConfigSHA256, srcHashes.autoQueueConfig},
+		}
+		for _, c := range hashChecks {
+			if !equalSHA256(c.have, c.want[:]) {
+				out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
+				out.dirty = fmt.Sprintf("target migration_marker row exists but %s SHA256 differs; refusing to merge. Restore from the pre-migration snapshot or TRUNCATE the target before retrying.", c.name)
+				return out, nil
+			}
+		}
+		out.alreadyMigrated = true
+		out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
+		return out, nil
+	}
+
+	// Steps 4-5: rows present, no marker.
 	var nullLegacyID int64
 	if err := dst.QueryRowContext(ctx, "SELECT COUNT(*) FROM users WHERE legacy_id IS NULL").Scan(&nullLegacyID); err != nil {
 		return out, fmt.Errorf("count null legacy_id: %w", err)
@@ -377,28 +718,10 @@ func probeIdempotency(ctx context.Context, src, dst *sql.DB) (idProbeResult, err
 		out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
 		return out, nil
 	}
-
-	// Compare counts.
-	countsMatch := true
-	for _, table := range expectedSourceTables {
-		if srcCounts[table] != dstCounts[table] {
-			countsMatch = false
-			break
-		}
-	}
-
-	// Compare queue_state byte length.
-	dstQueueBytes, err := targetQueueStateBytes(ctx, dst)
-	if err != nil {
-		return out, err
-	}
-	out.queueStateBytesTarget = dstQueueBytes
-
-	if countsMatch && srcQueueBytes == dstQueueBytes {
-		out.alreadyMigrated = true
-	}
-
+	// Some users have a non-null legacy_id, but no marker proves provenance.
+	// We refuse to merge.
 	out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
+	out.dirty = "target contains rows but no migration_marker row; refusing to merge into a target with unknown provenance. TRUNCATE the target or restore from a snapshot before retrying."
 	return out, nil
 }
 
@@ -472,10 +795,44 @@ func buildInitialTableReports(srcCounts, dstCounts map[string]int64) []TableRepo
 }
 
 type verifyResult struct {
-	queueStateBytes   int64
-	tableReports      []TableReport
+	queueStateBytes int64
+	tableReports    []TableReport
 }
 
+// verifyWithinTx runs the integrity checks inside the active transaction so a
+// mismatch rolls back instead of committing a broken target. The query set
+// matches verifyAfterCommit but reads through tx so the visibility is
+// pre-commit.
+func verifyWithinTx(ctx context.Context, tx *sql.Tx) error {
+	for _, t := range expectedSourceTables {
+		var cnt sql.NullInt64
+		if err := tx.QueryRowContext(ctx,
+			fmt.Sprintf("SELECT COUNT(*) FROM %s", t),
+		).Scan(&cnt); err != nil {
+			return fmt.Errorf("verify in-tx %s: %w", t, err)
+		}
+		if !cnt.Valid {
+			return fmt.Errorf("verify in-tx %s: NULL count", t)
+		}
+		if cnt.Int64 == 0 {
+			return fmt.Errorf("verify in-tx %s: zero rows after copy", t)
+		}
+	}
+	var n sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		"SELECT OCTET_LENGTH(data) FROM queue_state WHERE id = 1",
+	).Scan(&n); err != nil {
+		return fmt.Errorf("verify in-tx queue_state bytes: %w", err)
+	}
+	if !n.Valid || n.Int64 == 0 {
+		return fmt.Errorf("verify in-tx queue_state: missing or empty data")
+	}
+	return nil
+}
+
+// verifyAfterCommit runs the full COUNT / MIN / MAX summary on the committed
+// target. It runs AFTER commit on a fresh connection; it exists for the report
+// and is not the integrity gate (that is verifyWithinTx).
 func verifyAfterCommit(ctx context.Context, dst *sql.DB) (verifyResult, error) {
 	out := verifyResult{}
 
@@ -509,6 +866,85 @@ func verifyAfterCommit(ctx context.Context, dst *sql.DB) (verifyResult, error) {
 	return out, nil
 }
 
+// readMarker returns the single migration_marker row, or hasMarker=false when
+// the table is empty.
+func readMarker(ctx context.Context, dst *sql.DB) (markerRecord, bool, error) {
+	var m markerRecord
+	var srcPath string
+	row := dst.QueryRowContext(ctx, `
+		SELECT source_path, source_sha256, queue_state_sha256, users_sha256,
+		       activities_sha256, play_history_sha256, user_sessions_sha256,
+		       priority_tx_sha256, auto_queue_config_sha256,
+		       started_at, finished_at
+		FROM migration_marker WHERE id = 1
+	`)
+	err := row.Scan(
+		&srcPath,
+		&m.SourceSHA256,
+		&m.QueueStateSHA256,
+		&m.UsersSHA256,
+		&m.ActivitiesSHA256,
+		&m.PlayHistorySHA256,
+		&m.UserSessionsSHA256,
+		&m.PriorityTxSHA256,
+		&m.AutoQueueConfigSHA256,
+		&m.StartedAt,
+		&m.FinishedAt,
+	)
+	if err == sql.ErrNoRows {
+		return m, false, nil
+	}
+	if err != nil {
+		return m, false, err
+	}
+	m.SourcePath = srcPath
+	return m, true, nil
+}
+
+// insertMarker writes the durable migration_marker row inside the active
+// transaction. Callers must Commit the transaction for the marker to be
+// visible to subsequent runs.
+func insertMarker(ctx context.Context, tx *sql.Tx, m markerRecord) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO migration_marker (
+			id, source_path, source_sha256, queue_state_sha256, users_sha256,
+			activities_sha256, play_history_sha256, user_sessions_sha256,
+			priority_tx_sha256, auto_queue_config_sha256,
+			started_at, finished_at
+		) VALUES (
+			1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+		)
+	`,
+		m.SourcePath,
+		m.SourceSHA256,
+		m.QueueStateSHA256,
+		m.UsersSHA256,
+		m.ActivitiesSHA256,
+		m.PlayHistorySHA256,
+		m.UserSessionsSHA256,
+		m.PriorityTxSHA256,
+		m.AutoQueueConfigSHA256,
+		m.StartedAt,
+		m.FinishedAt,
+	)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func equalSHA256(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // copyUsers scans the SQLite users table and inserts each row into the
 // PostgreSQL users table with legacy_id set to the original SQLite id. The
 // returned map is keyed by SQLite id and maps to the new PostgreSQL bigint id,
@@ -528,14 +964,14 @@ func copyUsers(ctx context.Context, tx *sql.Tx, src *sql.DB) (map[int64]int64, e
 
 	for rows.Next() {
 		var (
-			id            int64
-			email         string
-			displayName   string
-			profilePic    sql.NullString
-			role          string
-			priorityBal   int64
-			createdAt     sql.NullString
-			updatedAt     sql.NullString
+			id          int64
+			email       string
+			displayName string
+			profilePic  sql.NullString
+			role        string
+			priorityBal int64
+			createdAt   sql.NullString
+			updatedAt   sql.NullString
 		)
 		if err := rows.Scan(&id, &email, &displayName, &profilePic, &role, &priorityBal, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan user row: %w", err)
@@ -587,22 +1023,21 @@ func copyUserSessions(ctx context.Context, tx *sql.Tx, src *sql.DB, idMap map[in
 
 	for rows.Next() {
 		var (
-			id            int64
-			userID        int64
-			sessionDate   string
-			firstSeen     string
-			lastSeen      string
+			id          int64
+			userID      int64
+			sessionDate string
+			firstSeen   string
+			lastSeen    string
 		)
 		if err := rows.Scan(&id, &userID, &sessionDate, &firstSeen, &lastSeen); err != nil {
 			return fmt.Errorf("scan user_session: %w", err)
 		}
 		newUserID, ok := idMap[userID]
 		if !ok {
-			// Orphan: source references a user_id that does not exist in
-			// users. Skip with a structured log so the operator sees the
-			// discrepancy.
-			fmt.Fprintf(os.Stderr, "warning: user_sessions row id=%d references missing user_id=%d; skipping\n", id, userID)
-			continue
+			// FK integrity violation: the source user_sessions row references
+			// a user_id that does not exist in users. Returning an error
+			// rolls the transaction back so no partial state is committed.
+			return fmt.Errorf("user_sessions row id=%d references missing source user_id=%d; aborting migration", id, userID)
 		}
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO user_sessions (user_id, session_date, first_seen_at, last_seen_at)
@@ -632,22 +1067,21 @@ func copyPriorityTransactions(ctx context.Context, tx *sql.Tx, src *sql.DB, idMa
 
 	for rows.Next() {
 		var (
-			id            int64
-			userID        int64
-			songID        string
-			songTitle     string
-			txType        string
-			amount        int64
-			balanceAfter  int64
-			createdAt     sql.NullString
+			id           int64
+			userID       int64
+			songID       string
+			songTitle    string
+			txType       string
+			amount       int64
+			balanceAfter int64
+			createdAt    sql.NullString
 		)
 		if err := rows.Scan(&id, &userID, &songID, &songTitle, &txType, &amount, &balanceAfter, &createdAt); err != nil {
 			return fmt.Errorf("scan priority_transaction: %w", err)
 		}
 		newUserID, ok := idMap[userID]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "warning: priority_transactions row id=%d references missing user_id=%d; skipping\n", id, userID)
-			continue
+			return fmt.Errorf("priority_transactions row id=%d references missing source user_id=%d; aborting migration", id, userID)
 		}
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO priority_transactions (
@@ -818,4 +1252,4 @@ func copyPlayHistory(ctx context.Context, tx *sql.Tx, src *sql.DB, chunkSize int
 	return flush()
 }
 
-// Options for the CLI.
+// RemapID is defined in convert.go.

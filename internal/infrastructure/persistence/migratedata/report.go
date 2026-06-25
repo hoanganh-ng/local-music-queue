@@ -19,9 +19,16 @@ func (r *Report) WriteText(w io.Writer) error {
 	fmt.Fprintf(tw, "Migration report\t\n")
 	fmt.Fprintf(tw, "  Started at:\t%s\n", r.StartedAt.Format(time.RFC3339))
 	fmt.Fprintf(tw, "  Finished at:\t%s\n", r.FinishedAt.Format(time.RFC3339))
+	if r.SourcePath != "" {
+		fmt.Fprintf(tw, "  Source path:\t%s\n", r.SourcePath)
+	}
 	fmt.Fprintf(tw, "  Postgres DSN:\t%s\n", r.RedactedDSN)
 	if r.DryRun {
 		fmt.Fprintf(tw, "  Mode:\tdry-run (no data written)\n")
+	}
+	if r.MigrationVerified {
+		fmt.Fprintf(tw, "  Migration verified:\ttrue\n")
+		fmt.Fprintf(tw, "  Remapped users:\t%d\n", r.RemappedUserCount)
 	}
 	if len(r.Notes) > 0 {
 		fmt.Fprintf(tw, "  Notes:\n")
@@ -119,4 +126,13 @@ func (r *Report) MarkMismatched() bool {
 		}
 	}
 	return found
+}
+
+// AddNote appends a note to the report. Notes are operator-facing strings
+// surfaced in both the text and JSON output.
+func (r *Report) AddNote(note string) {
+	if r == nil || note == "" {
+		return
+	}
+	r.Notes = append(r.Notes, note)
 }
