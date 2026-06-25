@@ -112,23 +112,43 @@ var canonicalColumnLists = map[string][]string{
 }
 
 // canonicalColumnListsPG mirrors canonicalColumnLists for PostgreSQL. The
-// only dialect-specific swap is queue_state's byte-length expression.
+// dialect-specific swap goes beyond queue_state's byte-length expression:
+// the target side hashes must compare logical identity, not the
+// PostgreSQL-generated row ids, because the migrator does not (and cannot
+// always) preserve SQLite source ids. Concretely:
+//
+//   - users.id is PostgreSQL-generated, so the users hash uses
+//     users.legacy_id (the original SQLite id) for ordering and identity.
+//   - user_sessions and priority_transactions do not have a legacy_id, so
+//     their user_id is hashed via a join to users.legacy_id. This keeps
+//     dependent rows comparable to the source even when PostgreSQL
+//     sequences advanced after a rolled-back attempt.
+//   - user_sessions, priority_transactions, activities, and play_history
+//     DO preserve the SQLite id explicitly (see copy functions and
+//     resyncSequences), so the target's id is identical to the source's
+//     id and the projection can hash on it directly.
+//
 // Timestamps are deliberately excluded from both maps so source and target
 // byte streams are comparable for a clean copy. The enabled boolean is
 // normalized through a CASE expression on both sides so SQLite's INTEGER
 // 0/1 and PostgreSQL's false/true render identically ("0"/"1").
 var canonicalColumnListsPG = map[string][]string{
 	"users": {
-		"id", "email", "display_name",
+		"legacy_id", "email", "display_name",
 		"COALESCE(profile_picture::text, '')",
 		"role", "priority_balance",
 	},
 	"user_sessions": {
-		"id", "user_id", "session_date::text",
+		"user_sessions.id",
+		"users.legacy_id",
+		"user_sessions.session_date::text",
 	},
 	"priority_transactions": {
-		"id", "user_id", "song_id", "song_title",
-		"transaction_type", "amount", "balance_after",
+		"priority_transactions.id",
+		"users.legacy_id",
+		"priority_transactions.song_id", "priority_transactions.song_title",
+		"priority_transactions.transaction_type", "priority_transactions.amount",
+		"priority_transactions.balance_after",
 	},
 	"queue_state": {
 		"id", "OCTET_LENGTH(data)", "data",
@@ -145,6 +165,29 @@ var canonicalColumnListsPG = map[string][]string{
 	},
 }
 
+// canonicalJoinClausesPG is the per-table JOIN clause the target hash query
+// must inject when the canonical projection references columns from another
+// table. Only tables that use a foreign-keyed column in their projection
+// need an entry; all other tables are projected directly. The clauses are
+// appended after the FROM clause and before the ORDER BY clause, so they
+// compose safely with the dialect-agnostic ORDER BY construction in
+// hashTableRows.
+var canonicalJoinClausesPG = map[string]string{
+	"user_sessions":         "JOIN users ON users.id = user_sessions.user_id",
+	"priority_transactions": "JOIN users ON users.id = priority_transactions.user_id",
+}
+
+// canonicalOrderByPG is the per-table ORDER BY clause the target hash query
+// must use when the canonical projection replaces the row id with another
+// identity column. For users, the source order is `id ASC` (SQLite
+// AUTOINCREMENT) which is identical to `legacy_id ASC` because the migrator
+// copies the SQLite id into users.legacy_id. For all other tables the
+// migrator preserves the source id directly, so ORDER BY id works on both
+// sides and the entry is empty.
+var canonicalOrderByPG = map[string]string{
+	"users": "ORDER BY users.legacy_id",
+}
+
 // canonicalColumnsFor returns the column projection that matches the
 // requested dialect. Both maps MUST contain every entry in
 // expectedSourceTables; otherwise the integrity check would silently skip
@@ -159,6 +202,26 @@ func canonicalColumnsFor(table string, d dialect) ([]string, error) {
 		return nil, fmt.Errorf("no canonical projection defined for %s", table)
 	}
 	return cols, nil
+}
+
+// canonicalJoinClauseFor returns the JOIN clause to splice into the target
+// hash query for a given table. Empty string means the table is projected
+// directly with no joins. The hash query is the only place this is used:
+// the source hash query never references any column outside its own table,
+// so canonicalJoinClausesPG is intentionally keyed by table name without
+// mirroring the source side.
+func canonicalJoinClauseFor(table string) string {
+	return canonicalJoinClausesPG[table]
+}
+
+// canonicalOrderByClauseFor returns the ORDER BY clause the target hash
+// query should use for a given table. Empty string means the default
+// "ORDER BY id" applies. The source side always uses "ORDER BY id" because
+// the SQLite source row id is the canonical identity there. The target
+// side swaps to a different identity column (e.g. users.legacy_id) only
+// when the canonical projection replaces id with a logical identity.
+func canonicalOrderByClauseFor(table string) string {
+	return canonicalOrderByPG[table]
 }
 
 // tableStats bundles the row count and id range for one table. MinID and
@@ -426,6 +489,15 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 		return nil, fmt.Errorf("copy play_history: %w", err)
 	}
 
+	// Resync the BIGSERIAL sequences for the four tables that preserve the
+	// SQLite source id explicitly. Each setval uses is_called=false so the
+	// next runtime insert gets max(id)+1; this avoids future PK collisions
+	// even when source ids are non-contiguous or when a previous run
+	// advanced the sequence past the source max.
+	if err := resyncSequences(ctx, tx); err != nil {
+		return nil, fmt.Errorf("resync sequences: %w", err)
+	}
+
 	// Pre-commit integrity verification: any mismatch rolls the transaction
 	// back instead of committing a broken target. Counts, id ranges, and the
 	// queue_state byte length are checked inside the transaction.
@@ -640,11 +712,26 @@ func computeTargetHashes(ctx context.Context, dst *sql.DB) (canonicalHashes, err
 // deterministic byte stream. The dialect selects the right canonical column
 // list; the byte stream format (US/RS separators) is identical across
 // dialects so source and target projections are comparable.
+//
+// The target dialect may splice in JOIN clauses when the canonical
+// projection references a foreign-table column (e.g. users.legacy_id for
+// user_sessions.user_id), and may swap the ORDER BY column when the
+// projection replaces the row id with a logical identity (e.g. users rows
+// are ordered by users.legacy_id on the target side, not by the
+// PostgreSQL-generated id). Joins and ORDER BY swaps only apply to the
+// target side; the source side hashes its own table in isolation.
 func hashTableRows(ctx context.Context, q queryer, table string, cols []string, d dialect) ([32]byte, error) {
 	var zero [32]byte
-	pk := "id"
-	orderClause := "ORDER BY " + pk
-	query := fmt.Sprintf("SELECT %s FROM %s %s", strings.Join(cols, ", "), table, orderClause)
+	orderClause := "ORDER BY id"
+	joinClause := ""
+	if d == dialectPostgres {
+		joinClause = canonicalJoinClauseFor(table)
+		if ob := canonicalOrderByClauseFor(table); ob != "" {
+			orderClause = ob
+		}
+	}
+	query := fmt.Sprintf("SELECT %s FROM %s %s %s",
+		strings.Join(cols, ", "), table, joinClause, orderClause)
 	rows, err := q.QueryContext(ctx, query)
 	if err != nil {
 		return zero, fmt.Errorf("hash %s: %w", table, err)
@@ -1211,6 +1298,52 @@ func equalSHA256(a, b []byte) bool {
 	return true
 }
 
+// resyncSequences aligns the BIGSERIAL sequences of the four tables that
+// preserve the SQLite source id explicitly (user_sessions,
+// priority_transactions, activities, play_history) with the highest id
+// actually inserted. Without this step, a future runtime INSERT could
+// collide with a migrated id; the original BIGSERIAL sequence advanced
+// during the COPY and the migrator inserted explicit ids that the
+// sequence did not know about. setval(seq, max, is_called=false) makes
+// the next default-valued insert pick max+1, which is the correct
+// monotonic continuation regardless of how the source ids are spaced.
+//
+// Empty tables skip the resync: there is nothing to align the sequence
+// to, and the BIGSERIAL's existing value (1 from the default) is the
+// right next id. Calling setval(..., 0, false) on an empty table would
+// return 0 as the next id, which is invalid for a NOT NULL BIGSERIAL.
+//
+// queue_state and auto_queue_config are not resynced because they have a
+// fixed single-row id=1 contract enforced by the CHECK constraint.
+func resyncSequences(ctx context.Context, tx *sql.Tx) error {
+	tables := []string{
+		"user_sessions",
+		"priority_transactions",
+		"activities",
+		"play_history",
+	}
+	for _, t := range tables {
+		var maxID sql.NullInt64
+		if err := tx.QueryRowContext(ctx,
+			"SELECT MAX(id) FROM "+t).Scan(&maxID); err != nil {
+			return fmt.Errorf("read max %s: %w", t, err)
+		}
+		if !maxID.Valid {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			SELECT setval(
+				pg_get_serial_sequence($1, 'id'),
+				$2,
+				false
+			)
+		`, t, maxID.Int64); err != nil {
+			return fmt.Errorf("setval %s: %w", t, err)
+		}
+	}
+	return nil
+}
+
 // copyUsers scans the SQLite users table and inserts each row into the
 // PostgreSQL users table with legacy_id set to the original SQLite id. The
 // returned map is keyed by SQLite id and maps to the new PostgreSQL bigint id,
@@ -1305,14 +1438,22 @@ func copyUserSessions(ctx context.Context, tx *sql.Tx, src *sql.DB, idMap map[in
 			// rolls the transaction back so no partial state is committed.
 			return fmt.Errorf("user_sessions row id=%d references missing source user_id=%d; aborting migration", id, userID)
 		}
+		// Preserve the source id explicitly. The PostgreSQL id is then
+		// identical to the SQLite id, which keeps the canonical hash
+		// projection comparable and gives operators a stable audit trail.
+		// The matching sequence is resynced in resyncSequences after the
+		// copy completes.
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO user_sessions (user_id, session_date, first_seen_at, last_seen_at)
-			VALUES ($1, $2::date,
-			        COALESCE(NULLIF($3, '')::timestamptz, CURRENT_TIMESTAMP),
-			        COALESCE(NULLIF($4, '')::timestamptz, CURRENT_TIMESTAMP))
-			ON CONFLICT (user_id, session_date) DO UPDATE SET
+			INSERT INTO user_sessions (id, user_id, session_date, first_seen_at, last_seen_at)
+			VALUES ($1, $2, $3::date,
+			        COALESCE(NULLIF($4, '')::timestamptz, CURRENT_TIMESTAMP),
+			        COALESCE(NULLIF($5, '')::timestamptz, CURRENT_TIMESTAMP))
+			ON CONFLICT (id) DO UPDATE SET
+				user_id = EXCLUDED.user_id,
+				session_date = EXCLUDED.session_date,
+				first_seen_at = EXCLUDED.first_seen_at,
 				last_seen_at = EXCLUDED.last_seen_at
-		`, newUserID, sessionDate, firstSeen, lastSeen)
+		`, id, newUserID, sessionDate, firstSeen, lastSeen)
 		if err != nil {
 			return fmt.Errorf("insert user_session id=%d: %w", id, err)
 		}
@@ -1349,13 +1490,17 @@ func copyPriorityTransactions(ctx context.Context, tx *sql.Tx, src *sql.DB, idMa
 		if !ok {
 			return fmt.Errorf("priority_transactions row id=%d references missing source user_id=%d; aborting migration", id, userID)
 		}
+		// Preserve the source id explicitly so the canonical hash
+		// projection is comparable and the audit trail keeps the original
+		// SQLite id. The matching sequence is resynced in resyncSequences
+		// after the copy completes.
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO priority_transactions (
-				user_id, song_id, song_title, transaction_type, amount, balance_after, created_at
+				id, user_id, song_id, song_title, transaction_type, amount, balance_after, created_at
 			)
-			VALUES ($1, $2, $3, $4, $5, $6,
-			        COALESCE(NULLIF($7, '')::timestamptz, CURRENT_TIMESTAMP))
-		`, newUserID, songID, songTitle, txType, amount, balanceAfter, createdAt.String)
+			VALUES ($1, $2, $3, $4, $5, $6, $7,
+			        COALESCE(NULLIF($8, '')::timestamptz, CURRENT_TIMESTAMP))
+		`, id, newUserID, songID, songTitle, txType, amount, balanceAfter, createdAt.String)
 		if err != nil {
 			return fmt.Errorf("insert priority_transaction id=%d: %w", id, err)
 		}
@@ -1412,10 +1557,14 @@ func copyActivities(ctx context.Context, tx *sql.Tx, src *sql.DB, chunkSize int)
 			return nil
 		}
 		for _, r := range batch {
+			// Preserve the source id explicitly so the canonical hash
+			// projection is comparable and operators keep a stable audit
+			// trail. The matching sequence is resynced in resyncSequences
+			// after the copy completes.
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO activities ("timestamp", type, "user", description)
-				VALUES (COALESCE(NULLIF($1, '')::timestamptz, CURRENT_TIMESTAMP), $2, $3, $4)
-			`, r.ts, r.typ, r.user, r.description); err != nil {
+				INSERT INTO activities (id, "timestamp", type, "user", description)
+				VALUES ($1, COALESCE(NULLIF($2, '')::timestamptz, CURRENT_TIMESTAMP), $3, $4, $5)
+			`, r.id, r.ts, r.typ, r.user, r.description); err != nil {
 				return fmt.Errorf("insert activity: %w", err)
 			}
 		}
@@ -1489,10 +1638,14 @@ func copyPlayHistory(ctx context.Context, tx *sql.Tx, src *sql.DB, chunkSize int
 			return nil
 		}
 		for _, r := range batch {
+			// Preserve the source id explicitly so the canonical hash
+			// projection is comparable and operators keep a stable audit
+			// trail. The matching sequence is resynced in resyncSequences
+			// after the copy completes.
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO play_history (video_id, title, played_at)
-				VALUES ($1, $2, COALESCE(NULLIF($3, '')::timestamptz, CURRENT_TIMESTAMP))
-			`, r.videoID, r.title, r.playedAt); err != nil {
+				INSERT INTO play_history (id, video_id, title, played_at)
+				VALUES ($1, $2, $3, COALESCE(NULLIF($4, '')::timestamptz, CURRENT_TIMESTAMP))
+			`, r.id, r.videoID, r.title, r.playedAt); err != nil {
 				return fmt.Errorf("insert play_history: %w", err)
 			}
 		}

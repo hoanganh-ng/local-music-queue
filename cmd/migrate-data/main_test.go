@@ -1040,3 +1040,244 @@ func TestMigrateData_TamperedQueueStateSameLength_DirtyDetection(t *testing.T) {
 
 // kept to ensure imports are used
 var _ = mustInt64
+
+// ---- R03 idempotency-proof fix tests ----
+
+// seedNonContiguousSQLite writes a SQLite source whose users,
+// user_sessions, priority_transactions, activities, and play_history all
+// have non-contiguous ids (gaps in the integer range). The migrator must
+// preserve these ids on the target, and a second run must be a no-op
+// despite the gaps.
+func seedNonContiguousSQLite(t *testing.T) (path string, ids seedIDs) {
+	t.Helper()
+	dir := t.TempDir()
+	path = filepath.Join(dir, "gaps.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	if _, err := db.Exec(sqliteDDL); err != nil {
+		t.Fatalf("sqlite ddl: %v", err)
+	}
+
+	// Insert users with explicit non-contiguous ids: 1, 50, 5000.
+	for i, rawID := range []int64{1, 50, 5000} {
+		if _, err := db.Exec(`
+			INSERT INTO users (id, email, display_name, role, priority_balance)
+			VALUES (?, ?, ?, ?, ?)
+		`, rawID, fmt.Sprintf("user%d@example.com", i), fmt.Sprintf("User%d", i), "guest", 0); err != nil {
+			t.Fatalf("insert user id=%d: %v", rawID, err)
+		}
+		ids.userLegacyIDs = append(ids.userLegacyIDs, rawID)
+	}
+
+	// user_sessions with non-contiguous ids referencing legacy users.
+	sessions := []struct {
+		id     int64
+		userID int64
+		day    string
+	}{
+		{7, 1, "2026-01-05"},
+		{42, 50, "2026-01-06"},
+		{999, 5000, "2026-01-07"},
+	}
+	for _, s := range sessions {
+		if _, err := db.Exec(`
+			INSERT INTO user_sessions (id, user_id, session_date, first_seen_at, last_seen_at)
+			VALUES (?, ?, ?, ?, ?)
+		`, s.id, s.userID, s.day, "2026-01-05 09:00:00", "2026-01-05 17:00:00"); err != nil {
+			t.Fatalf("insert session id=%d: %v", s.id, err)
+		}
+	}
+
+	// priority_transactions with non-contiguous ids.
+	txs := []struct {
+		id     int64
+		userID int64
+		songID string
+		title  string
+	}{
+		{13, 1, "v-1", "Song 1"},
+		{100, 50, "v-2", "Song 2"},
+		{7777, 5000, "v-3", "Song 3"},
+	}
+	for _, tx := range txs {
+		if _, err := db.Exec(`
+			INSERT INTO priority_transactions (id, user_id, song_id, song_title, transaction_type, amount, balance_after)
+			VALUES (?, ?, ?, ?, 'spend', -1, 0)
+		`, tx.id, tx.userID, tx.songID, tx.title); err != nil {
+			t.Fatalf("insert ptx id=%d: %v", tx.id, err)
+		}
+	}
+
+	// queue_state: small fixed payload.
+	ids.queueData = []byte(`{"x":1}`)
+	if _, err := db.Exec(`INSERT INTO queue_state (id, data, updated_at) VALUES (1, ?, '2026-01-05 09:00:00')`, string(ids.queueData)); err != nil {
+		t.Fatalf("insert queue_state: %v", err)
+	}
+
+	// activities with non-contiguous ids.
+	for _, aid := range []int64{3, 11, 222} {
+		if _, err := db.Exec(`
+			INSERT INTO activities (id, "timestamp", type, "user", description)
+			VALUES (?, ?, ?, ?, ?)
+		`, aid, "2026-01-05 09:00:00", "song_added", "User0", fmt.Sprintf("act-%d", aid)); err != nil {
+			t.Fatalf("insert activity id=%d: %v", aid, err)
+		}
+	}
+
+	// play_history with non-contiguous ids.
+	for _, pid := range []int64{2, 88, 4444} {
+		if _, err := db.Exec(`
+			INSERT INTO play_history (id, video_id, title, played_at)
+			VALUES (?, ?, ?, ?)
+		`, pid, fmt.Sprintf("video-%d", pid), fmt.Sprintf("Title %d", pid), "2026-01-05 09:00:00"); err != nil {
+			t.Fatalf("insert play_history id=%d: %v", pid, err)
+		}
+	}
+
+	return path, ids
+}
+
+// TestMigrateData_NonContiguousIDs_MigratesAndNoOps verifies the
+// canonical-target-projection fix: a source with gaps in the
+// id sequences for users, user_sessions, priority_transactions,
+// activities, and play_history migrates successfully AND a second run
+// against the same target is a clean no-op. The fix replaced the
+// PostgreSQL-generated-id comparison with a users.legacy_id
+// comparison, so gaps no longer break idempotency.
+func TestMigrateData_NonContiguousIDs_MigratesAndNoOps(t *testing.T) {
+	path, ids := seedNonContiguousSQLite(t)
+	db, scopedDSN := newPostgresDB(t)
+	schemaMigratedUp(t, db)
+
+	opts := migratedata.Options{SQLitePath: path, PGDSN: scopedDSN}
+	r1, err := migratedata.Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if !r1.AllTablesMatch() {
+		t.Fatalf("first run: %+v", r1.Tables)
+	}
+
+	// Verify the target preserved the explicit source ids on the four
+	// id-preserved tables.
+	expectedRows := map[string]struct {
+		count     int64
+		idsOnTgt  []int64
+	}{
+		"user_sessions":        {3, []int64{7, 42, 999}},
+		"priority_transactions": {3, []int64{13, 100, 7777}},
+		"activities":           {3, []int64{3, 11, 222}},
+		"play_history":         {3, []int64{2, 88, 4444}},
+	}
+	for table, want := range expectedRows {
+		if got := mustCount(t, db, table); got != want.count {
+			t.Errorf("%s count = %d, want %d", table, got, want.count)
+		}
+		for _, id := range want.idsOnTgt {
+			var c int64
+			if err := db.QueryRow("SELECT COUNT(*) FROM " + table + " WHERE id = $1", id).Scan(&c); err != nil {
+				t.Fatalf("query %s id=%d: %v", table, id, err)
+			}
+			if c != 1 {
+				t.Errorf("%s id=%d not preserved on target (count=%d)", table, id, c)
+			}
+		}
+	}
+
+	// Second run is a clean no-op despite the gaps.
+	r2, err := migratedata.Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if len(r2.Notes) == 0 || r2.Notes[0] != "already migrated; no-op" {
+		t.Errorf("second run Notes: %v", r2.Notes)
+	}
+
+	// users.legacy_id holds the source ids (1, 50, 5000).
+	for _, legacyID := range ids.userLegacyIDs {
+		var c int64
+		if err := db.QueryRow("SELECT COUNT(*) FROM users WHERE legacy_id = $1", legacyID).Scan(&c); err != nil {
+			t.Fatalf("query users legacy_id=%d: %v", legacyID, err)
+		}
+		if c != 1 {
+			t.Errorf("users legacy_id=%d missing (count=%d)", legacyID, c)
+		}
+	}
+}
+
+// TestMigrateData_FaultAfterUsers_AdvancesSequence_NoSecondOpDrift covers
+// the rolled-back-attempt case from the R03 brief:
+//
+//  1. Run with FaultAfterUsers returning an error after the users copy.
+//     The transaction rolls back but the PostgreSQL users_id_seq
+//     (BIGSERIAL backing sequence) has advanced. The users table is
+//     empty, no marker, but the sequence counter is past 1.
+//  2. A second clean run completes successfully. It must insert explicit
+//     ids via the migratedata path (it does; copyUsers returns the new
+//     ids and the rest of the pipeline runs).
+//  3. A third run is a clean no-op. This is the regression: with the
+//     old target-hash implementation that compared
+//     PostgreSQL-generated ids, the users hash on the second run
+//     diverged from the source and the third run was wrongly classified
+//     as dirty.
+func TestMigrateData_FaultAfterUsers_AdvancesSequence_NoSecondOpDrift(t *testing.T) {
+	path, _ := seedSQLite(t)
+	db, scopedDSN := newPostgresDB(t)
+	schemaMigratedUp(t, db)
+
+	// Step 1: faulted run. The advisory lock requires a clean
+	// connection per Run, so use a separate Run that fails after the
+	// users copy inside its own transaction.
+	faultedOpts := migratedata.Options{
+		SQLitePath:      path,
+		PGDSN:           scopedDSN,
+		FaultAfterUsers: func() error { return errors.New("forced fault after users") },
+	}
+	if _, err := migratedata.Run(context.Background(), faultedOpts); err == nil {
+		t.Fatal("expected faulted run to fail, got nil")
+	}
+
+	// After the faulted run, the users table must be empty (rollback
+	// cleaned up the inserted rows). The sequence, however, may have
+	// advanced; record its value.
+	if got := mustCount(t, db, "users"); got != 0 {
+		t.Fatalf("after faulted run: users count = %d, want 0", got)
+	}
+	var seqAfterFault int64
+	if err := db.QueryRow("SELECT last_value FROM users_id_seq").Scan(&seqAfterFault); err != nil {
+		t.Fatalf("read users_id_seq: %v", err)
+	}
+	// The fixture inserts 3 users, so the sequence has advanced at least
+	// past 3 (rolled-back inserts still consume sequence values).
+	if seqAfterFault < 3 {
+		t.Fatalf("users_id_seq last_value = %d, want >= 3 (sequence should have advanced during faulted run)", seqAfterFault)
+	}
+
+	// Step 2: clean run completes successfully despite the advanced
+	// sequence.
+	cleanOpts := migratedata.Options{SQLitePath: path, PGDSN: scopedDSN}
+	r1, err := migratedata.Run(context.Background(), cleanOpts)
+	if err != nil {
+		t.Fatalf("clean Run after fault: %v", err)
+	}
+	if !r1.MigrationVerified {
+		t.Errorf("expected clean run MigrationVerified=true; got false")
+	}
+
+	// Step 3: second clean run is a no-op. The previous implementation
+	// failed here because the target users hash compared
+	// PostgreSQL-generated ids (now much larger than the source ids)
+	// against the source, producing different SHA256s.
+	r2, err := migratedata.Run(context.Background(), cleanOpts)
+	if err != nil {
+		t.Fatalf("second clean Run: %v", err)
+	}
+	if len(r2.Notes) == 0 || r2.Notes[0] != "already migrated; no-op" {
+		t.Errorf("second clean run Notes: %v", r2.Notes)
+	}
+}
