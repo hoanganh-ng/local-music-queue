@@ -382,6 +382,13 @@ type RemoveSongRequest struct {
 }
 
 func extractToken(r *http.Request) string {
+	return ExtractToken(r)
+}
+
+// ExtractToken is the exported counterpart of extractToken so callers in
+// other packages (notably cmd/server's room auth middleware) can reuse the
+// same bearer-token parsing semantics instead of redefining it.
+func ExtractToken(r *http.Request) string {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
 		return ""

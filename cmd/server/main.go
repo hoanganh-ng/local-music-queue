@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	delivery "local-music-queue/internal/delivery/http"
@@ -23,6 +24,7 @@ import (
 	usecaseAutoQueue "local-music-queue/internal/usecase/autoqueue"
 	usecasePriority "local-music-queue/internal/usecase/priority"
 	usecaseQueue "local-music-queue/internal/usecase/queue"
+	usecaseRoom "local-music-queue/internal/usecase/room"
 	usecaseVote "local-music-queue/internal/usecase/vote"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -105,6 +107,7 @@ func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	pgRoom := persistence.NewPostgresRoomRepository(dbHandle)
 	// dbHandle is non-nil only for the PostgreSQL path. The *sql.DB must stay
 	// open for the entire server lifetime, so its Close is owned by main via
 	// the cleanup closure returned below — closing it here would invalidate
@@ -139,6 +142,7 @@ func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 	// Initialize auto-queue components
 	ytRelatedFetcher := youtube.NewYtDlpRelatedFetcher(cfg.YTDLPPath, 10)
 	autoQueueInteractor := usecaseAutoQueue.NewInteractor(autoQueueRepo, queueRepo, ytRelatedFetcher)
+	roomInteractor := usecaseRoom.NewInteractor(pgRoom)
 
 	// Wire auto-queue into queue interactor
 	qInteractor.SetAutoQueueTrigger(autoQueueInteractor)
@@ -182,6 +186,7 @@ func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 
 	handlers := delivery.NewHandlers(qInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, hub)
 	autoQueueHandlers := delivery.NewAutoQueueHandlers(autoQueueInteractor, hub)
+	roomHandlers := delivery.NewRoomHandlers(roomInteractor, authInteractor)
 
 	// 5. Setup Routes
 	mux := http.NewServeMux()
@@ -208,6 +213,90 @@ func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 	// Auto-queue API
 	mux.HandleFunc("POST /api/autoqueue/toggle", autoQueueHandlers.HandleToggleAutoQueue)
 	mux.HandleFunc("GET /api/autoqueue/status", autoQueueHandlers.HandleGetAutoQueueStatus)
+
+	// Room API (R04) — all routes require a valid bearer token; the resolved
+	// actor user id is injected into the request context by roomAuth.
+	roomAuth := makeRoomActor(authInteractor)
+	mux.HandleFunc("POST /api/rooms", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomHandlers.HandleCreateRoom(w, r, actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("GET /api/rooms", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomHandlers.HandleListRooms(w, r, actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("GET /api/rooms/{roomId}", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("roomId"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid room id", http.StatusBadRequest)
+			return
+		}
+		roomHandlers.HandleGetRoom(w, r, id, actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("GET /api/rooms/{roomId}/members", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("roomId"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid room id", http.StatusBadRequest)
+			return
+		}
+		roomHandlers.HandleListMembers(w, r, id, actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("POST /api/rooms/{roomId}/members/{userId}/promote", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomID, err := strconv.ParseInt(r.PathValue("roomId"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid room id", http.StatusBadRequest)
+			return
+		}
+		userID, err := strconv.Atoi(r.PathValue("userId"))
+		if err != nil {
+			http.Error(w, "invalid user id", http.StatusBadRequest)
+			return
+		}
+		roomHandlers.HandlePromoteMember(w, r, roomID, actorFromCtx(r.Context()), userID)
+	}))
+	mux.HandleFunc("POST /api/rooms/{roomId}/members/{userId}/demote", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomID, err := strconv.ParseInt(r.PathValue("roomId"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid room id", http.StatusBadRequest)
+			return
+		}
+		userID, err := strconv.Atoi(r.PathValue("userId"))
+		if err != nil {
+			http.Error(w, "invalid user id", http.StatusBadRequest)
+			return
+		}
+		roomHandlers.HandleDemoteMember(w, r, roomID, actorFromCtx(r.Context()), userID)
+	}))
+	mux.HandleFunc("POST /api/rooms/{roomId}/invites", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("roomId"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid room id", http.StatusBadRequest)
+			return
+		}
+		roomHandlers.HandleCreateInvite(w, r, id, actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("GET /api/rooms/{roomId}/invites", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("roomId"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid room id", http.StatusBadRequest)
+			return
+		}
+		roomHandlers.HandleListInvites(w, r, id, actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("DELETE /api/rooms/{roomId}/invites/{inviteId}", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomID, err := strconv.ParseInt(r.PathValue("roomId"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid room id", http.StatusBadRequest)
+			return
+		}
+		inviteID, err := strconv.ParseInt(r.PathValue("inviteId"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid invite id", http.StatusBadRequest)
+			return
+		}
+		roomHandlers.HandleRevokeInvite(w, r, roomID, inviteID, actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("POST /api/invites/{token}/redeem", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomHandlers.HandleRedeemInvite(w, r, r.PathValue("token"), actorFromCtx(r.Context()))
+	}))
 
 	// WebSocket
 	mux.HandleFunc("/ws", hub.RegisterHandler)
@@ -244,4 +333,42 @@ func initRepositories(cfg *config.Config) (
 	pgUser := persistence.NewPostgresUserRepository(db)
 	pgAutoQueue := persistence.NewPostgresAutoQueueRepository(db)
 	return pgQueue, pgUser, pgAutoQueue, db, nil
+}
+
+// makeRoomActor returns a middleware that resolves the bearer token via the
+// auth interactor, rejects unauthenticated callers with 401, and injects the
+// resolved actor user id into the request context so downstream handlers can
+// read it via actorFromCtx. The auth interactor is captured in a closure so
+// the wrapper is bound to the same instance configured for the rest of the
+// app.
+func makeRoomActor(a *usecaseAuth.Interactor) func(http.HandlerFunc) http.HandlerFunc {
+	return func(fn http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			token := delivery.ExtractToken(r)
+			if token == "" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			user, err := a.ResolveSession(r.Context(), token)
+			if err != nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			ctx := context.WithValue(r.Context(), actorKey{}, user.ID)
+			fn(w, r.WithContext(ctx))
+		}
+	}
+}
+
+// actorKey is the private context key under which makeRoomActor stores the
+// resolved actor user id. It is intentionally unexported and unique to this
+// package so it cannot collide with keys defined elsewhere.
+type actorKey struct{}
+
+// actorFromCtx extracts the actor user id stashed in the request context by
+// makeRoomActor. Returns 0 when the context was not produced by the wrapper
+// (which should not happen for room routes but is a safe default).
+func actorFromCtx(ctx context.Context) int {
+	v, _ := ctx.Value(actorKey{}).(int)
+	return v
 }
