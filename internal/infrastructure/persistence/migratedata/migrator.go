@@ -490,7 +490,7 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 	}
 
 	// Resync the BIGSERIAL sequences for the four tables that preserve the
-	// SQLite source id explicitly. Each setval uses is_called=false so the
+	// SQLite source id explicitly. Each setval uses is_called=true so the
 	// next runtime insert gets max(id)+1; this avoids future PK collisions
 	// even when source ids are non-contiguous or when a previous run
 	// advanced the sequence past the source max.
@@ -1304,14 +1304,26 @@ func equalSHA256(a, b []byte) bool {
 // actually inserted. Without this step, a future runtime INSERT could
 // collide with a migrated id; the original BIGSERIAL sequence advanced
 // during the COPY and the migrator inserted explicit ids that the
-// sequence did not know about. setval(seq, max, is_called=false) makes
-// the next default-valued insert pick max+1, which is the correct
-// monotonic continuation regardless of how the source ids are spaced.
+// sequence did not know about.
+//
+// We use setval(seq, max, is_called=true): PostgreSQL then treats `max`
+// as the last value the sequence has already returned, so the next
+// nextval() yields max+1. The earlier is_called=false form (which made
+// the next nextval() return exactly max) would collide with the
+// migrated row that already holds id=max. Either of these equivalent
+// forms works:
+//
+//   - setval(seq, max, is_called=true)
+//   - setval(seq, max+1, is_called=false)
+//
+// We prefer the first because it keeps the literal max in the call and
+// reads naturally as "the sequence has already returned max".
 //
 // Empty tables skip the resync: there is nothing to align the sequence
 // to, and the BIGSERIAL's existing value (1 from the default) is the
-// right next id. Calling setval(..., 0, false) on an empty table would
-// return 0 as the next id, which is invalid for a NOT NULL BIGSERIAL.
+// right next id. Calling setval(..., 0, true) on an empty table would
+// make the next nextval() return 1, which is also fine, but skipping
+// avoids touching the sequence at all.
 //
 // queue_state and auto_queue_config are not resynced because they have a
 // fixed single-row id=1 contract enforced by the CHECK constraint.
@@ -1335,7 +1347,7 @@ func resyncSequences(ctx context.Context, tx *sql.Tx) error {
 			SELECT setval(
 				pg_get_serial_sequence($1, 'id'),
 				$2,
-				false
+				true
 			)
 		`, t, maxID.Int64); err != nil {
 			return fmt.Errorf("setval %s: %w", t, err)

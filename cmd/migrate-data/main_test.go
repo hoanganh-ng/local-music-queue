@@ -1281,3 +1281,104 @@ func TestMigrateData_FaultAfterUsers_AdvancesSequence_NoSecondOpDrift(t *testing
 		t.Errorf("second clean run Notes: %v", r2.Notes)
 	}
 }
+
+// TestMigrateData_SequenceResync_DefaultInsertGreaterThanMaxID covers the
+// R03 sequence-resync fix. After migrating a source with non-contiguous
+// ids, each of the four id-preserved tables must accept a normal
+// default-id insert whose generated id is strictly greater than the
+// migrated MAX(id). Without the is_called=true fix, the next nextval()
+// would return the migrated max itself and collide with the migrated
+// row, surfacing as a unique-constraint violation.
+func TestMigrateData_SequenceResync_DefaultInsertGreaterThanMaxID(t *testing.T) {
+	path, ids := seedNonContiguousSQLite(t)
+	db, scopedDSN := newPostgresDB(t)
+	schemaMigratedUp(t, db)
+
+	opts := migratedata.Options{SQLitePath: path, PGDSN: scopedDSN}
+	if _, err := migratedata.Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Record the migrated MAX(id) per id-preserved table. The fixture
+	// guarantees a non-contiguous range so MAX(id) is meaningfully larger
+	// than the row count.
+	type maxRow struct {
+		table string
+		max   int64
+	}
+	var maxRows []maxRow
+	for _, table := range []string{"user_sessions", "priority_transactions", "activities", "play_history"} {
+		maxRows = append(maxRows, maxRow{
+			table: table,
+			max:   mustInt64(t, db, "SELECT MAX(id) FROM "+table),
+		})
+	}
+
+	// Pick a migrated user id (NOT a legacy_id) for the FK-dependent
+	// inserts into user_sessions and priority_transactions.
+	anyUserID := mustInt64(t, db, `SELECT id FROM users WHERE legacy_id = $1`, ids.userLegacyIDs[0])
+
+	// Insert one row per table using default-id and verify the generated
+	// id exceeds the migrated MAX(id). Use a single transaction so a
+	// failure on any table surfaces the regression here.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	inserts := []struct {
+		table string
+		query string
+		args  []any
+	}{
+		{
+			table: "user_sessions",
+			query: `INSERT INTO user_sessions (user_id, session_date, first_seen_at, last_seen_at)
+			        VALUES ($1, '2026-02-15', '2026-02-15 09:00:00', '2026-02-15 17:00:00')
+			        RETURNING id`,
+			args: []any{anyUserID},
+		},
+		{
+			table: "priority_transactions",
+			query: `INSERT INTO priority_transactions (user_id, song_id, song_title, transaction_type, amount, balance_after)
+			        VALUES ($1, 'v-new', 'New Song', 'spend', -1, 0)
+			        RETURNING id`,
+			args: []any{anyUserID},
+		},
+		{
+			table: "activities",
+			query: `INSERT INTO activities ("timestamp", type, "user", description)
+			        VALUES ('2026-02-15 09:00:00', 'song_added', 'DefaultInsert', 'post-migration default id')
+			        RETURNING id`,
+		},
+		{
+			table: "play_history",
+			query: `INSERT INTO play_history (video_id, title, played_at)
+			        VALUES ('v-default', 'Default Insert', '2026-02-15 09:00:00')
+			        RETURNING id`,
+		},
+	}
+	got := make(map[string]int64, len(inserts))
+	for _, ins := range inserts {
+		var newID int64
+		if err := tx.QueryRow(ins.query, ins.args...).Scan(&newID); err != nil {
+			t.Fatalf("default-id insert into %s: %v", ins.table, err)
+		}
+		got[ins.table] = newID
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	for _, mr := range maxRows {
+		newID, ok := got[mr.table]
+		if !ok {
+			t.Errorf("missing default-id insert for %s", mr.table)
+			continue
+		}
+		if newID <= mr.max {
+			t.Errorf("%s: default-id insert = %d, want > migrated MAX(id) = %d", mr.table, newID, mr.max)
+		}
+	}
+}
