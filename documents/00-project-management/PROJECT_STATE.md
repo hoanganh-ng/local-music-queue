@@ -1,11 +1,12 @@
-# Project State Baseline (Sprint 003 Closed)
+# Project State Baseline
 
 **Baseline Date:** 2026-06-19
 **Branch:** dev
 **Original Sprint 001 Baseline Commit:** `0131b44ff1ac6b263cebef6d2526196042c5560f`
 **Sprint 003 Implementation Predecessor Commit:** `9c0fba72ca21f933c88817c3b4975bf3319f9b2b`
-**Last Architect-Inspected Implementation Commit:** `0b47d1142c1f6b2a7527f404bc100af2a24c57d4`
 **Sprint 003 Final Reviewed Commit:** `b0a822478c5d4cee6162702d5969605cfc2702f2`
+
+The most recently closed sprint that introduced architectural changes documented here is **Sprint 009 / R03 — SQLite-to-PostgreSQL Data Migration**. The Database section, the Deployment Topology section, and the data migration CLI description below describe the post-R03 state. Earlier sprints (001-009) are recorded in `documents/00-project-management/SPRINTS/`; the most recent closure records are `008-postgresql-foundation-with-existing-behavior-preserved.md` (R02) and `009-sqlite-to-postgresql-data-migration.md` (R03).
 
 ## Source-Priority Rule
 This `PROJECT_STATE.md` document is the authoritative documentation snapshot for the inspected commit. If any other documentation conflicts with this document, this document is correct regarding the documented state of the codebase. However, if conflicts are discovered between this document and the actual implementation or tests, the implementation and tests themselves remain the ultimate source of truth.

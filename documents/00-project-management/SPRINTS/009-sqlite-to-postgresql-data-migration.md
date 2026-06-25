@@ -57,7 +57,7 @@ Execute the offline, one-shot, idempotent SQLite-to-PostgreSQL data migration de
 - `internal/infrastructure/persistence/migratedata/migrator_test.go` — unit tests for conversion helpers and report rendering.
 - `internal/infrastructure/persistence/migrations/postgres/0002_legacy_id.up.sql` / `0002_legacy_id.down.sql` — adds / removes `users.legacy_id` plus `idx_users_legacy_id`.
 - `internal/infrastructure/persistence/migrations/postgres/0003_migration_marker.up.sql` / `0003_migration_marker.down.sql` — adds / removes the `migration_marker` table.
-- `internal/infrastructure/persistence/migrator.go` — no functional change; the version probe now reports schema version 3 once R03 migrations are applied.
+- `internal/infrastructure/persistence/migrator.go` — no functional change in R03; the schema-version probe is R02-owned.
 - `internal/infrastructure/persistence/migrations_postgres.go` — `embed.FS` now ships three migration files instead of one; the `PostgresMigrationsDir` constant is unchanged.
 - `cmd/server/main.go` — `initRepositories` now refuses to start without `DATABASE_URL`; the SQLite runtime fallback was removed. The defensive `RunEmbeddedMigrationsUp` startup hook was retained (it is now over the version-3 schema).
 - `internal/infrastructure/config/config.go` — `DatabaseURL` is documented as required; `DBPath` was removed from the `Config` struct; `buildDatabaseURL` returns `""` when neither `DATABASE_URL` nor any `POSTGRES_*` override is set; `Load()` logs a clear message that the server will refuse to start.
