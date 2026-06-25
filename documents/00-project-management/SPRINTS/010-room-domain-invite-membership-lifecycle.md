@@ -78,17 +78,17 @@ Add first-class backend room concepts — rooms, room_members, and room_invites 
 
 ### Decisions made
 
-- **Slug regex:** `^[a-z0-9][a-z0-9-]{2,62}[a-z0-9]$`; lowercase alphanumeric with hyphens, no leading/trailing hyphens, 4-64 chars.
-- **Reserved slugs:** `new`, `edit`, `delete`, `admin`, `api`, `www`, `mail`, `ftp`, `localhost`.
-- **Status/role enums:** `room_status` (active, archived); `member_role` (host, member). Stored as VARCHAR strings in the DB.
+- **Slug regex:** `^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$`; lowercase alphanumeric with hyphens, no leading/trailing hyphens, 3-40 chars.
+- **Reserved slugs:** `api`, `admin`, `static`, `ws`.
+- **Status/role enums:** `entity.RoomStatus` (active, archived); `entity.RoomMemberRole` (host, admin, guest). Stored as VARCHAR strings in the DB.
 - **Exactly-one-host:** enforced at SQL partial-unique-index (`WHERE role = 'host'`) AND use case layer (before insert/update, check existing host count).
 - **Invite token hashing:** 128-bit random, SHA-256, base64url-encoded hash stored as `token_hash`. Plaintext returned only from create-invite endpoints.
 - **Default expiry:** 7 days from creation.
 - **max_uses=0:** unlimited uses; invite does not exhaust.
-- **Archived-room mutation rules:** no new invites, no member add/promote/demote on archived rooms; only GET and DELETE (archive) allowed.
+- **Archived-room mutation rules:** no new invite creation, no invite redemption (via active-room gate in the interactor), no member promotion, and no member demotion on archived rooms; only GET and DELETE (archive) allowed.
 - **No public archive endpoint:** `ArchiveRoom` is internal-only (called by handler, not exposed as public route).
 - **Actor identity:** via bearer token session (`auth.Interactor.ResolveSession`); role strings NEVER trusted from request bodies (always computed from DB membership lookup).
-- **isUniqueViolation error-sniffing:** `pqErr, ok := err.(pq.Error)` then `pqErr.Code == "23505"` for PostgreSQL unique violations; brittle but matches existing pattern.
+- **isUniqueViolation error-sniffing:** STRING sniffing on `err.Error()` — checks for `"23505"`, `"unique constraint"`, or `"duplicate key"` substrings; if a constraint name is provided, also requires the constraint name substring in the message. Does NOT use a `pq.Error` type assertion.
 
 ## Decisions deferred
 
@@ -99,7 +99,6 @@ Add first-class backend room concepts — rooms, room_members, and room_invites 
 - **Backend authorization hardening** — R13 per room epic sequence.
 - **Global contract cleanup** — R14 per room epic sequence.
 - **Remove users.legacy_id or migration_marker** — R06 per ADR 001 §11.
-- **Room-scoped queue/playback** — R07+ per room epic sequence.
 - **Per-song row storage** in place of JSON blob — R06 per ADR 001 §11.
 - **Slug rename and archive recovery** — deferred.
 - **Online schema migration tooling** — deferred.
@@ -145,7 +144,7 @@ If any queue/playback/websocket/frontend code is changed unexpectedly, stop and 
 
 ## Risks and review focus
 
-- **Slug regex brittleness.** The regex `^[a-z0-9][a-z0-9-]{2,62}[a-z0-9]$` is manually maintained; any change must preserve the no-leading/trailing-hyphen invariant.
+- **Slug regex brittleness.** The regex `^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$` is manually maintained; any change must preserve the no-leading/trailing-hyphen invariant.
 - **Partial unique index traps.** The `UNIQUE (room_id) WHERE role = 'host'` partial index is the SQL-layer exactly-one-host enforcement; any ORM or raw-SQL bypass would silently break the invariant.
 - **isUniqueViolation error-sniffing brittleness.** `pqErr, ok := err.(pq.Error)` then `pqErr.Code == "23505"` matches the existing pattern but is fragile: a type assertion failure silently falls through.
 - **Archived-room rule coverage gap.** The handler layer enforces archived-room mutation guards; verify every new handler path is covered.
