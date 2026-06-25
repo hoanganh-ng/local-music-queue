@@ -144,13 +144,22 @@ type AddSongRequest struct {
 }
 
 func (h *Handlers) HandleAddSong(w http.ResponseWriter, r *http.Request) {
+	user := UserFromCtx(r.Context())
+	if user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var req AddSongRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 
-	res, err := h.queue.AddSong(r.Context(), req.URL, req.AddedBy, req.AddedByID, req.Metadata)
+	// Server-resolved identity is authoritative. added_by / added_by_id from
+	// the request body are ignored for attribution so a guest cannot spoof
+	// a host's add.
+	res, err := h.queue.AddSong(r.Context(), req.URL, user.DisplayName, user.ID, req.Metadata)
 	if err != nil {
 		if errors.Is(err, entity.ErrSongAlreadyInQueue) {
 			http.Error(w, err.Error(), http.StatusConflict)
@@ -183,6 +192,12 @@ type SkipRequest struct {
 }
 
 func (h *Handlers) HandleSkipSong(w http.ResponseWriter, r *http.Request) {
+	user := UserFromCtx(r.Context())
+	if user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var req SkipRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -193,7 +208,8 @@ func (h *Handlers) HandleSkipSong(w http.ResponseWriter, r *http.Request) {
 	stateBefore, _ := h.queue.GetState(r.Context())
 	previousIndex := stateBefore.CurrentIndex
 
-	err := h.queue.SkipSong(r.Context(), req.RequestedBy)
+	// Server-resolved display name is authoritative for activity attribution.
+	err := h.queue.SkipSong(r.Context(), user.DisplayName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -207,7 +223,7 @@ func (h *Handlers) HandleSkipSong(w http.ResponseWriter, r *http.Request) {
 		currentSong = &stateAfter.Songs[stateAfter.CurrentIndex]
 	}
 
-	activity := entity.NewActivity(entity.ActivitySongSkipped, req.RequestedBy,
+	activity := entity.NewActivity(entity.ActivitySongSkipped, user.DisplayName,
 		"skipped the current song")
 
 	// Broadcast DELTA: only index changes and new current song
@@ -229,20 +245,26 @@ type StatusRequest struct {
 }
 
 func (h *Handlers) HandleSetStatus(w http.ResponseWriter, r *http.Request) {
+	user := UserFromCtx(r.Context())
+	if user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var req StatusRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 
-	err := h.queue.SetStatus(r.Context(), req.RequestedBy, req.Status)
+	err := h.queue.SetStatus(r.Context(), user.DisplayName, req.Status)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	state, _ := h.queue.GetState(r.Context())
-	activity := entity.NewActivity(entity.ActivityPlayback, req.RequestedBy,
+	activity := entity.NewActivity(entity.ActivityPlayback, user.DisplayName,
 		fmt.Sprintf("changed status to %s", string(req.Status)))
 
 	// Broadcast DELTA: only status and elapsed
@@ -276,6 +298,11 @@ type SyncPlaybackRequest struct {
 }
 
 func (h *Handlers) HandleSyncPlayback(w http.ResponseWriter, r *http.Request) {
+	if UserFromCtx(r.Context()) == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var req SyncPlaybackRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -296,6 +323,12 @@ func (h *Handlers) HandleSyncPlayback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) HandleSongEnded(w http.ResponseWriter, r *http.Request) {
+	user := UserFromCtx(r.Context())
+	if user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	stateBefore, _ := h.queue.GetState(r.Context())
 	previousIndex := stateBefore.CurrentIndex
 
@@ -340,6 +373,12 @@ type PrevRequest struct {
 }
 
 func (h *Handlers) HandlePrevSong(w http.ResponseWriter, r *http.Request) {
+	user := UserFromCtx(r.Context())
+	if user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var req PrevRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -349,7 +388,7 @@ func (h *Handlers) HandlePrevSong(w http.ResponseWriter, r *http.Request) {
 	stateBefore, _ := h.queue.GetState(r.Context())
 	previousIndex := stateBefore.CurrentIndex
 
-	err := h.queue.PrevSong(r.Context(), req.RequestedBy)
+	err := h.queue.PrevSong(r.Context(), user.DisplayName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -362,7 +401,7 @@ func (h *Handlers) HandlePrevSong(w http.ResponseWriter, r *http.Request) {
 		currentSong = &stateAfter.Songs[stateAfter.CurrentIndex]
 	}
 
-	activity := entity.NewActivity(entity.ActivityPlayback, req.RequestedBy, "went to the previous song")
+	activity := entity.NewActivity(entity.ActivityPlayback, user.DisplayName, "went to the previous song")
 
 	h.hub.Broadcast(ws.EventSongPrevious, ws.SongPreviousData{
 		PreviousIndex: previousIndex,
@@ -460,20 +499,26 @@ type ClearQueueRequest struct {
 }
 
 func (h *Handlers) HandleClearQueue(w http.ResponseWriter, r *http.Request) {
+	user := UserFromCtx(r.Context())
+	if user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var req ClearQueueRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 
-	err := h.queue.ClearQueue(r.Context(), req.RequestedBy)
+	err := h.queue.ClearQueue(r.Context(), user.DisplayName)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	stateAfter, _ := h.queue.GetState(r.Context())
-	activity := entity.NewActivity(entity.ActivityPlayback, req.RequestedBy, "cleared the queue")
+	activity := entity.NewActivity(entity.ActivityPlayback, user.DisplayName, "cleared the queue")
 
 	h.hub.Broadcast(ws.EventQueueCleared, ws.QueueClearedData{
 		Status:   stateAfter.Status,
@@ -489,6 +534,12 @@ type PrioritizeSongRequest struct {
 }
 
 func (h *Handlers) HandlePrioritizeSong(w http.ResponseWriter, r *http.Request) {
+	user := UserFromCtx(r.Context())
+	if user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var req PrioritizeSongRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -498,7 +549,9 @@ func (h *Handlers) HandlePrioritizeSong(w http.ResponseWriter, r *http.Request) 
 	// Get state before prioritization
 	stateBefore, _ := h.queue.GetState(r.Context())
 
-	err := h.priority.PrioritizeSong(r.Context(), req.UserID, req.SongIndex)
+	// Server-resolved identity: the priority user is the token's user.
+	// A client cannot spend another user's priority tokens by spoofing user_id.
+	err := h.priority.PrioritizeSong(r.Context(), user.ID, req.SongIndex)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -508,7 +561,7 @@ func (h *Handlers) HandlePrioritizeSong(w http.ResponseWriter, r *http.Request) 
 	stateAfter, _ := h.queue.GetState(r.Context())
 
 	// Get user for balance
-	balance, _ := h.priority.GetUserPriorityBalance(r.Context(), req.UserID)
+	balance, _ := h.priority.GetUserPriorityBalance(r.Context(), user.ID)
 
 	// Find the prioritized song
 	targetIndex := stateBefore.CurrentIndex + 1
@@ -522,7 +575,7 @@ func (h *Handlers) HandlePrioritizeSong(w http.ResponseWriter, r *http.Request) 
 		FromIndex:   req.SongIndex,
 		ToIndex:     targetIndex,
 		Song:        song,
-		UserID:      req.UserID,
+		UserID:      user.ID,
 		UserBalance: balance,
 		Activity:    activity,
 	})
@@ -557,6 +610,11 @@ type VolumeRequest struct {
 }
 
 func (h *Handlers) HandleChangeVolume(w http.ResponseWriter, r *http.Request) {
+	if UserFromCtx(r.Context()) == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var req VolumeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -587,20 +645,25 @@ type VoteSkipRequest struct {
 }
 
 func (h *Handlers) HandleVoteSkip(w http.ResponseWriter, r *http.Request) {
+	user := UserFromCtx(r.Context())
+	if user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var req VoteSkipRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 
-	role := entity.Role(req.UserRole)
-	if !canVote(role) {
+	if !canVote(user.Role) {
 		http.Error(w, "only guests and admins can vote", http.StatusForbidden)
 		return
 	}
 
 	connectedUsers := h.hub.ConnectedCount()
-	outcome, err := h.vote.CastSkipVote(r.Context(), req.UserID, connectedUsers)
+	outcome, err := h.vote.CastSkipVote(r.Context(), user.ID, connectedUsers)
 	if err != nil {
 		if errors.Is(err, entity.ErrAlreadyVoted) {
 			http.Error(w, err.Error(), http.StatusConflict)
@@ -666,20 +729,25 @@ type VotePriorityRequest struct {
 }
 
 func (h *Handlers) HandleVotePriority(w http.ResponseWriter, r *http.Request) {
+	user := UserFromCtx(r.Context())
+	if user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var req VotePriorityRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 
-	role := entity.Role(req.UserRole)
-	if !canVote(role) {
+	if !canVote(user.Role) {
 		http.Error(w, "only guests and admins can vote", http.StatusForbidden)
 		return
 	}
 
 	connectedUsers := h.hub.ConnectedCount()
-	outcome, err := h.vote.CastPriorityVote(r.Context(), req.UserID, req.SongIndex, connectedUsers)
+	outcome, err := h.vote.CastPriorityVote(r.Context(), user.ID, req.SongIndex, connectedUsers)
 	if err != nil {
 		if errors.Is(err, entity.ErrAlreadyVoted) {
 			http.Error(w, err.Error(), http.StatusConflict)

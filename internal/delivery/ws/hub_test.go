@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"local-music-queue/internal/domain/entity"
 	"net/http"
 	"net/http/httptest"
@@ -333,17 +334,20 @@ func TestHub_RequestFullSync_SendsOnlyToRequester(t *testing.T) {
 	// Wait for registration to complete.
 	time.Sleep(50 * time.Millisecond)
 
-	// Requester sends request_full_sync.
+	// Requester sends request_full_sync. R05: the connection is
+	// unauthenticated (no session_token in dial URL), so the server
+	// must respond with an EventError envelope. The bystander must
+	// still receive nothing.
 	reqMsg := `{"type":"request_full_sync"}`
 	if err := requester.WriteMessage(websocket.TextMessage, []byte(reqMsg)); err != nil {
 		t.Fatalf("failed to send request_full_sync: %v", err)
 	}
 
-	// Requester should receive a full_sync response.
+	// Requester should receive an EventError response.
 	requester.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, data, err := requester.ReadMessage()
 	if err != nil {
-		t.Fatalf("requester: failed to read full_sync response: %v", err)
+		t.Fatalf("requester: failed to read response: %v", err)
 	}
 	var received struct {
 		Type string `json:"type"`
@@ -351,8 +355,8 @@ func TestHub_RequestFullSync_SendsOnlyToRequester(t *testing.T) {
 	if err := json.Unmarshal(data, &received); err != nil {
 		t.Fatalf("failed to unmarshal: %v", err)
 	}
-	if received.Type != EventFullSync {
-		t.Errorf("requester: expected type %q, got %q", EventFullSync, received.Type)
+	if received.Type != EventError {
+		t.Errorf("requester: expected type %q (R05: unauthenticated clients get EventError), got %q", EventError, received.Type)
 	}
 
 	// Bystander should NOT receive any message within a short window.
@@ -422,15 +426,19 @@ func TestHub_MalformedAndUnknownMessages_DoNotBlockFullSync(t *testing.T) {
 	}
 
 	// 3. Send a valid request_full_sync after the noise.
+	// R05: the connection is unauthenticated (no session_token in dial
+	// URL, no auth interactor wired in setupTestHubWithState), so the
+	// server must respond with an EventError envelope rather than a
+	// full_sync. The connection must remain open so spectators keep
+	// receiving broadcasts.
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"request_full_sync"}`)); err != nil {
 		t.Fatalf("failed to send request_full_sync: %v", err)
 	}
 
-	// The server must respond with a full_sync.
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
-		t.Fatalf("failed to read full_sync response: %v", err)
+		t.Fatalf("failed to read response: %v", err)
 	}
 
 	var received struct {
@@ -439,7 +447,94 @@ func TestHub_MalformedAndUnknownMessages_DoNotBlockFullSync(t *testing.T) {
 	if err := json.Unmarshal(data, &received); err != nil {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
-	if received.Type != EventFullSync {
-		t.Errorf("expected type %q after malformed/unknown messages, got %q", EventFullSync, received.Type)
+	if received.Type != EventError {
+		t.Errorf("expected type %q (R05: unauthenticated clients get EventError), got %q", EventError, received.Type)
+	}
+
+	// Connection must still be open — R05 must not break read-only
+	// spectators. A second read with a fresh deadline should not error
+	// out due to the server closing the connection.
+	conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		// We didn't expect a payload here; the read may either time out
+		// or return data. Either way the connection is still open, which
+		// is what we're checking.
+		_ = err
+	} else if !isTimeoutErr(err) {
+		t.Errorf("connection should remain open after rejection; got %v", err)
 	}
 }
+
+// isTimeoutErr reports whether err looks like a websocket read deadline
+// timeout. We accept both the gorilla and net error shapes to keep the
+// test robust.
+func isTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "i/o timeout") || strings.Contains(s, "deadline exceeded")
+}
+
+// TestHub_AuthenticatedRequestFullSync_Allowed covers the R05 happy path:
+// a client that connected with a valid session_token must be able to
+// issue request_full_sync and receive a full_sync envelope.
+func TestHub_AuthenticatedRequestFullSync_Allowed(t *testing.T) {
+	hub, server := setupTestHubWithState(t)
+	defer server.Close()
+
+	// Use a tiny stub SessionResolver that maps a single synthetic
+	// token to a fixed user. This keeps the test self-contained.
+	hub.SetAuthInteractor(&stubSessionResolver{
+		users: map[string]*entity.User{
+			"valid-token": {ID: 1, Role: entity.RoleHost, DisplayName: "AuthHost"},
+		},
+	})
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws?session_token=valid-token"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial ws with session_token: %v", err)
+	}
+	defer conn.Close()
+
+	// Drain initial full_sync.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("read initial sync: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"request_full_sync"}`)); err != nil {
+		t.Fatalf("send request_full_sync: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	var received struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &received); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if received.Type != EventFullSync {
+		t.Errorf("authenticated client: expected %q, got %q", EventFullSync, received.Type)
+	}
+}
+
+// stubSessionResolver is a minimal SessionResolver for hub tests.
+type stubSessionResolver struct {
+	users map[string]*entity.User
+}
+
+func (s *stubSessionResolver) ResolveSession(ctx context.Context, token string) (*entity.User, error) {
+	if u, ok := s.users[token]; ok {
+		return u, nil
+	}
+	return nil, errStubInvalid
+}
+
+// errStubInvalid is the test-only sentinel returned for unknown tokens.
+var errStubInvalid = errors.New("stub: invalid session token")

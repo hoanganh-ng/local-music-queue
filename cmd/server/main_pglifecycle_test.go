@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"local-music-queue/internal/domain/entity"
+	deliveryhttp "local-music-queue/internal/delivery/http"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -94,6 +95,12 @@ func TestSetupApp_PostgresDBStaysOpen(t *testing.T) {
 	// the yt-dlp fetch and goes straight to repo.Save. If setupApp closed
 	// the DB before returning, this Save fails with "sql: database is closed"
 	// and the handler responds 500.
+	//
+	// R05: the add route is now behind the auth middleware. We mint a
+	// session for a guest user via the same path the unit tests use, then
+	// inject the user into the request context because we are calling the
+	// mux directly (no HTTP server, so the round-trip Google login is
+	// not available).
 	body, _ := json.Marshal(map[string]interface{}{
 		"url":        "https://example.com/watch?v=test",
 		"added_by":   "lifecycle-test",
@@ -107,6 +114,7 @@ func TestSetupApp_PostgresDBStaysOpen(t *testing.T) {
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/queue/add", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req = deliveryhttp.WithUserForTest(req, &entity.User{ID: 1, Role: entity.RoleHost, DisplayName: "lifecycle-test"})
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 

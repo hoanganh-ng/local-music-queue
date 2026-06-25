@@ -28,8 +28,14 @@ type AutoQueueStatusResponse struct {
 	Strategy string `json:"strategy"`
 }
 
-// HandleToggleAutoQueue toggles auto-queue on/off (Host/Admin only).
+// HandleToggleAutoQueue toggles auto-queue on/off (Host/Admin only —
+// enforced by the RequireRole wrapper in the route wiring).
 func (h *AutoQueueHandlers) HandleToggleAutoQueue(w http.ResponseWriter, r *http.Request) {
+	if UserFromCtx(r.Context()) == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var req ToggleAutoQueueRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)

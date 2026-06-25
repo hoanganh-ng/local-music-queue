@@ -173,6 +173,7 @@ func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 
 	// 4. Initialize Delivery with queue state callback
 	hub := ws.NewHub(qInteractor.GetState)
+	hub.SetAuthInteractor(authInteractor)
 	go hub.Run() // Start WebSocket hub loop
 
 	// Wire auto-queue broadcaster to WS hub
@@ -191,27 +192,42 @@ func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 	// 5. Setup Routes
 	mux := http.NewServeMux()
 
+	// R05 — privileged REST routes use the shared auth middleware so identity
+	// is server-resolved from the bearer token. Role gates are applied to
+	// endpoints that are restricted to host/admin or to guest/admin.
+	//
+	// Role policy:
+	//   - Playback control (skip / status / sync / ended / prev / volume /
+	//     clear) is host/admin only.
+	//   - Auto-queue toggle is host/admin only.
+	//   - Voting (skip / prioritize) is guest/admin only.
+	//   - Add song, prioritize, and remove accept any authenticated user
+	//     (server-resolved identity is used for attribution / ownership).
+	auth := delivery.RequireAuth(authInteractor)
+	hostOrAdmin := delivery.RequireRole(entity.RoleHost, entity.RoleAdmin)
+	voterOrAdmin := delivery.RequireRole(entity.RoleGuest, entity.RoleAdmin)
+
 	// HTTP API
 	mux.HandleFunc("POST /api/auth/google", handlers.HandleGoogleLogin)
 	mux.HandleFunc("POST /api/auth", handlers.HandleLogin) // Deprecated
 	mux.HandleFunc("GET /api/queue", handlers.HandleGetQueue)
-	mux.HandleFunc("POST /api/queue/add", handlers.HandleAddSong)
-	mux.HandleFunc("POST /api/queue/skip", handlers.HandleSkipSong)
-	mux.HandleFunc("POST /api/queue/status", handlers.HandleSetStatus)
-	mux.HandleFunc("POST /api/queue/sync", handlers.HandleSyncPlayback)
-	mux.HandleFunc("POST /api/queue/ended", handlers.HandleSongEnded)
-	mux.HandleFunc("POST /api/queue/prev", handlers.HandlePrevSong)
-	mux.HandleFunc("POST /api/queue/remove", handlers.HandleRemoveSong)
-	mux.HandleFunc("POST /api/queue/clear", handlers.HandleClearQueue)
-	mux.HandleFunc("POST /api/queue/volume", handlers.HandleChangeVolume)
-	mux.HandleFunc("POST /api/queue/prioritize", handlers.HandlePrioritizeSong)
+	mux.HandleFunc("POST /api/queue/add", auth(handlers.HandleAddSong))
+	mux.HandleFunc("POST /api/queue/skip", auth(hostOrAdmin(handlers.HandleSkipSong)))
+	mux.HandleFunc("POST /api/queue/status", auth(hostOrAdmin(handlers.HandleSetStatus)))
+	mux.HandleFunc("POST /api/queue/sync", auth(hostOrAdmin(handlers.HandleSyncPlayback)))
+	mux.HandleFunc("POST /api/queue/ended", auth(hostOrAdmin(handlers.HandleSongEnded)))
+	mux.HandleFunc("POST /api/queue/prev", auth(hostOrAdmin(handlers.HandlePrevSong)))
+	mux.HandleFunc("POST /api/queue/remove", auth(handlers.HandleRemoveSong))
+	mux.HandleFunc("POST /api/queue/clear", auth(hostOrAdmin(handlers.HandleClearQueue)))
+	mux.HandleFunc("POST /api/queue/volume", auth(hostOrAdmin(handlers.HandleChangeVolume)))
+	mux.HandleFunc("POST /api/queue/prioritize", auth(handlers.HandlePrioritizeSong))
 	mux.HandleFunc("GET /api/user/priority-balance", handlers.HandleGetPriorityBalance)
 	mux.HandleFunc("GET /api/youtube/search", handlers.HandleSearchYouTube)
-	mux.HandleFunc("POST /api/vote/skip", handlers.HandleVoteSkip)
-	mux.HandleFunc("POST /api/vote/prioritize", handlers.HandleVotePriority)
+	mux.HandleFunc("POST /api/vote/skip", auth(voterOrAdmin(handlers.HandleVoteSkip)))
+	mux.HandleFunc("POST /api/vote/prioritize", auth(voterOrAdmin(handlers.HandleVotePriority)))
 
 	// Auto-queue API
-	mux.HandleFunc("POST /api/autoqueue/toggle", autoQueueHandlers.HandleToggleAutoQueue)
+	mux.HandleFunc("POST /api/autoqueue/toggle", auth(hostOrAdmin(autoQueueHandlers.HandleToggleAutoQueue)))
 	mux.HandleFunc("GET /api/autoqueue/status", autoQueueHandlers.HandleGetAutoQueueStatus)
 
 	// Room API (R04) — all routes require a valid bearer token; the resolved

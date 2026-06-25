@@ -22,6 +22,10 @@ const (
 	EventVoteResolved           = "vote_resolved"
 	EventAutoQueueAdded         = "auto_queue_added"
 	EventAutoQueueConfigChanged = "auto_queue_config_changed"
+	// EventError is sent to a client when the server rejects an inbound
+	// action (e.g. unauthenticated request_full_sync, role mismatch on a
+	// future privileged client message). R05 addition; purely additive.
+	EventError = "error"
 )
 
 // UserJoinedData contains only the new user info
@@ -164,4 +168,13 @@ type AutoQueueConfigChangedData struct {
 // message-type-specific and decoded separately.
 type ClientMessage struct {
 	Type string `json:"type"`
+}
+
+// ErrorData is sent to a client when the server rejects an inbound action.
+// R05 introduces this envelope so unauthorized WebSocket attempts receive a
+// structured rejection instead of being silently dropped. Pre-existing 16
+// event types are unchanged; EventError is purely additive.
+type ErrorData struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }

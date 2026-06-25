@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -93,9 +94,13 @@ func TestAPIIntegration_ServerStarts(t *testing.T) {
 	}
 	os.Setenv("DATABASE_URL", scopedDSN)
 	os.Setenv("YTDLP_PATH", ytPath)
+	if os.Getenv("GOOGLE_CLIENT_ID") == "" {
+		os.Setenv("GOOGLE_CLIENT_ID", "test-client-id")
+	}
 	t.Cleanup(func() {
 		os.Unsetenv("DATABASE_URL")
 		os.Unsetenv("YTDLP_PATH")
+		os.Unsetenv("GOOGLE_CLIENT_ID")
 	})
 
 	mux, _, cleanup, err := setupApp()
@@ -122,11 +127,75 @@ func TestAPIIntegration_ServerStarts(t *testing.T) {
 	}
 }
 
-// TestAPIIntegration_QueueREST exercises the queue add + get round trip
-// against the real PostgreSQL backend via the real handlers and mux wired
-// by setupApp. The PIN login path is intentionally avoided; the test uses
-// the AddSong handler which (per handlers.go) accepts an `added_by` field
-// directly without requiring a session.
+// mintTestSessionToken drives the real POST /api/auth/google endpoint with a
+// mocked Google tokeninfo response and returns the session_token issued by
+// the live server. R05 — every privileged REST route now requires a valid
+// bearer token, so integration tests must obtain one the same way real
+// clients do.
+func mintTestSessionToken(t *testing.T, server *httptest.Server, email string) string {
+	t.Helper()
+	// The auth interactor verifies aud == configured client ID. The
+	// setupApp call above loaded whatever GOOGLE_CLIENT_ID was in the
+	// environment; the mocked tokeninfo below always reports
+	// "test-client-id". Set both consistently.
+	if os.Getenv("GOOGLE_CLIENT_ID") == "" {
+		t.Setenv("GOOGLE_CLIENT_ID", "test-client-id")
+	}
+	oldTransport := http.DefaultClient.Transport
+	t.Cleanup(func() { http.DefaultClient.Transport = oldTransport })
+
+	http.DefaultClient.Transport = roundTripGoogleTokenInfo(t, email)
+
+	body, _ := json.Marshal(map[string]string{"id_token": "test-id-token"})
+	resp, err := server.Client().Post(server.URL+"/api/auth/google", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /api/auth/google: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/api/auth/google status = %d, want 200", resp.StatusCode)
+	}
+	var parsed struct {
+		SessionToken string `json:"session_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	if parsed.SessionToken == "" {
+		t.Fatalf("login response missing session_token")
+	}
+	return parsed.SessionToken
+}
+
+// roundTripGoogleTokenInfo returns a RoundTripper that fakes a successful
+// Google tokeninfo response. The test email must end in @urekamedia.vn to
+// pass the auth interactor's domain check.
+func roundTripGoogleTokenInfo(t *testing.T, email string) roundTripFunc {
+	t.Helper()
+	return func(req *http.Request) (*http.Response, error) {
+		if !strings.Contains(req.URL.String(), "oauth2.googleapis.com/tokeninfo") {
+			return nil, fmt.Errorf("unexpected outbound URL in test transport: %s", req.URL.String())
+		}
+		tokenInfo := fmt.Sprintf(`{
+			"email": %q,
+			"name": "Integration Tester",
+			"picture": "http://example.com/p.jpg",
+			"aud": "test-client-id",
+			"email_verified": "true"
+		}`, email)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(tokenInfo)),
+			Header:     make(http.Header),
+		}, nil
+	}
+}
+
+type roundTripFunc func(req *http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 func TestAPIIntegration_QueueREST(t *testing.T) {
 	scopedDSN := apiTestDB(t)
 
@@ -136,9 +205,16 @@ func TestAPIIntegration_QueueREST(t *testing.T) {
 	}
 	os.Setenv("DATABASE_URL", scopedDSN)
 	os.Setenv("YTDLP_PATH", ytPath)
+	// R05: setupApp reads GOOGLE_CLIENT_ID once at startup; the auth
+	// interactor's aud check needs it to match the mocked tokeninfo
+	// response ("test-client-id").
+	if os.Getenv("GOOGLE_CLIENT_ID") == "" {
+		os.Setenv("GOOGLE_CLIENT_ID", "test-client-id")
+	}
 	t.Cleanup(func() {
 		os.Unsetenv("DATABASE_URL")
 		os.Unsetenv("YTDLP_PATH")
+		os.Unsetenv("GOOGLE_CLIENT_ID")
 	})
 
 	mux, _, cleanup, err := setupApp()
@@ -150,12 +226,16 @@ func TestAPIIntegration_QueueREST(t *testing.T) {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
+	// R05: obtain a valid session token via the real Google login path.
+	token := mintTestSessionToken(t, server, "integration-tester@urekamedia.vn")
+
 	addBody, _ := json.Marshal(deliveryhttp.AddSongRequest{
 		URL:     "https://www.youtube.com/watch?v=test123",
 		AddedBy: "IntegrationTester",
 	})
 	addReq, _ := http.NewRequest(http.MethodPost, server.URL+"/api/queue/add", bytes.NewReader(addBody))
 	addReq.Header.Set("Content-Type", "application/json")
+	addReq.Header.Set("Authorization", "Bearer "+token)
 	addResp, err := server.Client().Do(addReq)
 	if err != nil {
 		t.Fatalf("POST /api/queue/add: %v", err)
@@ -196,9 +276,13 @@ func TestAPIIntegration_WebSocketBroadcast(t *testing.T) {
 	}
 	os.Setenv("DATABASE_URL", scopedDSN)
 	os.Setenv("YTDLP_PATH", ytPath)
+	if os.Getenv("GOOGLE_CLIENT_ID") == "" {
+		os.Setenv("GOOGLE_CLIENT_ID", "test-client-id")
+	}
 	t.Cleanup(func() {
 		os.Unsetenv("DATABASE_URL")
 		os.Unsetenv("YTDLP_PATH")
+		os.Unsetenv("GOOGLE_CLIENT_ID")
 	})
 
 	mux, _, cleanup, err := setupApp()
@@ -224,13 +308,28 @@ func TestAPIIntegration_WebSocketBroadcast(t *testing.T) {
 		t.Fatalf("read initial sync: %v", err)
 	}
 
-	msgChan := make(chan []byte, 1)
+	// R05: a Google login happens later in the test (to mint the session
+	// token) and broadcasts a user_joined event. Drain that and any other
+	// pre-song_added messages, looking for song_added with a short timeout.
+	msgChan := make(chan []byte, 8)
+	stop := make(chan struct{})
 	go func() {
-		_, message, rerr := wsConn.ReadMessage()
-		if rerr == nil {
-			msgChan <- message
+		for {
+			_, message, rerr := wsConn.ReadMessage()
+			if rerr != nil {
+				close(stop)
+				return
+			}
+			select {
+			case msgChan <- message:
+			case <-stop:
+				return
+			}
 		}
 	}()
+
+	// R05: obtain a valid session token for the privileged add endpoint.
+	token := mintTestSessionToken(t, server, "ws-tester@urekamedia.vn")
 
 	addBody, _ := json.Marshal(deliveryhttp.AddSongRequest{
 		URL:     "https://www.youtube.com/watch?v=test123",
@@ -238,6 +337,7 @@ func TestAPIIntegration_WebSocketBroadcast(t *testing.T) {
 	})
 	addReq, _ := http.NewRequest(http.MethodPost, server.URL+"/api/queue/add", bytes.NewReader(addBody))
 	addReq.Header.Set("Content-Type", "application/json")
+	addReq.Header.Set("Authorization", "Bearer "+token)
 	addResp, err := server.Client().Do(addReq)
 	if err != nil {
 		t.Fatalf("POST /api/queue/add: %v", err)
@@ -247,12 +347,16 @@ func TestAPIIntegration_WebSocketBroadcast(t *testing.T) {
 		t.Errorf("POST /api/queue/add status = %d, want 200", addResp.StatusCode)
 	}
 
-	select {
-	case msg := <-msgChan:
-		if !strings.Contains(string(msg), ws.EventSongAdded) {
-			t.Errorf("expected broadcast containing %q, got: %s", ws.EventSongAdded, string(msg))
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case msg := <-msgChan:
+			if strings.Contains(string(msg), ws.EventSongAdded) {
+				return
+			}
+			// otherwise keep draining until we see song_added
+		case <-deadline:
+			t.Fatal("timed out waiting for song_added broadcast")
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for song_added broadcast")
 	}
 }

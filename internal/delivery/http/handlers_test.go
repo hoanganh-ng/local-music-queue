@@ -16,6 +16,7 @@ import (
 	"local-music-queue/internal/infrastructure/youtube"
 	"local-music-queue/internal/usecase/activity"
 	"local-music-queue/internal/usecase/auth"
+	"local-music-queue/internal/usecase/autoqueue"
 	"local-music-queue/internal/usecase/priority"
 	"local-music-queue/internal/usecase/queue"
 	"local-music-queue/internal/usecase/vote"
@@ -190,13 +191,14 @@ func TestHandleAddSong_Success(t *testing.T) {
 		t.Skip("skipping on windows: requires shell scripts")
 	}
 
-	h := newTestHandlers(t)
+	tc := newTestContext(t)
 
 	body, _ := json.Marshal(AddSongRequest{URL: "https://youtube.com/watch?v=test", AddedBy: "Alice"})
 	req := httptest.NewRequest(http.MethodPost, "/api/queue/add", bytes.NewReader(body))
+	req = withUserCtx(req, tc.guestUser)
 	rr := httptest.NewRecorder()
 
-	h.HandleAddSong(rr, req)
+	tc.handlers.HandleAddSong(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d; body: %s", rr.Code, rr.Body.String())
@@ -204,12 +206,13 @@ func TestHandleAddSong_Success(t *testing.T) {
 }
 
 func TestHandleAddSong_BadJSON(t *testing.T) {
-	h := newTestHandlers(t)
+	tc := newTestContext(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/queue/add", bytes.NewReader([]byte("bad")))
+	req = withUserCtx(req, tc.guestUser)
 	rr := httptest.NewRecorder()
 
-	h.HandleAddSong(rr, req)
+	tc.handlers.HandleAddSong(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", rr.Code)
@@ -223,22 +226,24 @@ func TestHandleSkipSong_Success(t *testing.T) {
 		t.Skip("skipping on windows")
 	}
 
-	h := newTestHandlers(t)
+	tc := newTestContext(t)
 
-	// First add two songs
+	// First add two songs (any auth role can add; use host for simplicity)
 	for i := 0; i < 2; i++ {
-		body, _ := json.Marshal(AddSongRequest{URL: "url", AddedBy: "Alice"})
+		body, _ := json.Marshal(AddSongRequest{URL: "url", AddedBy: "HostUser"})
 		req := httptest.NewRequest(http.MethodPost, "/api/queue/add", bytes.NewReader(body))
+		req = withUserCtx(req, tc.hostUser)
 		rr := httptest.NewRecorder()
-		h.HandleAddSong(rr, req)
+		tc.handlers.HandleAddSong(rr, req)
 	}
 
-	// Now skip
-	body, _ := json.Marshal(SkipRequest{RequestedBy: "Alice"})
+	// Now skip with a host user (playback control is host/admin)
+	body, _ := json.Marshal(SkipRequest{RequestedBy: "HostUser"})
 	req := httptest.NewRequest(http.MethodPost, "/api/queue/skip", bytes.NewReader(body))
+	req = withUserCtx(req, tc.hostUser)
 	rr := httptest.NewRecorder()
 
-	h.HandleSkipSong(rr, req)
+	tc.handlers.HandleSkipSong(rr, req)
 
 	if rr.Code != http.StatusNoContent {
 		t.Errorf("expected 204, got %d; body: %s", rr.Code, rr.Body.String())
@@ -246,17 +251,28 @@ func TestHandleSkipSong_Success(t *testing.T) {
 }
 
 func TestHandleSkipSong_Error(t *testing.T) {
-	h := newTestHandlers(t)
+	tc := newTestContext(t)
 
-	// Skip on empty queue should fail
-	body, _ := json.Marshal(SkipRequest{RequestedBy: "Alice"})
-	req := httptest.NewRequest(http.MethodPost, "/api/queue/skip", bytes.NewReader(body))
-	rr := httptest.NewRecorder()
-
-	h.HandleSkipSong(rr, req)
-
-	if rr.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500, got %d", rr.Code)
+	// Skip on empty queue should fail. The handler needs an authenticated
+	// user (host) to reach the interactor. newTestContext seeds 3 songs so
+	// the empty-queue error path requires a fresh repo. Use the standard
+	// path: skip the current song; the queue only has the current + 2
+	// upcoming, so this advances to the next song (204), not 500. To still
+	// exercise the "no next song" error path, skip until the queue is
+	// exhausted.
+	for {
+		body, _ := json.Marshal(SkipRequest{RequestedBy: "HostUser"})
+		req := httptest.NewRequest(http.MethodPost, "/api/queue/skip", bytes.NewReader(body))
+		req = withUserCtx(req, tc.hostUser)
+		rr := httptest.NewRecorder()
+		tc.handlers.HandleSkipSong(rr, req)
+		if rr.Code != http.StatusNoContent {
+			// We expect a final 500 when there is no next song.
+			if rr.Code != http.StatusInternalServerError {
+				t.Errorf("expected 500 after exhausting queue, got %d; body: %s", rr.Code, rr.Body.String())
+			}
+			return
+		}
 	}
 }
 
@@ -267,19 +283,21 @@ func TestHandleSetStatus_Success(t *testing.T) {
 		t.Skip("skipping on windows")
 	}
 
-	h := newTestHandlers(t)
+	tc := newTestContext(t)
 
 	// Add a song first
-	addBody, _ := json.Marshal(AddSongRequest{URL: "url", AddedBy: "Alice"})
+	addBody, _ := json.Marshal(AddSongRequest{URL: "url", AddedBy: "HostUser"})
 	addReq := httptest.NewRequest(http.MethodPost, "/api/queue/add", bytes.NewReader(addBody))
-	h.HandleAddSong(httptest.NewRecorder(), addReq)
+	addReq = withUserCtx(addReq, tc.hostUser)
+	tc.handlers.HandleAddSong(httptest.NewRecorder(), addReq)
 
-	// Set status
-	body, _ := json.Marshal(StatusRequest{Status: entity.StatusPaused, RequestedBy: "Alice"})
+	// Set status (host)
+	body, _ := json.Marshal(StatusRequest{Status: entity.StatusPaused, RequestedBy: "HostUser"})
 	req := httptest.NewRequest(http.MethodPost, "/api/queue/status", bytes.NewReader(body))
+	req = withUserCtx(req, tc.hostUser)
 	rr := httptest.NewRecorder()
 
-	h.HandleSetStatus(rr, req)
+	tc.handlers.HandleSetStatus(rr, req)
 
 	if rr.Code != http.StatusNoContent {
 		t.Errorf("expected 204, got %d; body: %s", rr.Code, rr.Body.String())
@@ -287,17 +305,29 @@ func TestHandleSetStatus_Success(t *testing.T) {
 }
 
 func TestHandleSetStatus_Error(t *testing.T) {
-	h := newTestHandlers(t)
+	tc := newTestContext(t)
 
-	// On empty queue, transitioning to "playing" should be invalid
-	body, _ := json.Marshal(StatusRequest{Status: entity.StatusPlaying, RequestedBy: "Alice"})
+	// newTestContext seeds 3 songs with vid0 currently playing, so a
+	// transition to "playing" is valid and returns 204. To exercise the
+	// error path we need an empty queue. We use a fresh repo for that.
+	r := newTestRepo(t)
+	queueInteractor := queue.NewInteractor(r.queue, nil)
+	authInteractor := auth.NewInteractor(r.user, "test-client-id", []string{"host@example.com"}, []string{"admin@example.com"}, tc.sessionStore, tc.sessionClock)
+	actInteractor := activity.NewInteractor(r.queue)
+	priorityInteractor := priority.NewInteractor(r.user, r.queue)
+	voteInteractor := vote.NewInteractor(r.queue, r.user, 0)
+	handlers := NewHandlers(queueInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, &mockBroadcaster{})
+
+	// Empty queue: "playing" is an invalid transition -> 500.
+	body, _ := json.Marshal(StatusRequest{Status: entity.StatusPlaying, RequestedBy: "HostUser"})
 	req := httptest.NewRequest(http.MethodPost, "/api/queue/status", bytes.NewReader(body))
+	req = withUserCtx(req, tc.hostUser)
 	rr := httptest.NewRecorder()
 
-	h.HandleSetStatus(rr, req)
+	handlers.HandleSetStatus(rr, req)
 
 	if rr.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500, got %d", rr.Code)
+		t.Errorf("expected 500 on empty queue, got %d; body: %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -412,6 +442,16 @@ func intPtr(v int) *int {
 	return &v
 }
 
+// withUserCtx injects a resolved *entity.User into the request context so
+// privileged handlers (which call UserFromCtx) see an authenticated caller
+// even when a test invokes the handler directly without going through the
+// RequireAuth middleware. This keeps existing tests focused on handler
+// behavior; the middleware itself is covered by auth_middleware_test.go.
+func withUserCtx(req *http.Request, user *entity.User) *http.Request {
+	ctx := context.WithValue(req.Context(), userKey{}, user)
+	return req.WithContext(ctx)
+}
+
 type mockBroadcaster struct {
 	broadcasts []struct {
 		eventType string
@@ -459,24 +499,25 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 type testContext struct {
-	t               *testing.T
-	dir             string
-	repo            *testRepo
-	userRepo        repository.UserRepository
-	sessionClock    auth.RealClock
-	sessionStore    auth.SessionStore
-	queueInteractor *queue.Interactor
-	authInteractor  *auth.Interactor
-	handlers        *Handlers
-	broadcaster     *mockBroadcaster
-	guestUser       *entity.User
-	otherGuestUser  *entity.User
-	hostUser        *entity.User
-	adminUser       *entity.User
-	guestToken      string
-	otherGuestToken string
-	hostToken       string
-	adminToken      string
+	t                 *testing.T
+	dir               string
+	repo              *testRepo
+	userRepo          repository.UserRepository
+	sessionClock      auth.RealClock
+	sessionStore      auth.SessionStore
+	queueInteractor   *queue.Interactor
+	authInteractor    *auth.Interactor
+	handlers          *Handlers
+	autoQueueHandlers *AutoQueueHandlers
+	broadcaster       *mockBroadcaster
+	guestUser         *entity.User
+	otherGuestUser    *entity.User
+	hostUser          *entity.User
+	adminUser         *entity.User
+	guestToken        string
+	otherGuestToken   string
+	hostToken         string
+	adminToken        string
 }
 
 func newTestContext(t *testing.T) *testContext {
@@ -507,7 +548,33 @@ EOF
 	actInteractor := activity.NewInteractor(r.queue)
 	priorityInteractor := priority.NewInteractor(r.user, r.queue)
 	voteInteractor := vote.NewInteractor(r.queue, r.user, 0)
+	// Auto-queue interactor needs a real fetcher and the add-song callback
+	// wired up so SetEnabled / GetConfig work end-to-end in R05 tests.
+	autoQueueInteractor := autoqueue.NewInteractor(r.autoQueue, r.queue, nil)
+	autoQueueInteractor.SetAddAutoQueueSongFunc(func(ctx context.Context, song *entity.Song, expectedSourceSongID string) (*autoqueue.AddSongResult, error) {
+		res, err := queueInteractor.AddAutoQueueSong(ctx, song, expectedSourceSongID)
+		if err != nil {
+			return nil, err
+		}
+		return &autoqueue.AddSongResult{
+			Song:         res.Song,
+			Position:     res.Position,
+			CurrentIndex: res.CurrentIndex,
+			CurrentSong:  res.CurrentSong,
+			Status:       res.Status,
+			Elapsed:      res.Elapsed,
+			Activity:     res.Activity,
+		}, nil
+	})
 	mockHub := &mockBroadcaster{}
+	// AutoQueueHandlers needs a concrete *ws.Hub for the broadcaster
+	// reference. The test asserts zero broadcasts on auth rejection via
+	// the mock broadcaster wired into Handlers; the auto-queue handler
+	// uses this separate hub for the auto_queue_config_changed
+	// broadcast which the auto-queue tests inspect.
+	realHub := ws.NewHub(queueInteractor.GetState)
+	go realHub.Run()
+	autoQueueHandlers := NewAutoQueueHandlers(autoQueueInteractor, realHub)
 
 	handlers := NewHandlers(queueInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, mockHub)
 
@@ -585,24 +652,25 @@ EOF
 	}
 
 	return &testContext{
-		t:               t,
-		dir:             dir,
-		repo:            r,
-		userRepo:        userRepo,
-		sessionClock:    sessionClock,
-		sessionStore:    sessionStore,
-		queueInteractor: queueInteractor,
-		authInteractor:  authInteractor,
-		handlers:        handlers,
-		broadcaster:     mockHub,
-		guestUser:       guestUser,
-		otherGuestUser:  otherGuestUser,
-		hostUser:        hostUser,
-		adminUser:       adminUser,
-		guestToken:      guestToken,
-		otherGuestToken: otherGuestToken,
-		hostToken:       hostToken,
-		adminToken:      adminToken,
+		t:                 t,
+		dir:               dir,
+		repo:              r,
+		userRepo:          userRepo,
+		sessionClock:      sessionClock,
+		sessionStore:      sessionStore,
+		queueInteractor:   queueInteractor,
+		authInteractor:    authInteractor,
+		handlers:          handlers,
+		autoQueueHandlers: autoQueueHandlers,
+		broadcaster:       mockHub,
+		guestUser:         guestUser,
+		otherGuestUser:    otherGuestUser,
+		hostUser:          hostUser,
+		adminUser:         adminUser,
+		guestToken:        guestToken,
+		otherGuestToken:   otherGuestToken,
+		hostToken:         hostToken,
+		adminToken:        adminToken,
 	}
 }
 
@@ -945,11 +1013,15 @@ func TestHandleVoteSkip_LiveUpdateIsNotInitialSync(t *testing.T) {
 	tc := newTestContext(t)
 	tc.broadcaster.connectedCount = 3
 
+	// R05: server-resolved identity. The handler ignores body user_id /
+	// user_role; the request must inject the guest user so the canVote
+	// role check passes.
 	body, _ := json.Marshal(VoteSkipRequest{
 		UserID:   tc.guestUser.ID,
 		UserRole: string(entity.RoleGuest),
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/vote/skip", bytes.NewReader(body))
+	req = withUserCtx(req, tc.guestUser)
 	rr := httptest.NewRecorder()
 
 	tc.handlers.HandleVoteSkip(rr, req)
@@ -1086,6 +1158,7 @@ func TestHandleAddSong_BroadcastCarriesAuthoritativeFields(t *testing.T) {
 		},
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/queue/add", bytes.NewReader(body))
+	req = withUserCtx(req, tc.hostUser)
 	rr := httptest.NewRecorder()
 	tc.handlers.HandleAddSong(rr, req)
 
@@ -1120,7 +1193,9 @@ func TestHandleAddSong_BroadcastCarriesAuthoritativeFields(t *testing.T) {
 	if data.Status != entity.StatusPlaying {
 		t.Errorf("expected Status playing, got %s", data.Status)
 	}
-	if data.Activity.Type != entity.ActivitySongAdded || data.Activity.User != "Alice" {
-		t.Errorf("expected ActivitySongAdded for Alice, got %+v", data.Activity)
+	// R05: server-resolved identity. The handler ignores the body AddedBy
+	// "Alice" and uses the authenticated user's display name (HostUser).
+	if data.Activity.Type != entity.ActivitySongAdded || data.Activity.User != "HostUser" {
+		t.Errorf("expected ActivitySongAdded for HostUser, got %+v", data.Activity)
 	}
 }
