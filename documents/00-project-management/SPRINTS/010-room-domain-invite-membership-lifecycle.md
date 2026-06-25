@@ -37,7 +37,7 @@ Add first-class backend room concepts — rooms, room_members, and room_invites 
   - `DELETE /api/rooms/{slug}/invites/{inviteId}` — revoke invite (host/admin only).
   - `POST /api/invites/{token}/redeem` — redeem invite token, join as guest (atomic: insert member + increment use_count in one transaction).
   - `POST /api/rooms/{slug}/members/{userId}/promote` — promote member to admin (host only).
-  - `POST /api/rooms/{slug}/members/{userId}/demote` — demote host/admin to guest (host only).
+  - `POST /api/rooms/{slug}/members/{userId}/demote` — demote admin to guest (host only).
 - Status codes: 201 created, 200 ok, 204 no content, 400 bad request (invalid slug, past/over-30d expiry, negative max_uses), 401 unauthorized, 403 forbidden (non-member / non-host / non-host-admin), 404 not found (room, member, invite), 409 conflict (slug taken, archived room mutation), 410 gone (invite exhausted), 500 internal error.
 - Exactly-one-host invariant enforced at SQL partial-unique-index AND use case layer.
 - Invite tokens: 128-bit random, SHA-256 hashed (base64url), stored in `room_invites.token_hash`. Plaintext returned only from `POST /api/rooms/{slug}/invites`.

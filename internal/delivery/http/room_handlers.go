@@ -123,7 +123,7 @@ func (h *RoomHandlers) HandleGetRoom(w http.ResponseWriter, r *http.Request, slu
 }
 
 // HandleListMembers: GET /api/rooms/{slug}/members — any active member may
-// list members per ADR 001. Host/admin gate is enforced by the interactor.
+// list members per ADR 001. Active-membership gate is enforced by the interactor.
 func (h *RoomHandlers) HandleListMembers(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
 	if actorUserID == 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
