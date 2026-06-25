@@ -115,17 +115,28 @@ Add first-class backend room concepts — rooms, room_members, and room_invites 
 
 ## Verification Results (R04)
 
-_Placeholder — to be filled by Task 11 after the sprint record lands._
+Verification was run against the per-test `search_path`-scoped PostgreSQL schema. The pre-existing `letsencrypt-backend/accounts: permission denied` blocker documented in `PROJECT_STATE.md` remains orthogonal to R04 and is tracked separately (consistent with the R03 closure record). R04 does not silently shrink the acceptance gate.
 
-The scoped fallback subset below will be verified against the per-test `search_path`-scoped PostgreSQL schema. The full-suite `go test ./...` / `go test -race ./...` / `go vet ./...` remain blocked by the pre-existing `letsencrypt-backend/accounts: permission denied` filesystem permission issue documented in `PROJECT_STATE.md`; that blocker is orthogonal to R04 and is tracked separately. R04 does not silently shrink the acceptance gate; any shrink is recorded as a known deviation, consistent with the R03 closure record.
-
-- `go build ./cmd/...` — PASS (no output)
+- `go build ./cmd/... ./internal/...` — PASS (no output)
 - `go vet ./cmd/... ./internal/...` — PASS (no output)
-- `LMQ_TEST_DATABASE_URL=... go test ./internal/infrastructure/config ./internal/infrastructure/persistence ./internal/infrastructure/session ./internal/usecase/queue ./internal/usecase/auth ./internal/delivery/http` — all `ok`
-- `LMQ_TEST_DATABASE_URL=... go test -race ./internal/infrastructure/config ./internal/infrastructure/persistence ./internal/infrastructure/session ./internal/usecase/queue ./internal/usecase/auth ./internal/delivery/http` — all `ok`
-- `LMQ_TEST_DATABASE_URL=... go test ./internal/infrastructure/persistence -run 'TestPostgresMigration_CleanSchema|TestPostgresMigration_DownThenUp' -v` — `TestPostgresMigration_CleanSchema` PASS, `TestPostgresMigration_DownThenUp` PASS
+- `go test ./internal/domain/entity` — PASS (`TestRoom_IsValidSlug`, `TestRoom_IsReservedSlug`)
+- `LMQ_TEST_DATABASE_URL=postgres://lmq:devpassword@localhost:5432/lmq?sslmode=disable go test ./internal/usecase/room -v` — 6/6 PASS (create room active+host, invalid slug, duplicate slug, promote/demote permissions, archived-room rejection, invite create/redeem/revoke/expiry/max-uses)
+- `LMQ_TEST_DATABASE_URL=... go test ./internal/infrastructure/persistence -run 'TestPostgresRoom_|TestPostgresMigration' -v` — 8/8 PASS (`CleanSchema` v4, `DownThenUp` v3→v0→v4, `DownThenUp_Rooms` v4→v3→v4, create+host+unique slug, one-host invariant, list+archive, invite lifecycle, count hosts)
+- `LMQ_TEST_DATABASE_URL=... go test ./internal/delivery/http -run 'TestRoomHandler_' -v` — 8/8 PASS (create success/reserved/invalid, list, get 404, list members 401, promote non-host 403, redeem generic 404)
+- `YTDLP_PATH=... LMQ_TEST_DATABASE_URL=... go test ./cmd/server -run 'TestSetupApp|TestSetupApp_PostgresDBStaysOpen'` — PASS
+- `LMQ_TEST_DATABASE_URL=... go test -race ./internal/usecase/room ./internal/infrastructure/persistence ./internal/delivery/http` — all PASS
+- `LMQ_TEST_DATABASE_URL=... go test ./internal/usecase/queue ./internal/usecase/auth ./internal/infrastructure/session ./internal/delivery/http` — all PASS (no regression on prior surfaces)
 - `git diff --check` — PASS (no whitespace/indent warnings)
 - `git status --short` — clean after the closure pass
+
+### Confirmation: parity with pre-R04 surfaces
+
+- REST endpoints: the 19 endpoints from the Sprint 003 baseline plus the 10 new room routes (29 total) are registered with their documented paths and methods.
+- WebSocket: `/ws` route and the 16-event envelope remain unchanged.
+- Queue JSON shape: the single global `queue_state` blob is still the source of truth; no `room_id` columns were added.
+- In-memory behavior: vote sessions remain in-memory (30s expiry); auto-queue single-flight remains in-process; session store remains in-memory.
+- Configuration: `DATABASE_URL` (with `POSTGRES_*` overrides) is required; PostgreSQL schema version is now 4 after the new migration.
+- `users.legacy_id` and `migration_marker` are untouched (R06 owns those changes).
 
 ## Verification points
 
