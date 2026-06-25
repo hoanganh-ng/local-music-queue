@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -168,8 +169,11 @@ func (h *RoomHandlers) HandleCreateInvite(w http.ResponseWriter, r *http.Request
 	}
 	var req inviteReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		// Empty body is allowed; defaults will be applied.
-		req = inviteReq{}
+		if !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		// io.EOF = empty body; defaults will be applied.
 	}
 	if req.ExpiresAt.IsZero() {
 		req.ExpiresAt = time.Time{}
