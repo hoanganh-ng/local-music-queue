@@ -18,7 +18,7 @@ func TestPostgresMigration_CleanSchema(t *testing.T) {
 		t.Fatalf("second migrate up should be no-op: %v", err)
 	}
 
-	// Version subcommand must report 3 (0001_initial + 0002_legacy_id + 0003_migration_marker).
+	// Version subcommand must report 4 (0001_initial + 0002_legacy_id + 0003_migration_marker + 0004_rooms).
 	v, dirty, err := EmbeddedMigrationsVersion(db)
 	if err != nil {
 		t.Fatalf("read version: %v", err)
@@ -26,11 +26,11 @@ func TestPostgresMigration_CleanSchema(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema unexpectedly dirty")
 	}
-	if v != 3 {
-		t.Fatalf("expected version=3 after first migration, got %d", v)
+	if v != 4 {
+		t.Fatalf("expected version=4 after first migration, got %d", v)
 	}
 
-	// Verify all seven tables exist.
+	// Verify all ten tables exist.
 	want := []string{
 		"queue_state",
 		"activities",
@@ -39,6 +39,9 @@ func TestPostgresMigration_CleanSchema(t *testing.T) {
 		"priority_transactions",
 		"auto_queue_config",
 		"play_history",
+		"rooms",
+		"room_members",
+		"room_invites",
 	}
 	for _, table := range want {
 		var exists bool
@@ -149,5 +152,58 @@ func TestPostgresMigration_DownThenUp(t *testing.T) {
 	}
 	if v != 3 {
 		t.Errorf("expected version=3 after re-up, got %d", v)
+	}
+}
+
+func TestPostgresMigration_DownThenUp_Rooms(t *testing.T) {
+	db := newPostgresDB(t)
+
+	if err := RunEmbeddedMigrationsUp(db); err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+	v, _, err := EmbeddedMigrationsVersion(db)
+	if err != nil {
+		t.Fatalf("read version: %v", err)
+	}
+	if v != 4 {
+		t.Fatalf("expected version=4, got %d", v)
+	}
+
+	// Step down 1 — only 0004_rooms reverses.
+	if err := RunEmbeddedMigrationsDown(db, 1); err != nil {
+		t.Fatalf("migrate down 1: %v", err)
+	}
+	v, _, err = EmbeddedMigrationsVersion(db)
+	if err != nil {
+		t.Fatalf("read version after down: %v", err)
+	}
+	if v != 3 {
+		t.Fatalf("expected version=3 after stepping down 0004, got %d", v)
+	}
+
+	// Verify the three new tables are gone.
+	for _, table := range []string{"rooms", "room_members", "room_invites"} {
+		var exists bool
+		if err := db.QueryRow(`SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema = current_schema() AND table_name = $1
+		)`, table).Scan(&exists); err != nil {
+			t.Fatalf("query %s: %v", table, err)
+		}
+		if exists {
+			t.Errorf("expected table %q to be dropped after 0004 down", table)
+		}
+	}
+
+	// Re-apply — must come back to v4.
+	if err := RunEmbeddedMigrationsUp(db); err != nil {
+		t.Fatalf("re-migrate up: %v", err)
+	}
+	v, _, err = EmbeddedMigrationsVersion(db)
+	if err != nil {
+		t.Fatalf("read version after re-up: %v", err)
+	}
+	if v != 4 {
+		t.Fatalf("expected version=4 after re-up, got %d", v)
 	}
 }
