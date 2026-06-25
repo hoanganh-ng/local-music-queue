@@ -14,9 +14,10 @@ This `PROJECT_STATE.md` document is the authoritative documentation snapshot for
 The project follows a Clean Architecture pattern in Go (Domain, Usecase, Infrastructure, Delivery) for the backend, paired with a Vue 3 frontend using Vite. Real-time updates are handled via WebSocket delta broadcasting. 
 
 ## Deployment Topology
-Current deployment topology consists of a two-service direct-HTTPS deployment orchestrating via Docker Compose. The Compose service names are `backend` and `frontend`, and their configured container names are `music-queue-backend` and `music-queue-frontend`.
+Current deployment topology consists of a two-service direct-HTTPS deployment orchestrating via Docker Compose. The Compose service names are `backend` and `frontend`, and their configured container names are `music-queue-backend` and `music-queue-frontend`. The Compose stack also includes the `postgres` service and the `db-init` one-shot job introduced by R02 (and finalized by R03).
 - **Port Defaults & Collisions:** The `.env.example` defines sample override values (e.g., 8011, 8012, 1111). However, the `docker-compose.yml` defaults to mapping the host's `443` port for both frontend and backend unless `FRONTEND_HTTPS_PORT` and `BACKEND_PORT` are explicitly overridden, which causes a default host-port 443 collision.
 - **Certificate Requirements:** `DUCKDNS_DOMAIN`, `DUCKDNS_TOKEN`, and `LETSENCRYPT_EMAIL` are mandatory for both current container startup scripts. Missing values cause container startup to exit during certificate setup.
+- **PostgreSQL Required at Startup:** `DATABASE_URL` (with `POSTGRES_*` overrides) is now mandatory. The backend refuses to start without it; the SQLite runtime fallback was removed in R03. The `backend-db` volume and the SQLite source mount are no longer present in `docker-compose.yml`.
 
 ## REST Endpoints
 There are exactly 19 registered HTTP REST endpoints plus 1 WebSocket endpoint (`/ws`):
@@ -65,9 +66,12 @@ WebSocket uses a structured envelope for delta state distribution.
 - **Sprint 004 Additive Fields (review pending):** `song_added` and `auto_queue_added` carry additional authoritative post-mutation fields `current_index`, `current_song`, `status`, and `elapsed`, captured under the same lock as the queue mutation. All pre-existing fields and their JSON tags are unchanged. The frontend applies the additive fields when present; legacy backends omitting them trigger the single approved fallback (first-song promotion when the queue was empty). The Sprint 004 second-pass implementation also adds `previous_current_index` and `playback_advanced` to the internal `AddSongResult` struct returned from the queue interactor — these are NOT serialized over WebSocket. The compatibility claim in this section should be re-verified after Architect review.
 
 ## Database
-SQLite with 7 tables, index, trigger, and single-row queue JSON storage.
+PostgreSQL 16 (via `pgx/v5/stdlib`) is the only persistence backend. Schema version is **3** after the embedded migrations run. SQLite is retained ONLY as the offline source reader inside `cmd/migrate-data` / `internal/infrastructure/persistence/migratedata`; the runtime backend, the `DBPath` config field, the `DB_PATH` env fallback, the `backend-db` volume, and the SQLite repository implementations were all removed in R03.
 - **Tables:** `queue_state`, `activities`, `users`, `user_sessions`, `priority_transactions`, `auto_queue_config`, `play_history`.
+- **Migration identity:** `users.legacy_id BIGINT NULL` (unique index `idx_users_legacy_id`) records the original SQLite `users.id` so dependent tables FK-remap through the new PostgreSQL `users.id` while keeping a stable SQLite-identity audit trail. R06 drops the column after the `room_id` refactor absorbs the user-identity information.
+- **Migration marker:** `migration_marker` is a single-row table (`id=1`) carrying per-table SHA256 hashes plus the SQLite file-bytes SHA256 and the source path. It is the durable, exact no-op / idempotency proof for `cmd/migrate-data`.
 - **Queue State:** Single-row queue JSON storage defining invariants including active songs, currently playing index. Note: queue JSON activity history is distinct from the separate `play_history` table used by auto-queue.
+- **Data migration CLI:** `cmd/migrate-data up` is the operator-driven one-shot, offline, idempotent CLI. Exit codes: 0 = success (including `already migrated; no-op`), 1 = error, 2 = usage. Honors `--sqlite`, `--postgres`, `--report-file`, `--chunk-size`, `--dry-run`. Acquires the `lmq_migration` advisory lock (`pg_try_advisory_lock(987654321)`) on a pinned connection; resyncs BIGSERIAL sequences for `user_sessions`, `priority_transactions`, `activities`, and `play_history` after the copy; writes the `migration_marker` row inside the same transaction; runs a pre-commit in-transaction integrity check.
 
 ## Authentication & Authorization
 - **Login Verification:** Verifies Google OAuth token audience and `email_verified` fields. Hard-coded allowed domain check. Also logs configured emails (Host/Admin emails) on startup.

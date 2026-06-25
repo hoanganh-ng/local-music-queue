@@ -14,6 +14,7 @@ This directory contains documentation for active and past sprints.
 | 006    | Room Architecture ADR / R00                          | Closed |
 | 007    | PostgreSQL Migration Design / R01                    | Closed |
 | 008    | PostgreSQL Foundation (Behavior Preserved) / R02     | Closed |
+| 009    | SQLite-to-PostgreSQL Data Migration / R03            | Closed |
 
 ## File Naming
 
