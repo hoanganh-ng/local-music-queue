@@ -43,7 +43,10 @@ func TestPostgresMigration_CleanSchema(t *testing.T) {
 	for _, table := range want {
 		var exists bool
 		err := db.QueryRowContext(context.Background(),
-			`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)`,
+			`SELECT EXISTS (
+				SELECT 1 FROM information_schema.tables
+				WHERE table_schema = current_schema() AND table_name = $1
+			)`,
 			table,
 		).Scan(&exists)
 		if err != nil {
@@ -54,10 +57,14 @@ func TestPostgresMigration_CleanSchema(t *testing.T) {
 		}
 	}
 
-	// The play_history index must exist.
+	// The play_history index must exist. Scoped to current_schema() so a
+	// same-named index from a sibling test schema cannot satisfy this check.
 	var hasIndex bool
 	err = db.QueryRowContext(context.Background(),
-		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_play_history_played_at')`,
+		`SELECT EXISTS (
+			SELECT 1 FROM pg_indexes
+			WHERE schemaname = current_schema() AND indexname = 'idx_play_history_played_at'
+		)`,
 	).Scan(&hasIndex)
 	if err != nil {
 		t.Fatalf("query index: %v", err)

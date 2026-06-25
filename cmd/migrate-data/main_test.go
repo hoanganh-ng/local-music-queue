@@ -248,6 +248,26 @@ func mustCount(t *testing.T, db *sql.DB, table string) int64 {
 	return c
 }
 
+// seedEmptySQLite creates a SQLite source whose seven tables are present but
+// empty (the auto_queue_config seed row from sqliteDDL is the only row).
+// Migrations of an empty source must succeed: the migrator must not require
+// every table to be non-empty.
+func seedEmptySQLite(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(sqliteDDL); err != nil {
+		t.Fatalf("sqlite ddl: %v", err)
+	}
+	return path
+}
+
 func mustInt64(t *testing.T, db *sql.DB, query string, args ...any) int64 {
 	t.Helper()
 	var v int64
@@ -818,6 +838,204 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+// ---- R03 dirty-detection and empty-source tests ----
+
+// TestMigrateData_EmptySQLiteSource_MigratesSuccessfully proves an empty
+// source (all seven tables present, six of them empty, auto_queue_config
+// holding only the schema seed) migrates to a verified target with a marker
+// row written.
+func TestMigrateData_EmptySQLiteSource_MigratesSuccessfully(t *testing.T) {
+	path := seedEmptySQLite(t)
+	db, scopedDSN := newPostgresDB(t)
+	schemaMigratedUp(t, db)
+
+	opts := migratedata.Options{SQLitePath: path, PGDSN: scopedDSN}
+	r, err := migratedata.Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run (empty source): %v", err)
+	}
+	if !r.MigrationVerified {
+		t.Errorf("expected MigrationVerified=true; got false")
+	}
+	if r.RemappedUserCount != 0 {
+		t.Errorf("RemappedUserCount = %d, want 0", r.RemappedUserCount)
+	}
+
+	// auto_queue_config schema seed must survive; every other table must be
+	// empty.
+	expected := map[string]int64{
+		"queue_state":          0,
+		"activities":           0,
+		"users":                0,
+		"user_sessions":        0,
+		"priority_transactions": 0,
+		"auto_queue_config":    1,
+		"play_history":         0,
+	}
+	for table, want := range expected {
+		if got := mustCount(t, db, table); got != want {
+			t.Errorf("target %s count = %d, want %d", table, got, want)
+		}
+	}
+
+	// Marker row exists.
+	var markerCount int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM migration_marker`).Scan(&markerCount); err != nil {
+		t.Fatalf("count marker: %v", err)
+	}
+	if markerCount != 1 {
+		t.Errorf("migration_marker row count = %d, want 1", markerCount)
+	}
+}
+
+// TestMigrateData_EmptySQLiteSource_SecondRunNoOp proves the marker-based
+// no-op path also works for empty sources.
+func TestMigrateData_EmptySQLiteSource_SecondRunNoOp(t *testing.T) {
+	path := seedEmptySQLite(t)
+	db, scopedDSN := newPostgresDB(t)
+	schemaMigratedUp(t, db)
+
+	opts := migratedata.Options{SQLitePath: path, PGDSN: scopedDSN}
+	r1, err := migratedata.Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if !r1.MigrationVerified {
+		t.Fatalf("first run: MigrationVerified=false")
+	}
+
+	r2, err := migratedata.Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if len(r2.Notes) == 0 || r2.Notes[0] != "already migrated; no-op" {
+		t.Errorf("second run Notes: %v", r2.Notes)
+	}
+}
+
+// TestMigrateData_TamperedUserEmail_DirtyDetection proves the second-run
+// no-op gate checks live target content. The first run writes a row; we
+// UPDATE the email column in place; the second run must classify the target
+// as dirty (target content drifted from source).
+func TestMigrateData_TamperedUserEmail_DirtyDetection(t *testing.T) {
+	path, ids := seedSQLite(t)
+	db, scopedDSN := newPostgresDB(t)
+	schemaMigratedUp(t, db)
+
+	opts := migratedata.Options{SQLitePath: path, PGDSN: scopedDSN}
+	r1, err := migratedata.Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if !r1.MigrationVerified {
+		t.Fatal("expected first run MigrationVerified=true")
+	}
+
+	// Tamper with one user's email on the target. Row count is unchanged.
+	targetID := mustInt64(t, db, `SELECT id FROM users WHERE legacy_id = $1`, ids.userLegacyIDs[0])
+	if _, err := db.Exec(`UPDATE users SET email = 'tampered@example.com' WHERE id = $1`, targetID); err != nil {
+		t.Fatalf("tamper users: %v", err)
+	}
+
+	r2, err := migratedata.Run(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected dirty error after tampering users.email, got nil")
+	}
+	got := err.Error()
+	if !contains(got, "users") || !contains(got, "drifted") {
+		t.Errorf("expected users dirty-drift error, got: %q", got)
+	}
+	_ = r2 // error path; report is nil
+}
+
+// TestMigrateData_TamperedActivityDescription_DirtyDetection mirrors the user
+// tamper test for the activities table.
+func TestMigrateData_TamperedActivityDescription_DirtyDetection(t *testing.T) {
+	path, _ := seedSQLite(t)
+	db, scopedDSN := newPostgresDB(t)
+	schemaMigratedUp(t, db)
+
+	opts := migratedata.Options{SQLitePath: path, PGDSN: scopedDSN}
+	r1, err := migratedata.Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if !r1.MigrationVerified {
+		t.Fatal("expected first run MigrationVerified=true")
+	}
+
+	// Tamper with one activity description. Row count is unchanged.
+	if _, err := db.Exec(`UPDATE activities SET description = 'tampered' WHERE id = (SELECT MIN(id) FROM activities)`); err != nil {
+		t.Fatalf("tamper activities: %v", err)
+	}
+
+	r2, err := migratedata.Run(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected dirty error after tampering activities.description, got nil")
+	}
+	got := err.Error()
+	if !contains(got, "activities") || !contains(got, "drifted") {
+		t.Errorf("expected activities dirty-drift error, got: %q", got)
+	}
+	_ = r2 // error path; report is nil
+}
+
+// TestMigrateData_TamperedQueueStateSameLength_DirtyDetection proves a
+// same-length queue_state.data mutation is detected as dirty. The existing
+// "append a byte" tamper test would be caught by the queue_state byte-length
+// check; this test exercises the SHA256 projection itself by mutating
+// content while preserving the byte count.
+func TestMigrateData_TamperedQueueStateSameLength_DirtyDetection(t *testing.T) {
+	path, ids := seedSQLite(t)
+	db, scopedDSN := newPostgresDB(t)
+	schemaMigratedUp(t, db)
+
+	opts := migratedata.Options{SQLitePath: path, PGDSN: scopedDSN}
+	r1, err := migratedata.Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if r1.QueueState.Source != int64(len(ids.queueData)) {
+		t.Fatalf("source queue_state bytes = %d, want %d", r1.QueueState.Source, len(ids.queueData))
+	}
+
+	// Replace queue_state.data with a same-length JSON-shaped payload of
+	// spaces. The byte length matches the original, defeating the
+	// queue_state byte-length gate; only the SHA256 projection will catch
+	// the drift.
+	original := ids.queueData
+	replacement := make([]byte, len(original))
+	for i := range replacement {
+		replacement[i] = ' '
+	}
+	if _, err := db.Exec(`UPDATE queue_state SET data = $1 WHERE id = 1`, replacement); err != nil {
+		t.Fatalf("tamper queue_state: %v", err)
+	}
+
+	r2, err := migratedata.Run(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected dirty error after same-length queue_state tamper, got nil")
+	}
+	got := err.Error()
+	if !contains(got, "queue_state") || !contains(got, "drifted") {
+		t.Errorf("expected queue_state dirty-drift error, got: %q", got)
+	}
+	_ = r2 // error path; report is nil
+
+	// Restore the original byte length AND content so the next assertion can
+	// confirm a clean source matches a clean target on re-run.
+	if _, err := db.Exec(`UPDATE queue_state SET data = $1 WHERE id = 1`, original); err != nil {
+		t.Fatalf("restore queue_state: %v", err)
+	}
+	r3, err := migratedata.Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("restore+rerun: %v", err)
+	}
+	if len(r3.Notes) == 0 || r3.Notes[0] != "already migrated; no-op" {
+		t.Errorf("restored run Notes: %v", r3.Notes)
+	}
 }
 
 // kept to ensure imports are used

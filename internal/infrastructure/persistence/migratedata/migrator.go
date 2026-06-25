@@ -57,44 +57,117 @@ var expectedSourceTables = []string{
 	"play_history",
 }
 
+// dialect identifies which SQL backend a hash query targets. The dialect
+// matters for one projection only (queue_state byte length): SQLite needs
+// LENGTH(CAST(data AS BLOB)) and PostgreSQL exposes OCTET_LENGTH(data).
+// All other canonical columns are ANSI-portable across both backends.
+type dialect int
+
+const (
+	dialectSQLite dialect = iota
+	dialectPostgres
+)
+
+// queryer is the minimal interface satisfied by *sql.DB and *sql.Tx so
+// hashTableRows can stream from either the source read-only connection or
+// the target transaction without duplicating the scan loop.
+type queryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 // canonicalColumnLists is the stable column projection used to compute the
-// per-table SHA256 over the source. Keeping the order fixed and excluding
-// auto-generated timestamps that vary in formatting guarantees a hash that
-// is reproducible across runs of the same source.
+// per-table SHA256 over the source. The projection intentionally excludes
+// auto-generated timestamp columns because the source stores them as TEXT
+// (e.g. "2026-01-05 09:00:00") while PostgreSQL serializes TIMESTAMPTZ with
+// a timezone suffix; including them would make source and target byte
+// streams diverge on a clean copy. Every column listed here is content the
+// migration preserves verbatim (or, in queue_state's case, content whose
+// length is content).
 var canonicalColumnLists = map[string][]string{
 	"users": {
 		"id", "email", "display_name",
 		"COALESCE(profile_picture, '')",
 		"role", "priority_balance",
-		"COALESCE(created_at, '')",
-		"COALESCE(updated_at, '')",
 	},
 	"user_sessions": {
-		"id", "user_id", "session_date",
-		"COALESCE(first_seen_at, '')",
-		"COALESCE(last_seen_at, '')",
+		"id", "user_id", "CAST(session_date AS TEXT)",
 	},
 	"priority_transactions": {
 		"id", "user_id", "song_id", "song_title",
 		"transaction_type", "amount", "balance_after",
-		"COALESCE(created_at, '')",
 	},
 	"queue_state": {
-		"id", "LENGTH(CAST(data AS BLOB))",
-		"COALESCE(updated_at, '')",
+		"id", "LENGTH(CAST(data AS BLOB))", "CAST(data AS BLOB)",
 	},
 	"activities": {
 		"id",
-		"COALESCE(\"timestamp\", '')",
 		"type", "\"user\"", "description",
 	},
 	"auto_queue_config": {
-		"id", "enabled", "strategy",
+		"id", "CASE WHEN enabled THEN '1' ELSE '0' END", "strategy",
 	},
 	"play_history": {
 		"id", "video_id", "title",
-		"COALESCE(played_at, '')",
 	},
+}
+
+// canonicalColumnListsPG mirrors canonicalColumnLists for PostgreSQL. The
+// only dialect-specific swap is queue_state's byte-length expression.
+// Timestamps are deliberately excluded from both maps so source and target
+// byte streams are comparable for a clean copy. The enabled boolean is
+// normalized through a CASE expression on both sides so SQLite's INTEGER
+// 0/1 and PostgreSQL's false/true render identically ("0"/"1").
+var canonicalColumnListsPG = map[string][]string{
+	"users": {
+		"id", "email", "display_name",
+		"COALESCE(profile_picture::text, '')",
+		"role", "priority_balance",
+	},
+	"user_sessions": {
+		"id", "user_id", "session_date::text",
+	},
+	"priority_transactions": {
+		"id", "user_id", "song_id", "song_title",
+		"transaction_type", "amount", "balance_after",
+	},
+	"queue_state": {
+		"id", "OCTET_LENGTH(data)", "data",
+	},
+	"activities": {
+		"id",
+		"type", "\"user\"", "description",
+	},
+	"auto_queue_config": {
+		"id", "CASE WHEN enabled THEN '1' ELSE '0' END", "strategy",
+	},
+	"play_history": {
+		"id", "video_id", "title",
+	},
+}
+
+// canonicalColumnsFor returns the column projection that matches the
+// requested dialect. Both maps MUST contain every entry in
+// expectedSourceTables; otherwise the integrity check would silently skip
+// the missing table.
+func canonicalColumnsFor(table string, d dialect) ([]string, error) {
+	m := canonicalColumnLists
+	if d == dialectPostgres {
+		m = canonicalColumnListsPG
+	}
+	cols, ok := m[table]
+	if !ok {
+		return nil, fmt.Errorf("no canonical projection defined for %s", table)
+	}
+	return cols, nil
+}
+
+// tableStats bundles the row count and id range for one table. MinID and
+// MaxID are sql.NullInt64 so empty tables produce invalid values that the
+// report can omit via omitempty.
+type tableStats struct {
+	Count int64
+	MinID sql.NullInt64
+	MaxID sql.NullInt64
 }
 
 // Options configures a single migration run.
@@ -157,11 +230,12 @@ type QueueStateBytes struct {
 	Target int64 `json:"target"`
 }
 
-// sourceHashes holds the per-table SHA256 of the canonical projection of every
-// source row, plus the SHA256 of the SQLite file bytes themselves. Computed
-// once per Run and reused by both the idempotency probe and the marker row
-// insert.
-type sourceHashes struct {
+// canonicalHashes holds the per-table SHA256 of the canonical projection of
+// every row, plus the SHA256 of the SQLite file bytes (source side only).
+// The same struct is reused for the live target on second-run probes so the
+// dirty check can compare two byte streams row-for-row without storing
+// target content in the migration_marker row.
+type canonicalHashes struct {
 	fileBytes            [32]byte
 	queueState           [32]byte
 	users                [32]byte
@@ -355,7 +429,7 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 	// Pre-commit integrity verification: any mismatch rolls the transaction
 	// back instead of committing a broken target. Counts, id ranges, and the
 	// queue_state byte length are checked inside the transaction.
-	if err := verifyWithinTx(ctx, tx); err != nil {
+	if err := verifyWithinTx(ctx, tx, probe.srcCounts, probe.srcQueueBytes); err != nil {
 		return nil, fmt.Errorf("pre-commit verification: %w", err)
 	}
 
@@ -468,12 +542,15 @@ func verifySourceSchema(ctx context.Context, src *sql.DB) error {
 // assertLegacyIDColumnExists confirms the target has a legacy_id column on the
 // users table. A target with the right schema version but missing the column
 // (for example because 0002 was force-skipped) cannot safely receive data.
+// The query is scoped to current_schema() so a sibling schema with a users
+// table cannot satisfy the readiness check for a different search_path.
 func assertLegacyIDColumnExists(ctx context.Context, dst *sql.DB) error {
 	var exists bool
 	if err := dst.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM information_schema.columns
-			WHERE table_name = 'users' AND column_name = 'legacy_id'
+			WHERE table_schema = current_schema()
+			  AND table_name = 'users' AND column_name = 'legacy_id'
 		)`).Scan(&exists); err != nil {
 		return fmt.Errorf("inspect users.legacy_id: %w", err)
 	}
@@ -485,8 +562,8 @@ func assertLegacyIDColumnExists(ctx context.Context, dst *sql.DB) error {
 
 // computeSourceHashes derives the file-bytes hash and per-table hashes used by
 // both the idempotency probe and the migration marker row.
-func computeSourceHashes(ctx context.Context, absPath string, src *sql.DB) (sourceHashes, error) {
-	var out sourceHashes
+func computeSourceHashes(ctx context.Context, absPath string, src *sql.DB) (canonicalHashes, error) {
+	var out canonicalHashes
 
 	fileBytes, err := os.ReadFile(absPath)
 	if err != nil {
@@ -495,11 +572,11 @@ func computeSourceHashes(ctx context.Context, absPath string, src *sql.DB) (sour
 	out.fileBytes = sha256.Sum256(fileBytes)
 
 	for _, table := range expectedSourceTables {
-		cols, ok := canonicalColumnLists[table]
-		if !ok {
-			return out, fmt.Errorf("no canonical projection defined for %s", table)
+		cols, err := canonicalColumnsFor(table, dialectSQLite)
+		if err != nil {
+			return out, err
 		}
-		rowHash, err := hashTableRows(ctx, src, table, cols)
+		rowHash, err := hashTableRows(ctx, src, table, cols, dialectSQLite)
 		if err != nil {
 			return out, err
 		}
@@ -523,21 +600,54 @@ func computeSourceHashes(ctx context.Context, absPath string, src *sql.DB) (sour
 	return out, nil
 }
 
-// hashTableRows streams every row from src over the canonical column
-// projection (sorted by the table's primary key) and returns a SHA256 of the
-// deterministic byte stream.
-func hashTableRows(ctx context.Context, src *sql.DB, table string, cols []string) ([32]byte, error) {
+// computeTargetHashes derives the per-table SHA256 of the live PostgreSQL
+// target using the Postgres canonical projection. Recomputed on every
+// second-run probe so the dirty check is bound to live content, not to
+// whatever the marker recorded at migration time. The fileBytes slot stays
+// zero-valued: the marker already carries the source-file hash.
+func computeTargetHashes(ctx context.Context, dst *sql.DB) (canonicalHashes, error) {
+	var out canonicalHashes
+
+	for _, table := range expectedSourceTables {
+		cols, err := canonicalColumnsFor(table, dialectPostgres)
+		if err != nil {
+			return out, err
+		}
+		rowHash, err := hashTableRows(ctx, dst, table, cols, dialectPostgres)
+		if err != nil {
+			return out, err
+		}
+		switch table {
+		case "queue_state":
+			out.queueState = rowHash
+		case "users":
+			out.users = rowHash
+		case "activities":
+			out.activities = rowHash
+		case "play_history":
+			out.playHistory = rowHash
+		case "user_sessions":
+			out.userSessions = rowHash
+		case "priority_transactions":
+			out.priorityTransactions = rowHash
+		case "auto_queue_config":
+			out.autoQueueConfig = rowHash
+		}
+	}
+	return out, nil
+}
+// (sorted by the table's primary key) and returns a SHA256 of the
+// deterministic byte stream. The dialect selects the right canonical column
+// list; the byte stream format (US/RS separators) is identical across
+// dialects so source and target projections are comparable.
+func hashTableRows(ctx context.Context, q queryer, table string, cols []string, d dialect) ([32]byte, error) {
 	var zero [32]byte
 	pk := "id"
-	switch table {
-	case "queue_state", "auto_queue_config":
-		pk = "id"
-	}
 	orderClause := "ORDER BY " + pk
 	query := fmt.Sprintf("SELECT %s FROM %s %s", strings.Join(cols, ", "), table, orderClause)
-	rows, err := src.QueryContext(ctx, query)
+	rows, err := q.QueryContext(ctx, query)
 	if err != nil {
-		return zero, fmt.Errorf("hash source %s: %w", table, err)
+		return zero, fmt.Errorf("hash %s: %w", table, err)
 	}
 	defer rows.Close()
 
@@ -580,6 +690,12 @@ type idProbeResult struct {
 	queueStateBytesSource   int64
 	queueStateBytesTarget   int64
 	tableReports            []TableReport
+	// srcCounts and srcQueueBytes are the source-side stats computed during
+	// the probe. The Run pipeline reuses them for the in-transaction
+	// pre-commit verification so we never re-query the read-only SQLite
+	// source inside the write transaction.
+	srcCounts     map[string]int64
+	srcQueueBytes int64
 }
 
 // probeIdempotency decides whether the target is fresh, an exact prior
@@ -597,19 +713,24 @@ func probeIdempotency(
 	ctx context.Context,
 	src, dst *sql.DB,
 	sourcePath string,
-	srcHashes sourceHashes,
+	srcHashes canonicalHashes,
 ) (idProbeResult, error) {
 	out := idProbeResult{}
 
-	srcCounts, err := countAllSourceTables(ctx, src)
+	srcStats, err := countAndRangeAllSourceTables(ctx, src)
 	if err != nil {
 		return out, fmt.Errorf("count source: %w", err)
+	}
+	out.srcCounts = make(map[string]int64, len(srcStats))
+	for table, s := range srcStats {
+		out.srcCounts[table] = s.Count
 	}
 	srcQueueBytes, err := sourceQueueStateBytes(ctx, src)
 	if err != nil {
 		return out, err
 	}
 	out.queueStateBytesSource = srcQueueBytes
+	out.srcQueueBytes = srcQueueBytes
 
 	dstCounts, err := countAllTargetTables(ctx, dst)
 	if err != nil {
@@ -625,7 +746,10 @@ func probeIdempotency(
 	// single (id=1, enabled=false, strategy='related') row, so a freshly
 	// migrated schema always has that row even when no user data has been
 	// written. "Fresh" means no data-bearing tables have rows; auto_queue_config
-	// is allowed to keep its seed row.
+	// is allowed to keep its seed row. A migration_marker row, however,
+	// proves the empty state was the result of a prior run and must trigger
+	// the no-op gate below — otherwise the second run would re-insert the
+	// marker and fail with a duplicate-key error.
 	dataTableTotal := int64(0)
 	for _, table := range expectedSourceTables {
 		if table == "auto_queue_config" {
@@ -634,7 +758,20 @@ func probeIdempotency(
 		dataTableTotal += dstCounts[table]
 	}
 	if dataTableTotal == 0 {
-		out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
+		marker, hasMarker, err := readMarker(ctx, dst)
+		if err != nil {
+			return out, fmt.Errorf("read migration_marker: %w", err)
+		}
+		if !hasMarker {
+			out.tableReports = buildInitialTableReports(srcStats, dstCounts)
+			return out, nil
+		}
+		// Fall through to the marker-present branch with the freshly-read
+		// marker; the no-op check below will handle the empty case.
+		if err := runMarkerPresentChecks(&out, ctx, dst, sourcePath, srcStats, dstCounts, srcHashes, marker); err != nil {
+			return out, err
+		}
+		out.tableReports = buildInitialTableReports(srcStats, dstCounts)
 		return out, nil
 	}
 
@@ -644,67 +781,10 @@ func probeIdempotency(
 		return out, fmt.Errorf("read migration_marker: %w", err)
 	}
 	if hasMarker {
-		if !equalSHA256(marker.SourceSHA256, srcHashes.fileBytes[:]) {
-			out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
-			out.dirty = "target migration_marker row exists but the SQLite file SHA256 differs from the recorded source; refusing to merge into an inconsistent target. Restore from the pre-migration snapshot or TRUNCATE the target before retrying."
-			return out, nil
-		}
-		if marker.SourcePath != sourcePath {
-			out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
-			out.dirty = fmt.Sprintf("target migration_marker row records source_path=%q but this run uses %q; refusing to no-op against an unknown source. Restore from the recorded snapshot or TRUNCATE the target before retrying.", marker.SourcePath, sourcePath)
-			return out, nil
-		}
-		// Belt-and-braces: counts must match too. The hashes are stronger but
-		// a count check costs nothing and is easy for operators to interpret.
-		countsMatch := true
-		for _, table := range expectedSourceTables {
-			if srcCounts[table] != dstCounts[table] {
-				countsMatch = false
-				break
-			}
-		}
-		if !countsMatch {
-			out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
-			out.dirty = "target migration_marker row exists but per-table counts differ; refusing to merge. Restore from the pre-migration snapshot or TRUNCATE the target before retrying."
-			return out, nil
-		}
-		// queue_state byte length check.
-		dstQueueBytes, err := targetQueueStateBytes(ctx, dst)
-		if err != nil {
+		if err := runMarkerPresentChecks(&out, ctx, dst, sourcePath, srcStats, dstCounts, srcHashes, marker); err != nil {
 			return out, err
 		}
-		out.queueStateBytesTarget = dstQueueBytes
-		if srcQueueBytes != dstQueueBytes {
-			out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
-			out.dirty = "target migration_marker row exists but queue_state byte length differs; refusing to merge. Restore from the pre-migration snapshot or TRUNCATE the target before retrying."
-			return out, nil
-		}
-		if !equalSHA256(marker.QueueStateSHA256, srcHashes.queueState[:]) {
-			out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
-			out.dirty = "target migration_marker row exists but queue_state SHA256 differs; refusing to merge. Restore from the pre-migration snapshot or TRUNCATE the target before retrying."
-			return out, nil
-		}
-		hashChecks := []struct {
-			name string
-			have []byte
-			want [32]byte
-		}{
-			{"users", marker.UsersSHA256, srcHashes.users},
-			{"activities", marker.ActivitiesSHA256, srcHashes.activities},
-			{"play_history", marker.PlayHistorySHA256, srcHashes.playHistory},
-			{"user_sessions", marker.UserSessionsSHA256, srcHashes.userSessions},
-			{"priority_transactions", marker.PriorityTxSHA256, srcHashes.priorityTransactions},
-			{"auto_queue_config", marker.AutoQueueConfigSHA256, srcHashes.autoQueueConfig},
-		}
-		for _, c := range hashChecks {
-			if !equalSHA256(c.have, c.want[:]) {
-				out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
-				out.dirty = fmt.Sprintf("target migration_marker row exists but %s SHA256 differs; refusing to merge. Restore from the pre-migration snapshot or TRUNCATE the target before retrying.", c.name)
-				return out, nil
-			}
-		}
-		out.alreadyMigrated = true
-		out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
+		out.tableReports = buildInitialTableReports(srcStats, dstCounts)
 		return out, nil
 	}
 
@@ -715,24 +795,152 @@ func probeIdempotency(
 	}
 	if nullLegacyID > 0 {
 		out.conflictingNullLegacyID = true
-		out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
+		out.tableReports = buildInitialTableReports(srcStats, dstCounts)
 		return out, nil
 	}
 	// Some users have a non-null legacy_id, but no marker proves provenance.
 	// We refuse to merge.
-	out.tableReports = buildInitialTableReports(srcCounts, dstCounts)
+	out.tableReports = buildInitialTableReports(srcStats, dstCounts)
 	out.dirty = "target contains rows but no migration_marker row; refusing to merge into a target with unknown provenance. TRUNCATE the target or restore from a snapshot before retrying."
 	return out, nil
 }
 
+// runMarkerPresentChecks executes the full no-op / dirty decision ladder
+// once a migration_marker row is known to exist. It mutates the idProbeResult
+// out with the verdict. The order is:
+//
+//  1. file-bytes SHA matches marker
+//  2. recorded source_path matches current run's source path
+//  3. per-table source count equals target count
+//  4. source queue_state byte length equals target queue_state byte length
+//  5. per-table marker-recorded SHA256 equals fresh source SHA256
+//  6. live target SHA256 (freshly recomputed) equals source SHA256 — this is
+//     the new gate that catches post-migration tamper with identical counts
+//     or identical queue_state byte length
+//
+// On any mismatch, out.dirty is set and the caller returns immediately. On
+// full match, out.alreadyMigrated is set.
+func runMarkerPresentChecks(
+	out *idProbeResult,
+	ctx context.Context,
+	dst *sql.DB,
+	sourcePath string,
+	srcStats map[string]tableStats,
+	dstCounts map[string]int64,
+	srcHashes canonicalHashes,
+	marker markerRecord,
+) error {
+	if !equalSHA256(marker.SourceSHA256, srcHashes.fileBytes[:]) {
+		out.tableReports = buildInitialTableReports(srcStats, dstCounts)
+		out.dirty = "target migration_marker row exists but the SQLite file SHA256 differs from the recorded source; refusing to merge into an inconsistent target. Restore from the pre-migration snapshot or TRUNCATE the target before retrying."
+		return nil
+	}
+	if marker.SourcePath != sourcePath {
+		out.tableReports = buildInitialTableReports(srcStats, dstCounts)
+		out.dirty = fmt.Sprintf("target migration_marker row records source_path=%q but this run uses %q; refusing to no-op against an unknown source. Restore from the recorded snapshot or TRUNCATE the target before retrying.", marker.SourcePath, sourcePath)
+		return nil
+	}
+	// Belt-and-braces: counts must match too. The hashes are stronger but
+	// a count check costs nothing and is easy for operators to interpret.
+	for _, table := range expectedSourceTables {
+		if srcStats[table].Count != dstCounts[table] {
+			out.tableReports = buildInitialTableReports(srcStats, dstCounts)
+			out.dirty = "target migration_marker row exists but per-table counts differ; refusing to merge. Restore from the pre-migration snapshot or TRUNCATE the target before retrying."
+			return nil
+		}
+	}
+	// queue_state byte length check.
+	dstQueueBytes, err := targetQueueStateBytes(ctx, dst)
+	if err != nil {
+		return err
+	}
+	out.queueStateBytesTarget = dstQueueBytes
+	if out.srcQueueBytes != dstQueueBytes {
+		out.tableReports = buildInitialTableReports(srcStats, dstCounts)
+		out.dirty = "target migration_marker row exists but queue_state byte length differs; refusing to merge. Restore from the pre-migration snapshot or TRUNCATE the target before retrying."
+		return nil
+	}
+	if !equalSHA256(marker.QueueStateSHA256, srcHashes.queueState[:]) {
+		out.tableReports = buildInitialTableReports(srcStats, dstCounts)
+		out.dirty = "target migration_marker row exists but queue_state SHA256 differs; refusing to merge. Restore from the pre-migration snapshot or TRUNCATE the target before retrying."
+		return nil
+	}
+	hashChecks := []struct {
+		name string
+		have []byte
+		want [32]byte
+	}{
+		{"users", marker.UsersSHA256, srcHashes.users},
+		{"activities", marker.ActivitiesSHA256, srcHashes.activities},
+		{"play_history", marker.PlayHistorySHA256, srcHashes.playHistory},
+		{"user_sessions", marker.UserSessionsSHA256, srcHashes.userSessions},
+		{"priority_transactions", marker.PriorityTxSHA256, srcHashes.priorityTransactions},
+		{"auto_queue_config", marker.AutoQueueConfigSHA256, srcHashes.autoQueueConfig},
+	}
+	for _, c := range hashChecks {
+		if !equalSHA256(c.have, c.want[:]) {
+			out.tableReports = buildInitialTableReports(srcStats, dstCounts)
+			out.dirty = fmt.Sprintf("target migration_marker row exists but %s SHA256 differs; refusing to merge. Restore from the pre-migration snapshot or TRUNCATE the target before retrying.", c.name)
+			return nil
+		}
+	}
+	// Step 6: recompute target hashes fresh and compare to the source hashes.
+	// The marker only carries source-side content; this gate proves the live
+	// target rows still match the source byte-for-byte. A tampered row with
+	// the same count or a same-length queue_state payload will fail here.
+	targetHashes, err := computeTargetHashes(ctx, dst)
+	if err != nil {
+		return fmt.Errorf("compute target hashes: %w", err)
+	}
+	targetChecks := []struct {
+		name string
+		have [32]byte
+		want [32]byte
+	}{
+		{"users", targetHashes.users, srcHashes.users},
+		{"activities", targetHashes.activities, srcHashes.activities},
+		{"play_history", targetHashes.playHistory, srcHashes.playHistory},
+		{"user_sessions", targetHashes.userSessions, srcHashes.userSessions},
+		{"priority_transactions", targetHashes.priorityTransactions, srcHashes.priorityTransactions},
+		{"queue_state", targetHashes.queueState, srcHashes.queueState},
+		{"auto_queue_config", targetHashes.autoQueueConfig, srcHashes.autoQueueConfig},
+	}
+	for _, c := range targetChecks {
+		if c.have != c.want {
+			out.tableReports = buildInitialTableReports(srcStats, dstCounts)
+			out.dirty = fmt.Sprintf("target %s content drifted from source; refusing to no-op into a tampered target. TRUNCATE the target or restore from snapshot before retrying.", c.name)
+			return nil
+		}
+	}
+	out.alreadyMigrated = true
+	return nil
+}
+
 func countAllSourceTables(ctx context.Context, src *sql.DB) (map[string]int64, error) {
-	out := map[string]int64{}
+	stats, err := countAndRangeAllSourceTables(ctx, src)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]int64, len(stats))
+	for table, s := range stats {
+		out[table] = s.Count
+	}
+	return out, nil
+}
+
+// countAndRangeAllSourceTables returns per-table row counts plus the MIN and
+// MAX id range for the same single COUNT/MIN/MAX query. Empty tables produce
+// invalid NullInt64s for MinID/MaxID; the report omits those via omitempty.
+func countAndRangeAllSourceTables(ctx context.Context, src *sql.DB) (map[string]tableStats, error) {
+	out := make(map[string]tableStats, len(expectedSourceTables))
 	for _, t := range expectedSourceTables {
-		var c int64
-		if err := src.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+t).Scan(&c); err != nil {
+		var stats tableStats
+		if err := src.QueryRowContext(ctx,
+			fmt.Sprintf("SELECT COUNT(*), MIN(id), MAX(id) FROM %s", t),
+		).Scan(&stats.Count, &stats.MinID, &stats.MaxID); err != nil {
 			return nil, fmt.Errorf("count sqlite %s: %w", t, err)
 		}
-		out[t] = c
+		out[t] = stats
 	}
 	return out, nil
 }
@@ -782,14 +990,33 @@ func targetQueueStateBytes(ctx context.Context, dst *sql.DB) (int64, error) {
 	return n.Int64, nil
 }
 
-func buildInitialTableReports(srcCounts, dstCounts map[string]int64) []TableReport {
+// buildInitialTableReports seeds a TableReport slice in the order of
+// expectedSourceTables. SourceMinID/SourceMaxID are populated when the
+// source had at least one row; for empty tables the fields stay zero and the
+// json omitempty tag hides them. Notes capture empty-source intent so an
+// operator reading the report can tell why counts are zero without digging
+// through the migration logs.
+func buildInitialTableReports(srcStats map[string]tableStats, dstCounts map[string]int64) []TableReport {
 	reports := make([]TableReport, 0, len(expectedSourceTables))
 	for _, t := range expectedSourceTables {
-		reports = append(reports, TableReport{
+		rep := TableReport{
 			Table:       t,
-			SourceCount: srcCounts[t],
+			SourceCount: srcStats[t].Count,
 			TargetCount: dstCounts[t],
-		})
+		}
+		if srcStats[t].MinID.Valid {
+			rep.SourceMinID = srcStats[t].MinID.Int64
+		}
+		if srcStats[t].MaxID.Valid {
+			rep.SourceMaxID = srcStats[t].MaxID.Int64
+		}
+		switch {
+		case t == "auto_queue_config" && srcStats[t].Count == 0:
+			rep.Note = "no source row; schema seed (id=1) retained"
+		case srcStats[t].Count == 0 && dstCounts[t] == 0:
+			rep.Note = "empty source table; target also empty"
+		}
+		reports = append(reports, rep)
 	}
 	return reports
 }
@@ -800,32 +1027,71 @@ type verifyResult struct {
 }
 
 // verifyWithinTx runs the integrity checks inside the active transaction so a
-// mismatch rolls back instead of committing a broken target. The query set
-// matches verifyAfterCommit but reads through tx so the visibility is
-// pre-commit.
-func verifyWithinTx(ctx context.Context, tx *sql.Tx) error {
+// mismatch rolls back instead of committing a broken target. Source counts
+// and source queue_state bytes are passed in (computed by the probe) so we
+// never re-query the read-only SQLite source inside the write transaction.
+//
+// Empty source tables are valid when both source and target have zero rows.
+// auto_queue_config is exempted from the zero-row rule because migration
+// 0001 seeds id=1 even when the source is empty. A non-zero source paired
+// with a zero target (or vice versa) is a hard mismatch.
+func verifyWithinTx(ctx context.Context, tx *sql.Tx, srcCounts map[string]int64, srcQueueBytes int64) error {
 	for _, t := range expectedSourceTables {
-		var cnt sql.NullInt64
+		var cnt, minID, maxID sql.NullInt64
 		if err := tx.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT COUNT(*) FROM %s", t),
-		).Scan(&cnt); err != nil {
+			fmt.Sprintf("SELECT COUNT(*), MIN(id), MAX(id) FROM %s", t),
+		).Scan(&cnt, &minID, &maxID); err != nil {
 			return fmt.Errorf("verify in-tx %s: %w", t, err)
 		}
 		if !cnt.Valid {
 			return fmt.Errorf("verify in-tx %s: NULL count", t)
 		}
-		if cnt.Int64 == 0 {
-			return fmt.Errorf("verify in-tx %s: zero rows after copy", t)
+		src := srcCounts[t]
+		dst := cnt.Int64
+		if t == "auto_queue_config" {
+			// Source may be empty; schema seed is allowed to keep id=1.
+			if src == 0 {
+				if dst < 1 {
+					return fmt.Errorf("verify in-tx %s: schema seed missing (target has %d rows)", t, dst)
+				}
+				if !minID.Valid || minID.Int64 != 1 {
+					return fmt.Errorf("verify in-tx %s: schema seed missing id=1", t)
+				}
+				continue
+			}
+			if src != dst {
+				return fmt.Errorf("verify in-tx %s: source count %d != target count %d", t, src, dst)
+			}
+			continue
+		}
+		// Six non-auto-queue_config tables: zero/zero is OK; otherwise counts
+		// must match exactly.
+		if src == 0 && dst == 0 {
+			continue
+		}
+		if src != dst {
+			return fmt.Errorf("verify in-tx %s: source count %d != target count %d", t, src, dst)
+		}
+		if !minID.Valid || !maxID.Valid {
+			return fmt.Errorf("verify in-tx %s: missing id range after copy", t)
 		}
 	}
 	var n sql.NullInt64
-	if err := tx.QueryRowContext(ctx,
+	err := tx.QueryRowContext(ctx,
 		"SELECT OCTET_LENGTH(data) FROM queue_state WHERE id = 1",
-	).Scan(&n); err != nil {
+	).Scan(&n)
+	if err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("verify in-tx queue_state bytes: %w", err)
 	}
-	if !n.Valid || n.Int64 == 0 {
-		return fmt.Errorf("verify in-tx queue_state: missing or empty data")
+	dst := int64(0)
+	if n.Valid {
+		dst = n.Int64
+	}
+	if srcQueueBytes == 0 && dst == 0 {
+		return nil
+	}
+	if srcQueueBytes != dst {
+		return fmt.Errorf("verify in-tx queue_state: source bytes %d != target bytes %d", srcQueueBytes, dst)
 	}
 	return nil
 }
