@@ -19,6 +19,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	deliveryhttp "local-music-queue/internal/delivery/http"
+	"local-music-queue/internal/delivery/origin"
 	"local-music-queue/internal/delivery/ws"
 	"local-music-queue/internal/domain/entity"
 	"local-music-queue/internal/infrastructure/persistence"
@@ -109,11 +110,16 @@ func TestAPIIntegration_ServerStarts(t *testing.T) {
 	}
 	defer cleanup()
 
-	server := httptest.NewServer(requestLogger(enableCORS(mux)))
+	policy, perr := origin.Parse(map[string]string{"APP_ENV": "test", "ALLOWED_ORIGINS": "https://app.example.com"})
+	if perr != nil {
+		t.Fatalf("origin.Parse: %v", perr)
+	}
+	server := httptest.NewServer(requestLogger(enableCORS(policy, mux)))
 	defer server.Close()
 
 	client := server.Client()
 	req, _ := http.NewRequest(http.MethodOptions, server.URL+"/api/auth", nil)
+	req.Header.Set("Origin", "https://app.example.com")
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("OPTIONS /api/auth: %v", err)
@@ -122,8 +128,8 @@ func TestAPIIntegration_ServerStarts(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("OPTIONS /api/auth status = %d, want 200", resp.StatusCode)
 	}
-	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Errorf("CORS Allow-Origin = %q, want *", got)
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
+		t.Errorf("CORS Allow-Origin = %q, want %q", got, "https://app.example.com")
 	}
 }
 
@@ -291,7 +297,11 @@ func TestAPIIntegration_WebSocketBroadcast(t *testing.T) {
 	}
 	defer cleanup()
 
-	server := httptest.NewServer(requestLogger(enableCORS(mux)))
+	policy, perr := origin.Parse(map[string]string{"APP_ENV": "test", "ALLOWED_ORIGINS": "https://app.example.com"})
+	if perr != nil {
+		t.Fatalf("origin.Parse: %v", perr)
+	}
+	server := httptest.NewServer(requestLogger(enableCORS(policy, mux)))
 	defer server.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"

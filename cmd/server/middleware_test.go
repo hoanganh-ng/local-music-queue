@@ -3,8 +3,9 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
+
+	"local-music-queue/internal/delivery/origin"
 )
 
 func TestStatusRecorder(t *testing.T) {
@@ -114,61 +115,95 @@ func TestRequestLogger(t *testing.T) {
 }
 
 func TestEnableCORS(t *testing.T) {
-	t.Run("sets CORS headers", func(t *testing.T) {
+	// Two-arg enableCORS: pass an explicit policy.
+	prodPolicy := mustPolicy(t, map[string]string{
+		"ALLOWED_ORIGINS": "https://app.example.com",
+		"APP_ENV":          "production",
+	})
+	localPolicy := mustPolicy(t, map[string]string{"APP_ENV": "local"})
+
+	t.Run("allowed browser origin is reflected with Vary", func(t *testing.T) {
 		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-
-		middleware := enableCORS(handler)
 		req := httptest.NewRequest(http.MethodGet, "/api/queue", nil)
+		req.Header.Set("Origin", "https://app.example.com")
 		rec := httptest.NewRecorder()
+		enableCORS(prodPolicy, handler).ServeHTTP(rec, req)
 
-		middleware.ServeHTTP(rec, req)
-
-		if rec.Header().Get("Access-Control-Allow-Origin") != "*" {
-			t.Errorf("Expected CORS origin *, got %s", rec.Header().Get("Access-Control-Allow-Origin"))
+		if got, want := rec.Header().Get("Access-Control-Allow-Origin"), "https://app.example.com"; got != want {
+			t.Errorf("Allow-Origin = %q, want %q", got, want)
 		}
-		if !strings.Contains(rec.Header().Get("Access-Control-Allow-Methods"), "GET") {
-			t.Error("Expected GET in allowed methods")
-		}
-		if !strings.Contains(rec.Header().Get("Access-Control-Allow-Headers"), "Content-Type") {
-			t.Error("Expected Content-Type in allowed headers")
+		if rec.Header().Get("Vary") == "" {
+			t.Error("expected Vary header to be set")
 		}
 	})
 
-	t.Run("handles OPTIONS preflight", func(t *testing.T) {
+	t.Run("disallowed browser origin is denied on preflight", func(t *testing.T) {
+		called := false
 		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			t.Error("Next handler should not be called for OPTIONS")
+			called = true
 		})
-
-		middleware := enableCORS(handler)
 		req := httptest.NewRequest(http.MethodOptions, "/api/auth", nil)
+		req.Header.Set("Origin", "https://evil.example.com")
 		rec := httptest.NewRecorder()
+		enableCORS(prodPolicy, handler).ServeHTTP(rec, req)
 
-		middleware.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusOK {
-			t.Errorf("Expected status %d for OPTIONS, got %d", http.StatusOK, rec.Code)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("expected 403, got %d", rec.Code)
+		}
+		if called {
+			t.Error("next handler must not be called when origin is denied")
 		}
 	})
 
-	t.Run("delegates non-OPTIONS requests", func(t *testing.T) {
+	t.Run("empty origin (server-to-server) gets no Allow-Origin header", func(t *testing.T) {
 		called := false
 		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			called = true
 			w.WriteHeader(http.StatusOK)
 		})
-
-		middleware := enableCORS(handler)
-		req := httptest.NewRequest(http.MethodPost, "/api/auth", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/queue", nil)
 		rec := httptest.NewRecorder()
+		enableCORS(prodPolicy, handler).ServeHTTP(rec, req)
 
-		middleware.ServeHTTP(rec, req)
-
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("Allow-Origin should be empty for server-to-server, got %q", got)
+		}
 		if !called {
-			t.Error("Expected next handler to be called for POST")
+			t.Fatal("next handler should run for empty Origin")
 		}
 	})
+
+	t.Run("local policy allows loopback origins", func(t *testing.T) {
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+		req := httptest.NewRequest(http.MethodGet, "/api/queue", nil)
+		req.Header.Set("Origin", "http://localhost:5173")
+		rec := httptest.NewRecorder()
+		enableCORS(localPolicy, handler).ServeHTTP(rec, req)
+
+		if got, want := rec.Header().Get("Access-Control-Allow-Origin"), "http://localhost:5173"; got != want {
+			t.Errorf("Allow-Origin = %q, want %q", got, want)
+		}
+	})
+}
+
+func mustPolicy(t *testing.T, env map[string]string) *origin.Policy {
+	t.Helper()
+	p, err := origin.Parse(env)
+	if err != nil {
+		t.Fatalf("origin.Parse: %v", err)
+	}
+	return p
+}
+
+func calledOnce(h http.Handler) bool {
+	type result struct{ called bool }
+	r := &result{}
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	return r.called
 }
 
 func TestFormatDuration(t *testing.T) {

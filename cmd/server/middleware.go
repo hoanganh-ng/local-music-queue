@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"local-music-queue/internal/delivery/origin"
 )
 
 // statusRecorder wraps http.ResponseWriter to capture the response status code.
@@ -57,16 +59,29 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dms", ms)
 }
 
-// enableCORS is a middleware that adds CORS headers to the response.
-func enableCORS(next http.Handler) http.Handler {
+// enableCORS applies the shared origin policy to every response. Allowed
+// browser origins are echoed back with Vary: Origin so caches do not
+// conflate them. Disallowed browser origins on preflight (OPTIONS) are
+// rejected with 403 — non-preflight requests from disallowed origins fall
+// through and the request continues, matching the production CORS model
+// where the browser is responsible for blocking responses. Empty Origin
+// (server-to-server, curl, health probes) is allowed and emits no
+// Access-Control-Allow-Origin header.
+func enableCORS(p *origin.Policy, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Allow any origin for development
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if originHeader := p.AllowOriginHeader(r); originHeader != "" {
+			w.Header().Set("Access-Control-Allow-Origin", originHeader)
+			w.Header().Add("Vary", "Origin")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Add("Vary", "Access-Control-Request-Headers")
 
-		// Handle preflight requests
-		if r.Method == "OPTIONS" {
+		if r.Method == http.MethodOptions {
+			if p.IsBrowser(r) && p.AllowOriginHeader(r) == "" {
+				http.Error(w, "origin not allowed", http.StatusForbidden)
+				return
+			}
 			w.WriteHeader(http.StatusOK)
 			return
 		}
