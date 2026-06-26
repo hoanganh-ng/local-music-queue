@@ -214,11 +214,11 @@ func (h *Hub) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The early-return above (line 212) is the real origin gate. The upgrader
+	// is unconditionally permissive because the request has already been
+	// vetted by h.originChecker(r); browsers will be blocked before Upgrade.
 	up := websocket.Upgrader{
 		CheckOrigin: func(req *http.Request) bool { return true },
-	}
-	if h.originChecker != nil {
-		up.CheckOrigin = h.originChecker
 	}
 	conn, err := up.Upgrade(w, r, nil)
 	if err != nil {

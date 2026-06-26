@@ -159,11 +159,10 @@ func TestConfig_AllowedOrigins(t *testing.T) {
 	})
 
 	t.Run("Validate fails fast in production with no origins", func(t *testing.T) {
-		t.Setenv("APP_ENV", "test")
+		t.Setenv("APP_ENV", "production")
 		t.Setenv("ALLOWED_ORIGINS", "")
 		t.Setenv("YTDLP_PATH", "/bin/true")
 		cfg := Load()
-		cfg.IsLocal = false
 		cfg.AllowedOrigins = nil
 		if err := cfg.Validate(); err == nil {
 			t.Fatal("expected Validate to fail in non-local mode with empty allow list")
@@ -171,11 +170,10 @@ func TestConfig_AllowedOrigins(t *testing.T) {
 	})
 
 	t.Run("Validate passes in local mode with no origins", func(t *testing.T) {
-		t.Setenv("APP_ENV", "test")
+		t.Setenv("APP_ENV", "local")
 		t.Setenv("ALLOWED_ORIGINS", "")
 		t.Setenv("YTDLP_PATH", "/bin/true")
 		cfg := Load()
-		cfg.IsLocal = true
 		cfg.AllowedOrigins = nil
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("expected Validate to succeed in local mode, got %v", err)

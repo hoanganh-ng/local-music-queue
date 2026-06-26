@@ -71,11 +71,11 @@ func enableCORS(p *origin.Policy, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if originHeader := p.AllowOriginHeader(r); originHeader != "" {
 			w.Header().Set("Access-Control-Allow-Origin", originHeader)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 			w.Header().Add("Vary", "Origin")
+			w.Header().Add("Vary", "Access-Control-Request-Headers")
 		}
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Add("Vary", "Access-Control-Request-Headers")
 
 		if r.Method == http.MethodOptions {
 			if p.IsBrowser(r) && p.AllowOriginHeader(r) == "" {
