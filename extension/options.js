@@ -174,6 +174,12 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       // Clear the field after save so the token is not left visible.
       sessionTokenInput.value = '';
+      // Refresh the badge to reflect the just-saved token, but only when one
+      // was actually written. Blank saves preserve the existing stored token
+      // and must not flip the badge to "not saved".
+      if (sessionToken) {
+        setStatusBadge(true);
+      }
       showStatus('Settings saved successfully.', 'success');
     });
   }
