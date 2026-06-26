@@ -199,13 +199,6 @@ func mustPolicy(t *testing.T, env map[string]string) *origin.Policy {
 	return p
 }
 
-func calledOnce(h http.Handler) bool {
-	type result struct{ called bool }
-	r := &result{}
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
-	return r.called
-}
-
 func TestFormatDuration(t *testing.T) {
 	tests := []struct {
 		name     string
