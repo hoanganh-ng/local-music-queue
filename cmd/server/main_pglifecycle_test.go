@@ -53,6 +53,7 @@ func TestSetupApp_PostgresDBStaysOpen(t *testing.T) {
 
 	// Isolate env so other tests cannot pollute DATABASE_URL / YTDLP_PATH.
 	t.Setenv("APP_ENV", "test")
+	t.Setenv("ALLOWED_ORIGINS", "http://localhost:1111")
 	for _, k := range []string{
 		"DATABASE_URL",
 		"POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER",
