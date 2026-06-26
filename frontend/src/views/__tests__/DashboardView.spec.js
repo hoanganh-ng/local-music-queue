@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { shallowMount } from '@vue/test-utils'
+import { flushPromises } from '@vue/test-utils'
+import { sessionHelper } from '../../services/session'
 import DashboardView from '../DashboardView.vue'
 import { globalStore } from '../../store'
 import { wsClient } from '../../services/websocket'
@@ -397,5 +399,103 @@ describe('DashboardView', () => {
     await dismissBtn.trigger('click')
 
     expect(voteNotificationsMock.dismissCta).toHaveBeenCalledTimes(1)
+  })
+
+  describe('Copy Session Token for Extension', () => {
+    let writeText
+
+    beforeEach(() => {
+      writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', {
+        value: { writeText },
+        configurable: true,
+        writable: true,
+      })
+    })
+
+    it('shows the copy button when sessionHelper.isValid() returns true', () => {
+      const future = new Date(Date.now() + 60 * 60_000).toISOString()
+      sessionHelper.saveSession('opaque-token-abc', future)
+
+      const wrapper = shallowMount(DashboardView)
+      const btn = wrapper.find('.copy-token-btn')
+
+      expect(btn.exists()).toBe(true)
+    })
+
+    it('hides the copy button when sessionHelper.isValid() returns false', () => {
+      // No session saved
+      const wrapper = shallowMount(DashboardView)
+      expect(wrapper.find('.copy-token-btn').exists()).toBe(false)
+    })
+
+    it('hides the copy button when session token is expired', () => {
+      const past = new Date(Date.now() - 60_000).toISOString()
+      sessionHelper.saveSession('expired', past)
+
+      const wrapper = shallowMount(DashboardView)
+      expect(wrapper.find('.copy-token-btn').exists()).toBe(false)
+    })
+
+    it('writes the current token to clipboard and toasts success on click', async () => {
+      const future = new Date(Date.now() + 60 * 60_000).toISOString()
+      const tokenValue = 'opaque-token-xyz'
+      sessionHelper.saveSession(tokenValue, future)
+
+      const wrapper = shallowMount(DashboardView)
+      const btn = wrapper.find('.copy-token-btn')
+      expect(btn.exists()).toBe(true)
+
+      await btn.trigger('click')
+
+      expect(writeText).toHaveBeenCalledTimes(1)
+      expect(writeText).toHaveBeenCalledWith(tokenValue)
+      expect(mockToast.success).toHaveBeenCalledWith('Session token copied. Paste it into the browser extension Options.')
+      expect(mockToast.error).not.toHaveBeenCalled()
+      expect(mockToast.info).not.toHaveBeenCalled()
+    })
+
+    it('toasts an info message and does not write to clipboard when no valid session exists', async () => {
+      // sessionHelper.isValid() is false; copy button is hidden so we simulate
+      // the defensive guard by calling the handler directly via the component vm.
+      // The defensive guard must not throw and must not invoke the clipboard.
+      const wrapper = shallowMount(DashboardView)
+      expect(wrapper.find('.copy-token-btn').exists()).toBe(false)
+
+      // Trigger the same code path the button would, by mounting and asserting the
+      // guard contract: invoking when no valid session must not call clipboard.
+      // We invoke the handler via the exposed vm method (added in Task 1 implementation).
+      wrapper.vm.handleCopySessionToken?.()
+
+      expect(writeText).not.toHaveBeenCalled()
+      expect(mockToast.info).toHaveBeenCalledWith('No active session. Log in again to copy a fresh token for the extension.')
+      expect(mockToast.success).not.toHaveBeenCalled()
+      expect(mockToast.error).not.toHaveBeenCalled()
+    })
+
+    it('toasts an error and does not leak the token when clipboard write fails', async () => {
+      const future = new Date(Date.now() + 60 * 60_000).toISOString()
+      sessionHelper.saveSession('opaque-token-fail', future)
+      writeText.mockRejectedValueOnce(new Error('clipboard blocked'))
+
+      const wrapper = shallowMount(DashboardView)
+      await wrapper.find('.copy-token-btn').trigger('click')
+
+      // Allow the rejected promise's catch to run
+      await flushPromises()
+
+      expect(writeText).toHaveBeenCalledTimes(1)
+      expect(mockToast.error).toHaveBeenCalledWith('Could not copy to clipboard. Use DevTools → Application → Local Storage → lmq_session_token as a fallback.')
+      expect(mockToast.success).not.toHaveBeenCalled()
+      // Token must not appear in any toast message
+      const allToastCalls = [
+        ...mockToast.success.mock.calls,
+        ...mockToast.error.mock.calls,
+        ...mockToast.info.mock.calls,
+      ]
+      allToastCalls.forEach(([msg]) => {
+        expect(msg).not.toContain('opaque-token-fail')
+      })
+    })
   })
 })

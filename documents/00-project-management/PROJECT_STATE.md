@@ -86,7 +86,7 @@ PostgreSQL 16 (via `pgx/v5/stdlib`) is the only persistence backend. Schema vers
   - Unauthenticated (public reads/login): `GET /api/queue`, `GET /api/user/priority-balance`, `GET /api/youtube/search`, `GET /api/autoqueue/status`, `POST /api/auth/google`.
 - **Client-Side Compatibility:** Client-supplied `added_by_id` / `user_id` / `user_role` fields in request bodies and WebSocket frames are still parsed and may be persisted for display/audit compatibility, but the authorization gate does not consult them. Frontend and extension clients should not rely on them for auth/identity.
 - **WebSocket Caveats:** Accepts any origin without validation. The legacy `?user_id=...` query parameter remains accepted as a non-authenticated hint for the daily-priority check; authentication requires `?session_token=<opaque>` (R05).
-- **Browser Extension (R05):** `extension/background.js` now attaches `Authorization: Bearer <session_token>` to `POST /api/queue/add` whenever the user has saved a token in the extension Options page (storage key `sessionToken` in `chrome.storage.local`). The token must be re-pasted after each new login; there is no automatic refresh path. With no token, `/api/queue/add` returns 401 and the extension surfaces a clear "unauthorized" error.
+- **Browser Extension (R05 / R06):** `extension/background.js` attaches `Authorization: Bearer <session_token>` to `POST /api/queue/add` whenever the user has saved a token in the extension Options page (storage key `sessionToken` in `chrome.storage.local`). With no token, `/api/queue/add` returns 401 and the extension surfaces a clear "unauthorized" error. R06 added an authenticated in-app **Copy token for extension** button to the web dashboard (success/info/error toast feedback; raw token never enters the DOM or logs), a visible **Token status:** badge on the Options page, and an explicit **Clear Session Token** button that removes only the `sessionToken` key while leaving `apiBase`/`displayName`/`userId` intact. Saving a blank Session Token still preserves the existing saved value.
 
 ## Community Voting Mechanics
 - **Implementation & Persistence:** Vote sessions are stored in-memory.
@@ -120,7 +120,7 @@ During the Sprint 003 verification:
 
 ## Prioritized Known-Risk Register
 
-1. **Mitigated by R05 (residual):** Session-token-based identity now authenticates privileged REST endpoints and the WebSocket accept path. Sessions live strictly in-memory and are lost on restart, so a server restart logs every client out and requires re-login. Browser-extension clients must re-paste the token after each new login; no automatic refresh path exists.
+1. **Mitigated by R05 / R06 (residual):** Session-token-based identity now authenticates privileged REST endpoints and the WebSocket accept path. Sessions live strictly in-memory and are lost on restart, so a server restart logs every client out and requires re-login. Browser-extension clients must re-paste the token after each new login; no automatic refresh path exists. The web dashboard's Copy button and the Options Clear button make the manual rotation usable and reversible.
 2. **Mitigated by R05 (residual):** Privileged REST endpoints are role-gated per the route matrix above. Authorization still relies on the in-memory session, so the same restart-loss caveat applies.
 3. **High:** In-memory voting state is lost on restart.
 4. **High:** WebSocket origin is not validated; the legacy `?user_id=...` query parameter remains accepted as a non-authenticated daily-priority hint.

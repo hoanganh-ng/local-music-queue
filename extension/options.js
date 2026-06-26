@@ -13,6 +13,40 @@ document.addEventListener('DOMContentLoaded', () => {
   const userIdInput = document.getElementById('user-id');
   const sessionTokenInput = document.getElementById('session-token');
 
+  const sessionTokenStatus = document.getElementById('session-token-status');
+  const clearTokenBtn = document.getElementById('clear-token-btn');
+
+  clearTokenBtn.addEventListener('click', () => {
+    if (!confirm('Clear the saved Session Token from this extension?')) {
+      return;
+    }
+    chrome.storage.local.remove('sessionToken', () => {
+      if (chrome.runtime.lastError) {
+        showStatus('Failed to clear: ' + chrome.runtime.lastError.message, 'error');
+        return;
+      }
+      // Touch the input so the user sees the cleared state visually too.
+      sessionTokenInput.value = '';
+      setStatusBadge(false);
+      showStatus('Session Token cleared.', 'success');
+    });
+  });
+
+  /**
+   * Updates the "Token status:" badge to reflect whether a sessionToken is saved.
+   * @param {boolean} saved - true if chrome.storage.local.sessionToken is present.
+   */
+  function setStatusBadge(saved) {
+    if (!sessionTokenStatus) return;
+    if (saved) {
+      sessionTokenStatus.textContent = 'saved';
+      sessionTokenStatus.className = 'session-token-status saved';
+    } else {
+      sessionTokenStatus.textContent = 'not saved';
+      sessionTokenStatus.className = 'session-token-status not-saved';
+    }
+  }
+
   // Load saved options
   loadOptions();
 
@@ -40,11 +74,18 @@ document.addEventListener('DOMContentLoaded', () => {
         userIdInput.value = result.userId;
       }
       if (typeof result.sessionToken === 'string') {
-        // Never auto-fill — the user must re-paste after each new login.
-        // The DOM is left blank; this branch is here for completeness only.
+        // Never write the saved token back into the input — UX is hide-by-default.
+        // A non-empty stored token only flips the status badge below.
+        if (result.sessionToken) {
+          setStatusBadge(true);
+        } else {
+          setStatusBadge(false);
+        }
         sessionTokenInput.placeholder = result.sessionToken
           ? '•••• (saved token hidden; clear and paste a new one to replace)'
           : 'paste lmq_session_token here';
+      } else {
+        setStatusBadge(false);
       }
     });
   }
@@ -120,6 +161,8 @@ document.addEventListener('DOMContentLoaded', () => {
       displayName: displayName,
       userId: userId
     };
+    // Preserves the existing saved sessionToken when the input is blank —
+    // chrome.storage.local.set with the field omitted leaves that key untouched.
     if (sessionToken) {
       payload.sessionToken = sessionToken;
     }

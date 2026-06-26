@@ -24,6 +24,15 @@
             <span class="toggle-slider"></span>
           </span>
         </button>
+        <button
+          v-if="sessionValid"
+          type="button"
+          class="copy-token-btn"
+          @click="handleCopySessionToken"
+          title="Copy your session token to paste into the browser extension Options"
+        >
+          <span class="copy-token-label">Copy token for extension</span>
+        </button>
         <span class="user-name">{{ currentUser?.display_name }}</span>
         <button class="logout-btn" @click="handleLogout">Exit</button>
       </div>
@@ -263,6 +272,25 @@ const handleLogout = () => {
   router.push({ name: 'Auth' })
 }
 
+const sessionValid = computed(() => sessionHelper.isValid())
+
+async function handleCopySessionToken() {
+  if (!sessionHelper.isValid()) {
+    toast.info('No active session. Log in again to copy a fresh token for the extension.')
+    return
+  }
+  const token = sessionHelper.getToken()
+  try {
+    await navigator.clipboard.writeText(token)
+    toast.success('Session token copied. Paste it into the browser extension Options.')
+  } catch (err) {
+    console.error('Clipboard write failed:', err)
+    toast.error('Could not copy to clipboard. Use DevTools → Application → Local Storage → lmq_session_token as a fallback.')
+  }
+}
+
+defineExpose({ handleCopySessionToken })
+
 const addSong = async (url, metadata = null) => {
   await api.addSong(url, currentUser.value.display_name, currentUser.value.id, metadata)
 }
@@ -390,6 +418,25 @@ function onEnableBrowserNotifications() {
 
 .logout-btn:hover {
   color: var(--danger);
+}
+
+.copy-token-btn {
+  background: rgba(62, 166, 255, 0.12);
+  color: var(--accent-hover);
+  border: 1px solid rgba(62, 166, 255, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 0.35rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.copy-token-btn:hover {
+  background: rgba(62, 166, 255, 0.22);
+  border-color: var(--accent-hover);
 }
 
 .radio-mode-toggle {

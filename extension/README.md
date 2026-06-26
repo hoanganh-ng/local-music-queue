@@ -22,6 +22,7 @@ Before using the extension, you must configure it:
    - **Display Name**: The name that will appear as "added by" when songs are added from this extension
    - **User ID** (optional): Your numeric user ID in the Local Music Queue app (defaults to 0)
    - **Session Token** (R05, required to add songs): Paste the value of `lmq_session_token` from your browser's `localStorage` on the Local Music Queue app (see below). Without it, the server returns 401 to `/api/queue/add` and songs cannot be added.
+   - A **Token status:** indicator shows whether a Session Token is currently saved. Click **Clear Session Token** to remove the saved value (apiBase/displayName/userId are preserved).
 4. Click **Save Settings**
 
 You can also click **Test Connection** to verify that your server is reachable.
@@ -30,7 +31,13 @@ You can also click **Test Connection** to verify that your server is reachable.
 
 The Session Token is the same opaque token the web app sends in the `Authorization: Bearer <token>` header (and in `?session_token=` on the WebSocket URL). It is stored under `lmq_session_token` in `localStorage` for the Local Music Queue app's origin.
 
-To copy it:
+**Preferred (in-app copy button):**
+
+1. Open the Local Music Queue web app and log in (Google OAuth). Stay logged in.
+2. In the dashboard's top-right user cluster, click **Copy token for extension**.
+3. Open the extension Options page, paste it into **Session Token**, and Save.
+
+**Fallback (DevTools):**
 
 1. Open the Local Music Queue web app and log in (Google OAuth). Stay logged in.
 2. Open DevTools → **Application** → **Local Storage** → select the app's origin.
@@ -66,7 +73,7 @@ The token rotates on every login. Re-paste after each new login. The extension s
 - **No Firefox/Safari support**: This extension is built for Chrome/Chromium using Manifest V3. Firefox and Safari are not supported.
 - **HTTPS with valid certificate required**: The extension's service worker `fetch()` requires the Local Music Queue server to have a valid TLS certificate if using HTTPS. Self-signed certificates will cause the request to fail. For local/development use, HTTP is acceptable. The server's `Access-Control-Allow-Origin: *` CORS header is required unless the user grants the extension optional host permission for the API host during configuration.
 - **Identity is client-supplied for display only**: The extension sends `added_by`/`added_by_id` in the JSON body for display/audit, but the server no longer uses them for authorization. Auth/identity comes from the **Session Token** (R05).
-- **Clearing a saved Session Token (future UX improvement)**: The Options page currently has no dedicated "Clear Session Token" button. Saving an empty/blank Session Token does **not** clear the stored value — `options.js` omits the field from the payload when blank, leaving the existing `sessionToken` entry in `chrome.storage.local` untouched. Today's valid clearing methods are: reinstall the extension, or clear the `sessionToken` entry from `chrome.storage.local` via DevTools (Extensions → service worker → Storage → `chrome.storage.local`). An explicit in-UI clear-token control is a planned future UX improvement.
+- **Clearing a saved Session Token**: Use the **Clear Session Token** button in the Options page. It removes only the `sessionToken` entry from `chrome.storage.local` and leaves `apiBase`, `displayName`, and `userId` intact. To replace the token with a new one, paste the new value into the Session Token field and click **Save Settings**. Saving with the field blank preserves the existing saved token.
 
 ## Architecture
 

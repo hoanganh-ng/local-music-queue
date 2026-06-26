@@ -405,6 +405,12 @@ After a successful Google login the backend issues an **opaque session token** (
 
 The frontend attaches the token as `Authorization: Bearer <token>` on requests where `sessionHelper.isValid()` returns true. Within this sprint, the backend enforces this session identity only for `POST /api/queue/remove` — every other endpoint still trusts client-supplied identity and role, and so still carries the known authorization gap recorded in [PROJECT_STATE.md](../../00-project-management/PROJECT_STATE.md).
 
+### Browser Extension Token UX (R06)
+
+The web app exposes an authenticated **Copy token for extension** button in the dashboard's top-right user cluster. The button is only rendered when `sessionHelper.isValid()` is `true`; clicking it writes the current `lmq_session_token` to the clipboard via `navigator.clipboard.writeText` and shows a success toast. The raw token is never written to the DOM, logs, or analytics. When no valid session is present, no copy occurs and the user is told to log in again. Clipboard failures surface a clear error toast pointing at the DevTools fallback path; the token itself is never echoed back to the user.
+
+The extension Options page now shows a **Token status:** badge ("saved" or "not saved") and a **Clear Session Token** button. The saved token is never auto-filled into the input on load. Saving with a blank input intentionally preserves the existing saved token; to replace, paste the new value and save. Clearing removes only the `sessionToken` key from `chrome.storage.local` — `apiBase`, `displayName`, and `userId` are preserved. `extension/background.js` continues to send `Authorization: Bearer <sessionToken>` on `POST /api/queue/add` when a token is configured.
+
 ---
 
 ## Security Considerations
