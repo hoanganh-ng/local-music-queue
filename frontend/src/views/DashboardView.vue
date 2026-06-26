@@ -284,7 +284,7 @@ async function handleCopySessionToken() {
     await navigator.clipboard.writeText(token)
     toast.success('Session token copied. Paste it into the browser extension Options.')
   } catch (err) {
-    console.error('Clipboard write failed:', err)
+    console.error('Clipboard write failed:', err?.name || 'unknown')
     toast.error('Could not copy to clipboard. Use DevTools → Application → Local Storage → lmq_session_token as a fallback.')
   }
 }
