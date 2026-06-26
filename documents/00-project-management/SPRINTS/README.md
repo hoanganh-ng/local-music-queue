@@ -16,6 +16,7 @@ This directory contains documentation for active and past sprints.
 | 008    | PostgreSQL Foundation (Behavior Preserved) / R02     | Closed |
 | 009    | SQLite-to-PostgreSQL Data Migration / R03            | Closed |
 | 010    | Room Domain, Invite, Membership, and Lifecycle / R04 | In progress — awaiting Architect review and Product Owner approval |
+| 020    | Allowed Origins and WebSocket Origin Policy / A01    | Closed (2026-06-26) — pending Product Owner acceptance             |
 
 ## File Naming
 
