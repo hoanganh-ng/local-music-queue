@@ -1,4 +1,5 @@
 import { globalStore } from '../store'
+import { sessionHelper } from './session'
 
 // hasAuthoritativeFields returns true when the backend payload carries the
 // Sprint 004 authoritative post-mutation fields. Legacy backends omit them.
@@ -101,17 +102,26 @@ class WebSocketClient {
     this.isConnecting = true
     globalStore.setConnectionStatus('connecting')
 
-    // Get backend URL from environment and convert to WebSocket URL
+    // Get backend URL from environment and convert to WebSocket URL.
     const API_BASE = import.meta.env.VITE_API_BASE_URL || 'https://localhost:443'
-    let wsUrl = API_BASE.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws'
+    const wsBase = API_BASE.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws'
 
-    // Add user_id parameter if user is logged in
+    // R05: build the query via URLSearchParams so URL-sensitive characters
+    // in the session token are percent-encoded. session_token is required for
+    // client-originated messages (request_full_sync). user_id is preserved as
+    // a legacy non-authenticated hint for the daily-priority check.
+    const params = new URLSearchParams()
+    if (sessionHelper.isValid()) {
+      params.set('session_token', sessionHelper.getToken())
+    }
     const currentUser = globalStore.currentUser
     if (currentUser?.id) {
-      wsUrl += `?user_id=${currentUser.id}`
+      params.set('user_id', String(currentUser.id))
     }
+    const wsUrl = params.toString() ? `${wsBase}?${params.toString()}` : wsBase
 
-    console.log(`Connecting to WebSocket at ${wsUrl}`)
+    // Do not log the raw URL — it may contain a session token.
+    console.log('Connecting to WebSocket')
     this.ws = new WebSocket(wsUrl)
 
     this.ws.onopen = () => {
@@ -280,6 +290,15 @@ class WebSocketClient {
             applyLegacyFirstSongFallback(message.data.song)
           }
         }
+        break
+      case 'error':
+        // R05 additive envelope: backend rejected a client-originated request
+        // (e.g. request_full_sync without a valid session_token). Log a safe
+        // warning and clear the pendingFullSync guard so the client does not
+        // get stuck waiting for a full_sync that will never arrive. Never log
+        // raw tokens or the raw message payload — only the backend code.
+        console.warn('WebSocket server error:', message.data?.code || 'unknown')
+        this.pendingFullSync = false
         break
       case 'auto_queue_config_changed':
         // Update auto-queue config state for all connected clients

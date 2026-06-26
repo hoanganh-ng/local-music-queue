@@ -186,6 +186,14 @@ For the easiest installation experience for non-technical users:
 - Chrome Web Store policies apply (even for unlisted items).
 - The extension must comply with Chrome Web Store developer program policies.
 
+## Authentication Status (R05)
+
+The browser extension currently posts to `/api/queue/add` **without** an `Authorization: Bearer <session_token>` header. R05 added session-token enforcement at the WebSocket layer, but did not retrofit the extension. The `/api/queue/add` endpoint still accepts the legacy client-supplied `added_by_id` for this sprint, so the extension continues to function.
+
+**Staged for the next sprint:** attach the same `lmq_session_token` the frontend uses (read from `chrome.storage.local`) as `Authorization: Bearer <token>`. This is a compatibility break for any user who has not logged in via the frontend since the token was issued — they will need to re-authenticate.
+
+Track this in the next sprint's plan.
+
 ## License
 
 Same as the parent Local Music Queue project.

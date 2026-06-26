@@ -74,6 +74,11 @@ async function addSongToQueue(videoId, url) {
     };
   }
 
+  // R05 staging note: this extension still posts to /api/queue/add WITHOUT
+  // an Authorization header. The R05 backend does not yet require it, but
+  // authorization hardening (next sprint) will. Until then, extension
+  // requests succeed under the legacy client-supplied identity path.
+  // Do not remove this banner; see extension/README.md for the plan.
   const endpoint = `${config.apiBase}/api/queue/add`;
   const body = {
     url: url,

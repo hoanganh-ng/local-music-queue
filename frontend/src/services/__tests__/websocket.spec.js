@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { wsClient } from '../websocket'
 import { globalStore } from '../../store'
+import { sessionHelper } from '../session'
 
 // Mutable queueState so the legacy fallback can read it during tests.
 const liveQueueState = { songs: [], status: 'paused', current_index: -1 }
@@ -25,6 +26,7 @@ vi.mock('../../store', () => ({
     updateElapsed: vi.fn((elapsed) => {
       liveQueueState.elapsed = elapsed
     }),
+    setConnectionStatus: vi.fn(),
   }
 }))
 
@@ -470,5 +472,72 @@ describe('WebSocketClient', () => {
 
     expect(fakeWs.send).not.toHaveBeenCalled()
     expect(wsClient.pendingFullSync).toBe(false)
+  })
+
+  // --- R05: error event recovery ---
+
+  it('error event clears pendingFullSync so client is not stuck', () => {
+    // Simulate a gap → request sent, pendingFullSync = true.
+    const fakeWs = attachOpenSocket()
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 1 }, seq_num: 1 })
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 3 }, seq_num: 3 })
+    expect(wsClient.pendingFullSync).toBe(true)
+
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    // Backend rejects with a structured error envelope (R05 additive event).
+    wsClient.handleMessage({
+      type: 'error',
+      data: { code: 'unauthorized', message: 'session_token required to issue client requests' },
+    })
+
+    expect(wsClient.pendingFullSync).toBe(false)
+    expect(consoleSpy).toHaveBeenCalled()
+    const warningText = String(consoleSpy.mock.calls[0]?.[0] ?? '')
+    // No raw token in the warning, ever.
+    expect(warningText).not.toMatch(/tok-/)
+    expect(warningText.toLowerCase()).toContain('websocket')
+
+    // A subsequent gap must be able to request a new sync (not stuck).
+    wsClient.handleMessage({ type: 'elapsed_sync', data: { elapsed: 5 }, seq_num: 5 })
+    expect(fakeWs.send).toHaveBeenCalledTimes(2)
+
+    consoleSpy.mockRestore()
+  })
+
+  // --- R05: session_token in connect URL ---
+
+  it('connect URL includes session_token when sessionHelper.isValid()', async () => {
+    // Arrange: a valid session in localStorage.
+    const future = new Date(Date.now() + 60_000).toISOString()
+    sessionHelper.saveSession('tok-r05-url', future)
+
+    // Stub WebSocket constructor so we can capture the URL.
+    const wsInstances = []
+    class FakeWS {
+      constructor(url) {
+        this.url = url
+        this.readyState = 0
+        this.close = vi.fn()
+        this.send = vi.fn()
+        wsInstances.push(this)
+      }
+    }
+    vi.stubGlobal('WebSocket', FakeWS)
+    // Force a user_id too, to assert both params coexist.
+    globalStore.currentUser = { id: 7 }
+
+    try {
+      wsClient.connect()
+      expect(wsInstances).toHaveLength(1)
+      const url = wsInstances[0].url
+      expect(url).toContain('session_token=tok-r05-url')
+      expect(url).toContain('user_id=7')
+    } finally {
+      wsClient.disconnect()
+      vi.unstubAllGlobals()
+      sessionHelper.clearSession()
+      globalStore.currentUser = null
+    }
   })
 })
