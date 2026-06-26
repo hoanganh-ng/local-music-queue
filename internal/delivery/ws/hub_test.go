@@ -538,3 +538,80 @@ func (s *stubSessionResolver) ResolveSession(ctx context.Context, token string) 
 
 // errStubInvalid is the test-only sentinel returned for unknown tokens.
 var errStubInvalid = errors.New("stub: invalid session token")
+
+func TestHub_RegisterHandler_OriginAllowed(t *testing.T) {
+	hub := NewHub(nil)
+	hub.SetOriginChecker(func(r *http.Request) bool { return true })
+	go hub.Run()
+
+	server := httptest.NewServer(http.HandlerFunc(hub.RegisterHandler))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("expected dial to succeed when origin allowed, got %v", err)
+	}
+	defer conn.Close()
+}
+
+func TestHub_RegisterHandler_OriginDenied(t *testing.T) {
+	hub := NewHub(nil)
+	hub.SetOriginChecker(func(r *http.Request) bool { return false })
+	go hub.Run()
+
+	server := httptest.NewServer(http.HandlerFunc(hub.RegisterHandler))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err == nil {
+		conn.Close()
+		t.Fatal("expected dial to fail when origin denied")
+	}
+	if resp == nil {
+		t.Fatalf("expected non-nil response on rejected upgrade, got nil")
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected status 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestHub_LegacyUserID_DoesNotAwardPriority(t *testing.T) {
+	hub, server := setupTestHub(t)
+	defer server.Close()
+
+	// Stub priority interactor that records which user ids it sees.
+	recorded := make(chan int, 1)
+	hub.SetPriorityInteractor(&recordingPriorityChecker{seen: recorded})
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws?user_id=42"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	// Drain initial sync to let RegisterHandler complete.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, _ = conn.ReadMessage()
+
+	select {
+	case got := <-recorded:
+		t.Fatalf("priority checker should not run for legacy user_id without session token, got userID=%d", got)
+	case <-time.After(200 * time.Millisecond):
+		// success — checker never fired.
+	}
+}
+
+type recordingPriorityChecker struct {
+	seen chan int
+}
+
+func (r *recordingPriorityChecker) CheckAndAwardDailyPriority(ctx context.Context, userID int) error {
+	r.seen <- userID
+	return nil
+}
+
+func (r *recordingPriorityChecker) GetUserPriorityBalance(ctx context.Context, userID int) (int, error) {
+	return 0, nil
+}

@@ -13,12 +13,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for local network use
-	},
-}
-
 // VoteExpiryRunner is satisfied by vote.Interactor.
 // Defined here to avoid an import cycle.
 type VoteExpiryRunner interface {
@@ -85,6 +79,11 @@ type Hub struct {
 	voteInteractor     VoteExpiryRunner
 	priorityInteractor PriorityChecker
 	authInteractor     SessionResolver
+	// originChecker is invoked by RegisterHandler for both the upgrade gate
+	// (CheckOrigin) and any pre-upgrade classification. nil means "allow
+	// everything" — tests rely on this default so the legacy package-level
+	// upgrader is no longer needed.
+	originChecker func(r *http.Request) bool
 }
 
 // NewHub creates a new Hub.
@@ -103,6 +102,14 @@ func NewHub(getQueueState func(context.Context) (*entity.Queue, error)) *Hub {
 // connections cannot originate client-originated requests.
 func (h *Hub) SetAuthInteractor(a SessionResolver) {
 	h.authInteractor = a
+}
+
+// SetOriginChecker wires the per-request origin allow check. When the
+// function returns false, RegisterHandler rejects the upgrade with 403
+// before invoking websocket.Upgrade. Passing nil restores the permissive
+// default (test-only convenience).
+func (h *Hub) SetOriginChecker(fn func(r *http.Request) bool) {
+	h.originChecker = fn
 }
 
 // Run starts the Hub main loop.
@@ -201,22 +208,19 @@ func (h *Hub) Run() {
 	}
 }
 
-// RegisterHandler upgrades connections to WebSockets and sends initial sync.
-//
-// R05 — WebSocket auth posture:
-//   - Clients SHOULD present a session token via ?session_token=... (added
-//     in R05). When present and valid, the connection is marked
-//     authenticated; client-originated requests are processed.
-//   - The legacy ?user_id=... hint is still accepted for the existing
-//     daily-priority check (a non-privileged read path). When only
-//     user_id is present, the connection is NOT marked authenticated
-//     and client-originated requests will be rejected — this is the
-//     intended behavior, because user_id was spoofable.
-//   - Connections with neither parameter are read-only spectators: they
-//     receive broadcasts and the initial full_sync, but client-originated
-//     messages are rejected.
 func (h *Hub) RegisterHandler(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	if h.originChecker != nil && !h.originChecker(r) {
+		http.Error(w, "origin not allowed", http.StatusForbidden)
+		return
+	}
+
+	up := websocket.Upgrader{
+		CheckOrigin: func(req *http.Request) bool { return true },
+	}
+	if h.originChecker != nil {
+		up.CheckOrigin = h.originChecker
+	}
+	conn, err := up.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("Failed to upgrade connection: %v", err)
 		return
@@ -237,20 +241,19 @@ func (h *Hub) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Fall back to legacy user_id hint (NOT authoritative for auth).
-	userIDStr := q.Get("user_id")
-	var userID int
-	if userIDStr != "" {
-		_, _ = fmt.Sscanf(userIDStr, "%d", &userID)
+	// Parse legacy user_id purely for diagnostic logging. It is NEVER used
+	// for auth, attribution, or daily-priority attribution; the resolved
+	// session token user is the sole identity source.
+	legacyUserID := 0
+	if userIDStr := q.Get("user_id"); userIDStr != "" {
+		_, _ = fmt.Sscanf(userIDStr, "%d", &legacyUserID)
 	}
-	// If the session token resolved a user, prefer that id for the daily-
-	// priority hint as well.
-	if authenticated {
-		userID = resolvedUserID
+	if legacyUserID > 0 {
+		log.Printf("WebSocket connect presented legacy user_id=%d without session token; ignoring for auth and priority", legacyUserID)
 	}
 
 	// Pre-register so the initial full_sync uses the per-connection write
-	// lock. We hold the hub lock briefly; nothing else holds it here.
+	// lock.
 	h.mu.Lock()
 	h.clients[conn] = &ClientState{
 		conn:          conn,
@@ -261,7 +264,7 @@ func (h *Hub) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	h.mu.Unlock()
 
-	// Send full sync immediately before registering
+	// Send full sync immediately before registering.
 	if h.getQueueState != nil {
 		state, err := h.getQueueState(r.Context())
 		if err == nil {
@@ -269,7 +272,7 @@ func (h *Hub) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Send active vote sessions as individual vote_updated events
+	// Send active vote sessions as individual vote_updated events.
 	if h.voteInteractor != nil {
 		sessions := h.voteInteractor.GetActiveSessions()
 		for _, session := range sessions {
@@ -288,28 +291,30 @@ func (h *Hub) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 
 	h.register <- conn
 
-	// Check and award daily priority if a user is known (token-derived or
-	// legacy hint). This is non-privileged and does not change with R05.
-	if userID > 0 && h.priorityInteractor != nil {
+	// Daily priority runs ONLY when the connection is session-authenticated.
+	// The legacy ?user_id= hint is intentionally ignored here — it was
+	// previously used to call CheckAndAwardDailyPriority, which is exactly
+	// the spoofable surface A01 closes.
+	if authenticated && resolvedUserID > 0 && h.priorityInteractor != nil {
 		go func() {
 			ctx := context.Background()
+			userID := resolvedUserID
 			err := h.priorityInteractor.CheckAndAwardDailyPriority(ctx, userID)
 			if err != nil {
 				log.Printf("Failed to check daily priority for user %d: %v", userID, err)
-			} else {
-				// Get updated balance and broadcast
-				balance, err := h.priorityInteractor.GetUserPriorityBalance(ctx, userID)
-				if err == nil {
-					h.Broadcast(EventPriorityBalanceUpdated, PriorityBalanceUpdatedData{
-						UserID:  userID,
-						Balance: balance,
-					})
-				}
+				return
+			}
+			balance, err := h.priorityInteractor.GetUserPriorityBalance(ctx, userID)
+			if err == nil {
+				h.Broadcast(EventPriorityBalanceUpdated, PriorityBalanceUpdatedData{
+					UserID:  userID,
+					Balance: balance,
+				})
 			}
 		}()
 	}
 
-	// Start read loop to detect disconnections
+	// Start read loop to detect disconnections.
 	go h.readPump(conn)
 }
 
