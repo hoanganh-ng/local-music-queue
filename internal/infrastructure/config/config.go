@@ -21,6 +21,17 @@ type Config struct {
 	// DatabaseURL selects the PostgreSQL backend. R03 removed the SQLite
 	// fallback; this field must be non-empty in production.
 	DatabaseURL string
+
+	// AllowedOrigins is the explicit allow list shared by HTTP CORS and the
+	// WebSocket upgrader. Populated from ALLOWED_ORIGINS (comma-separated).
+	// When IsLocal is true and the env var is empty, the server substitutes
+	// safe loopback defaults at startup. In non-local environments an empty
+	// allow list fails Validate().
+	AllowedOrigins []string
+
+	// IsLocal mirrors APP_ENV=local. Used by Validate() to decide whether an
+	// empty allow list is fatal.
+	IsLocal bool
 }
 
 // Load loads the configuration from environment variables with defaults.
@@ -46,13 +57,26 @@ func Load() *Config {
 		log.Printf("no DATABASE_URL or POSTGRES_* set; the server will refuse to start until one is provided")
 	}
 
+	isLocal := strings.EqualFold(strings.TrimSpace(getEnv("APP_ENV", "local")), "local")
+
+	var allowedOrigins []string
+	if raw := strings.TrimSpace(getEnv("ALLOWED_ORIGINS", "")); raw != "" {
+		for _, part := range strings.Split(raw, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				allowedOrigins = append(allowedOrigins, trimmed)
+			}
+		}
+	}
+
 	return &Config{
-		Port:        getEnv("PORT", "1111"),
-		ClientPIN:   getEnv("CLIENT_PIN", "5555"),
-		HostPIN:     getEnv("HOST_PIN", "9512"),
-		AdminPIN:    getEnv("ADMIN_PIN", "1598"),
-		YTDLPPath:   getEnv("YTDLP_PATH", "yt-dlp"),
-		DatabaseURL: databaseURL,
+		Port:           getEnv("PORT", "1111"),
+		ClientPIN:      getEnv("CLIENT_PIN", "5555"),
+		HostPIN:        getEnv("HOST_PIN", "9512"),
+		AdminPIN:       getEnv("ADMIN_PIN", "1598"),
+		YTDLPPath:      getEnv("YTDLP_PATH", "yt-dlp"),
+		DatabaseURL:    databaseURL,
+		IsLocal:        isLocal,
+		AllowedOrigins: allowedOrigins,
 	}
 }
 
@@ -165,6 +189,9 @@ func getEnv(key, defaultValue string) string {
 func (c *Config) Validate() error {
 	if _, err := exec.LookPath(c.YTDLPPath); err != nil {
 		return fmt.Errorf("yt-dlp executable not found at %s: %w", c.YTDLPPath, err)
+	}
+	if !c.IsLocal && len(c.AllowedOrigins) == 0 {
+		return fmt.Errorf("ALLOWED_ORIGINS must be set when APP_ENV != \"local\"")
 	}
 	return nil
 }

@@ -141,3 +141,42 @@ func TestLoad_DatabaseURLSelection(t *testing.T) {
 		}
 	})
 }
+
+func TestConfig_AllowedOrigins(t *testing.T) {
+	t.Run("explicit list populated", func(t *testing.T) {
+		t.Setenv("APP_ENV", "test")
+		t.Setenv("ALLOWED_ORIGINS", "https://app.example.com, https://admin.example.com ")
+		cfg := Load()
+		if got, want := cfg.AllowedOrigins, []string{"https://app.example.com", "https://admin.example.com"}; len(got) != len(want) {
+			t.Fatalf("AllowedOrigins = %v, want %v", got, want)
+		} else {
+			for i := range want {
+				if got[i] != want[i] {
+					t.Errorf("AllowedOrigins[%d] = %q, want %q", i, got[i], want[i])
+				}
+			}
+		}
+	})
+
+	t.Run("Validate fails fast in production with no origins", func(t *testing.T) {
+		t.Setenv("APP_ENV", "test")
+		t.Setenv("ALLOWED_ORIGINS", "")
+		cfg := Load()
+		cfg.IsLocal = false
+		cfg.AllowedOrigins = nil
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected Validate to fail in non-local mode with empty allow list")
+		}
+	})
+
+	t.Run("Validate passes in local mode with no origins", func(t *testing.T) {
+		t.Setenv("APP_ENV", "test")
+		t.Setenv("ALLOWED_ORIGINS", "")
+		cfg := Load()
+		cfg.IsLocal = true
+		cfg.AllowedOrigins = nil
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("expected Validate to succeed in local mode, got %v", err)
+		}
+	})
+}
