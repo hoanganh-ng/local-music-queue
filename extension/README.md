@@ -66,6 +66,7 @@ The token rotates on every login. Re-paste after each new login. The extension s
 - **No Firefox/Safari support**: This extension is built for Chrome/Chromium using Manifest V3. Firefox and Safari are not supported.
 - **HTTPS with valid certificate required**: The extension's service worker `fetch()` requires the Local Music Queue server to have a valid TLS certificate if using HTTPS. Self-signed certificates will cause the request to fail. For local/development use, HTTP is acceptable. The server's `Access-Control-Allow-Origin: *` CORS header is required unless the user grants the extension optional host permission for the API host during configuration.
 - **Identity is client-supplied for display only**: The extension sends `added_by`/`added_by_id` in the JSON body for display/audit, but the server no longer uses them for authorization. Auth/identity comes from the **Session Token** (R05).
+- **Clearing a saved Session Token (future UX improvement)**: The Options page currently has no dedicated "Clear Session Token" button. Today, clearing the saved token requires either reinstalling the extension, clearing the `sessionToken` entry from `chrome.storage.local` via DevTools (Extensions → service worker → Storage → `chrome.storage.local`), or saving an empty/blank value into the Session Token field and clicking Save Settings. A explicit in-UI clear-token control is a planned future UX improvement.
 
 ## Architecture
 

@@ -91,7 +91,7 @@ PostgreSQL 16 (via `pgx/v5/stdlib`) is the only persistence backend. Schema vers
 ## Community Voting Mechanics
 - **Implementation & Persistence:** Vote sessions are stored in-memory.
 - **Expiry:** Sessions expire after a 30-second duration.
-- **Identity & Threshold:** Voting identity and role are client-supplied via JSON payloads (`user_id` and `user_role`). Connected-client counting is used for threshold calculation. The implemented threshold formula evaluates as `max(2, connectedClients / 2)`, and the threshold is captured at the moment the session is created.
+- **Identity & Threshold (R05):** The REST vote endpoints still parse legacy `user_id` / `user_role` fields in the JSON body for wire compatibility, but they are not consulted for authorization. Backend authorization and the actual vote identity now come from the resolved bearer-token user (see Authentication & Authorization). Connected-client counting still drives threshold calculation; the implemented threshold formula evaluates as `max(2, connectedClients / 2)`, and the threshold is captured at the moment the session is created.
 
 ## Auto-Queue Behavior
 - **Trigger:** Activates upon reaching the end of the queue (no-upcoming-song).
