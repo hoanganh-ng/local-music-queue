@@ -137,6 +137,22 @@ docker-compose up --build
 | `DUCKDNS_TOKEN` | DuckDNS token | - | Required |
 | `LETSENCRYPT_EMAIL` | Let's Encrypt email | - | Required |
 
+### Allowed origins
+
+The backend refuses to start in non-local mode without `ALLOWED_ORIGINS`.
+The same list gates HTTP CORS responses and WebSocket upgrade requests;
+an allowed browser origin is reflected in `Access-Control-Allow-Origin`
+with `Vary: Origin`. Empty `Origin` (server-to-server, CLI tooling) is
+always permitted for WebSocket upgrades but does not imply
+authentication — WebSocket identity still requires `?session_token=<opaque>`.
+
+In `APP_ENV=local` the server defaults to loopback origins
+(`http://localhost:1111`, `http://localhost:5173`,
+`http://127.0.0.1:1111`, `http://127.0.0.1:5173`) when the variable is
+unset. The legacy `?user_id=...` query parameter is accepted by the
+backend for wire compatibility but is no longer consulted for identity
+or daily-priority attribution; clients should send only `?session_token`.
+
 ## 🛠️ Development
 
 ### Testing
