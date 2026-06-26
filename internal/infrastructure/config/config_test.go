@@ -161,6 +161,7 @@ func TestConfig_AllowedOrigins(t *testing.T) {
 	t.Run("Validate fails fast in production with no origins", func(t *testing.T) {
 		t.Setenv("APP_ENV", "test")
 		t.Setenv("ALLOWED_ORIGINS", "")
+		t.Setenv("YTDLP_PATH", "/bin/true")
 		cfg := Load()
 		cfg.IsLocal = false
 		cfg.AllowedOrigins = nil
@@ -172,6 +173,7 @@ func TestConfig_AllowedOrigins(t *testing.T) {
 	t.Run("Validate passes in local mode with no origins", func(t *testing.T) {
 		t.Setenv("APP_ENV", "test")
 		t.Setenv("ALLOWED_ORIGINS", "")
+		t.Setenv("YTDLP_PATH", "/bin/true")
 		cfg := Load()
 		cfg.IsLocal = true
 		cfg.AllowedOrigins = nil
