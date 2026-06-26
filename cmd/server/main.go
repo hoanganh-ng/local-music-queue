@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	delivery "local-music-queue/internal/delivery/http"
+	"local-music-queue/internal/delivery/origin"
 	"local-music-queue/internal/delivery/ws"
 	"local-music-queue/internal/domain"
 	"local-music-queue/internal/domain/entity"
@@ -30,8 +31,18 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+// envMode returns the APP_ENV string value corresponding to a local flag,
+// so origin.Parse sees the same value the process would otherwise have
+// exposed.
+func envMode(isLocal bool) string {
+	if isLocal {
+		return "local"
+	}
+	return "production"
+}
+
 func main() {
-	mux, cfg, cleanup, err := setupApp()
+	mux, cfg, policy, cleanup, err := setupApp()
 	if err != nil {
 		log.Fatalf("Failed to setup application: %v", err)
 	}
@@ -40,7 +51,7 @@ func main() {
 	// Start Server
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,
-		Handler: requestLogger(enableCORS(mux)),
+		Handler: requestLogger(enableCORS(policy, mux)),
 	}
 
 	// Check if we should serve HTTPS
@@ -60,7 +71,7 @@ func main() {
 	}
 }
 
-func setupApp() (*http.ServeMux, *config.Config, func(), error) {
+func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) {
 	// 1. Load configuration
 	cfg := config.Load()
 	log.Printf("Starting Local Music Queue server on port %s", cfg.Port)
@@ -96,8 +107,18 @@ func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
+
+	// Parse origin policy
+	policy, perr := origin.Parse(map[string]string{
+		"ALLOWED_ORIGINS": strings.Join(cfg.AllowedOrigins, ","),
+		"APP_ENV":         envMode(cfg.IsLocal),
+	})
+	if perr != nil {
+		return nil, nil, nil, nil, perr
+	}
+	log.Printf("Allowed origins: %v (local=%t)", policy.Allowed, policy.IsLocal)
 
 	// 2. Initialize Infrastructure
 	// PostgreSQL only: the SQLite runtime fallback was removed in R03 once the
@@ -105,7 +126,7 @@ func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 	// refuses to start without DATABASE_URL.
 	queueRepo, userRepo, autoQueueRepo, dbHandle, err := initRepositories(cfg)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	pgRoom := persistence.NewPostgresRoomRepository(dbHandle)
 	// dbHandle is non-nil only for the PostgreSQL path. The *sql.DB must stay
@@ -123,7 +144,7 @@ func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 	// `go run ./cmd/server` and CI. ErrNoChange is not an error.
 	if err := persistence.RunEmbeddedMigrationsUp(dbHandle); err != nil {
 		cleanup()
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	ytService := youtube.NewYTDLPService(cfg.YTDLPPath)
@@ -173,6 +194,7 @@ func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 
 	// 4. Initialize Delivery with queue state callback
 	hub := ws.NewHub(qInteractor.GetState)
+	hub.SetOriginChecker(policy.AllowWebSocket)
 	hub.SetAuthInteractor(authInteractor)
 	go hub.Run() // Start WebSocket hub loop
 
@@ -282,7 +304,7 @@ func setupApp() (*http.ServeMux, *config.Config, func(), error) {
 	// WebSocket
 	mux.HandleFunc("/ws", hub.RegisterHandler)
 
-	return mux, cfg, cleanup, nil
+	return mux, cfg, policy, cleanup, nil
 }
 
 // initRepositories opens the PostgreSQL backend. The R03 migration removed

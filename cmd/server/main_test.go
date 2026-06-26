@@ -65,7 +65,7 @@ func TestSetupApp(t *testing.T) {
 		os.Unsetenv("DATABASE_URL")
 	}()
 
-	mux, cfg, cleanup, err := setupApp()
+	mux, cfg, _, cleanup, err := setupApp()
 	if err != nil {
 		t.Fatalf("setupApp failed: %v", err)
 	}
