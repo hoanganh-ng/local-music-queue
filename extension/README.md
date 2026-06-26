@@ -21,9 +21,23 @@ Before using the extension, you must configure it:
    - **API Base URL**: The full URL to your Local Music Queue server (e.g., `https://your-server:443` or `http://192.168.1.100:8080`)
    - **Display Name**: The name that will appear as "added by" when songs are added from this extension
    - **User ID** (optional): Your numeric user ID in the Local Music Queue app (defaults to 0)
+   - **Session Token** (R05, required to add songs): Paste the value of `lmq_session_token` from your browser's `localStorage` on the Local Music Queue app (see below). Without it, the server returns 401 to `/api/queue/add` and songs cannot be added.
 4. Click **Save Settings**
 
 You can also click **Test Connection** to verify that your server is reachable.
+
+### Where to find the Session Token
+
+The Session Token is the same opaque token the web app sends in the `Authorization: Bearer <token>` header (and in `?session_token=` on the WebSocket URL). It is stored under `lmq_session_token` in `localStorage` for the Local Music Queue app's origin.
+
+To copy it:
+
+1. Open the Local Music Queue web app and log in (Google OAuth). Stay logged in.
+2. Open DevTools → **Application** → **Local Storage** → select the app's origin.
+3. Find the row `lmq_session_token` and copy its value.
+4. Open the extension Options page, paste it into **Session Token**, and Save.
+
+The token rotates on every login. Re-paste after each new login. The extension stores the value in `chrome.storage.local` (key `sessionToken`) and never logs it.
 
 ## Supported Sites
 
@@ -51,7 +65,7 @@ You can also click **Test Connection** to verify that your server is reachable.
 - **No playlist support**: The extension adds individual songs only. Playlist-level operations are not supported.
 - **No Firefox/Safari support**: This extension is built for Chrome/Chromium using Manifest V3. Firefox and Safari are not supported.
 - **HTTPS with valid certificate required**: The extension's service worker `fetch()` requires the Local Music Queue server to have a valid TLS certificate if using HTTPS. Self-signed certificates will cause the request to fail. For local/development use, HTTP is acceptable. The server's `Access-Control-Allow-Origin: *` CORS header is required unless the user grants the extension optional host permission for the API host during configuration.
-- **Identity is client-supplied**: The extension uses the configured display name and user ID without server-side authentication. This matches the existing Local Music Queue behavior for the add-song endpoint.
+- **Identity is client-supplied for display only**: The extension sends `added_by`/`added_by_id` in the JSON body for display/audit, but the server no longer uses them for authorization. Auth/identity comes from the **Session Token** (R05).
 
 ## Architecture
 
@@ -188,11 +202,23 @@ For the easiest installation experience for non-technical users:
 
 ## Authentication Status (R05)
 
-The browser extension currently posts to `/api/queue/add` **without** an `Authorization: Bearer <session_token>` header. R05 added session-token enforcement at the WebSocket layer, but did not retrofit the extension. The `/api/queue/add` endpoint still accepts the legacy client-supplied `added_by_id` for this sprint, so the extension continues to function.
+R05 server-authenticates `POST /api/queue/add` via the same bearer token the frontend uses on its REST + WebSocket layer. The extension now attaches `Authorization: Bearer <session_token>` whenever a token is configured in Options.
 
-**Staged for the next sprint:** attach the same `lmq_session_token` the frontend uses (read from `chrome.storage.local`) as `Authorization: Bearer <token>`. This is a compatibility break for any user who has not logged in via the frontend since the token was issued — they will need to re-authenticate.
+- **How the token reaches the extension:** the user pastes the current `lmq_session_token` (read from the web app's `localStorage`) into the Options page. The extension stores it in `chrome.storage.local` under `sessionToken` and sends it on every `POST /api/queue/add`. The token is never logged.
+- **What happens with no token:** the server returns 401 to `/api/queue/add` and the extension surfaces a clear "session token required" error to the user.
+- **Token rotation:** the token rotates on each frontend login (per the existing auth flow). The extension has no automatic refresh path; the user must re-paste the new value into Options after each login. This is the documented v1 limitation — a future sprint can auto-sync from the web app's `localStorage` via the content script on the app's origin.
+- **Display identity vs auth identity:** `added_by` / `added_by_id` remain in the JSON body for backwards-compatible display, but are not consulted by the R05 authorization gate.
 
-Track this in the next sprint's plan.
+### Manual verification (extension + R05)
+
+There is no automated harness for the extension. After saving the session token in Options:
+
+1. **Unconfigured** — clear Options, click the button on a YouTube video → expect a "not configured" tooltip.
+2. **Configured, no token** — fill API Base URL + Display Name only, leave Session Token blank, click the button → expect a red error and tooltip mentioning session token / 401.
+3. **Configured, valid token** — paste a valid `lmq_session_token` from a logged-in frontend session, click the button → expect the green checkmark and the song appears at the bottom of the queue.
+4. **Expired token** — paste an old/expired token, click the button → expect 401 and the same "unauthorized" tooltip.
+5. **Network/server down** — point API Base at an unreachable host → expect the existing "network" error path.
+6. **Round-trip server log** — confirm the request lands on the server with `Authorization: Bearer ...` and a 204/200 response (not 401).
 
 ## License
 

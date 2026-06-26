@@ -11,6 +11,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const apiBaseInput = document.getElementById('api-base');
   const displayNameInput = document.getElementById('display-name');
   const userIdInput = document.getElementById('user-id');
+  const sessionTokenInput = document.getElementById('session-token');
 
   // Load saved options
   loadOptions();
@@ -28,7 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
    * Loads saved options from chrome.storage.local.
    */
   function loadOptions() {
-    chrome.storage.local.get(['apiBase', 'displayName', 'userId'], (result) => {
+    chrome.storage.local.get(['apiBase', 'displayName', 'userId', 'sessionToken'], (result) => {
       if (result.apiBase) {
         apiBaseInput.value = result.apiBase;
       }
@@ -37,6 +38,13 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       if (typeof result.userId === 'number') {
         userIdInput.value = result.userId;
+      }
+      if (typeof result.sessionToken === 'string') {
+        // Never auto-fill — the user must re-paste after each new login.
+        // The DOM is left blank; this branch is here for completeness only.
+        sessionTokenInput.placeholder = result.sessionToken
+          ? '•••• (saved token hidden; clear and paste a new one to replace)'
+          : 'paste lmq_session_token here';
       }
     });
   }
@@ -84,6 +92,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const apiBase = apiBaseInput.value.trim().replace(/\/+$/, '');
     const displayName = displayNameInput.value.trim();
     const userId = parseInt(userIdInput.value, 10) || 0;
+    const sessionToken = sessionTokenInput.value.trim();
 
     if (!apiBase) {
       showStatus('API Base URL is required.', 'error');
@@ -106,15 +115,22 @@ document.addEventListener('DOMContentLoaded', () => {
     // Request host permission for the API base URL (non-blocking if denied)
     await requestHostPermission(apiBase);
 
-    chrome.storage.local.set({
+    const payload = {
       apiBase: apiBase,
       displayName: displayName,
       userId: userId
-    }, () => {
+    };
+    if (sessionToken) {
+      payload.sessionToken = sessionToken;
+    }
+
+    chrome.storage.local.set(payload, () => {
       if (chrome.runtime.lastError) {
         showStatus('Failed to save: ' + chrome.runtime.lastError.message, 'error');
         return;
       }
+      // Clear the field after save so the token is not left visible.
+      sessionTokenInput.value = '';
       showStatus('Settings saved successfully.', 'success');
     });
   }

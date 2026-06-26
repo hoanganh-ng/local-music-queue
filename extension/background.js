@@ -31,11 +31,11 @@ function buildWatchUrl(videoId) {
 
 /**
  * Loads extension configuration from chrome.storage.local.
- * @returns {Promise<{apiBase: string, displayName: string, userId: number}|null>}
+ * @returns {Promise<{apiBase: string, displayName: string, userId: number, sessionToken: string}|null>}
  */
 async function loadConfig() {
   return new Promise((resolve) => {
-    chrome.storage.local.get(['apiBase', 'displayName', 'userId'], (result) => {
+    chrome.storage.local.get(['apiBase', 'displayName', 'userId', 'sessionToken'], (result) => {
       if (!result.apiBase || !result.displayName) {
         resolve(null);
         return;
@@ -43,7 +43,10 @@ async function loadConfig() {
       resolve({
         apiBase: result.apiBase.replace(/\/+$/, ''), // Remove trailing slashes
         displayName: result.displayName,
-        userId: typeof result.userId === 'number' ? result.userId : 0
+        userId: typeof result.userId === 'number' ? result.userId : 0,
+        // sessionToken is optional: when set, it is sent as Bearer auth.
+        // When unset, the server rejects /api/queue/add (R05 auth gate).
+        sessionToken: typeof result.sessionToken === 'string' ? result.sessionToken : ''
       });
     });
   });
@@ -74,11 +77,12 @@ async function addSongToQueue(videoId, url) {
     };
   }
 
-  // R05 staging note: this extension still posts to /api/queue/add WITHOUT
-  // an Authorization header. The R05 backend does not yet require it, but
-  // authorization hardening (next sprint) will. Until then, extension
-  // requests succeed under the legacy client-supplied identity path.
-  // Do not remove this banner; see extension/README.md for the plan.
+  // R05: the server now requires Authorization on /api/queue/add. The token
+  // is read from chrome.storage.local (key: sessionToken) and sent as a
+  // Bearer header when present. Without it the server returns 401 and the
+  // song is NOT added. added_by / added_by_id remain in the body for
+  // display compatibility only — they are NOT consulted for auth/identity
+  // by the R05 route gate.
   const endpoint = `${config.apiBase}/api/queue/add`;
   const body = {
     url: url,
@@ -86,12 +90,17 @@ async function addSongToQueue(videoId, url) {
     added_by_id: config.userId
   };
 
+  const headers = {
+    'Content-Type': 'application/json'
+  };
+  if (config.sessionToken) {
+    headers['Authorization'] = `Bearer ${config.sessionToken}`;
+  }
+
   try {
     const response = await fetch(endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
+      headers: headers,
       body: JSON.stringify(body)
     });
 
@@ -120,6 +129,14 @@ async function addSongToQueue(videoId, url) {
         success: false,
         error: 'bad_request',
         message: text || 'Invalid request'
+      };
+    }
+
+    if (response.status === 401) {
+      return {
+        success: false,
+        error: 'unauthorized',
+        message: 'Server requires a session token (R05). Open extension options and paste your current lmq_session_token.'
       };
     }
 

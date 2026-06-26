@@ -540,4 +540,52 @@ describe('WebSocketClient', () => {
       globalStore.currentUser = null
     }
   })
+
+  it('connect URL percent-encodes URL-sensitive characters in the session token', async () => {
+    // Token containing characters that MUST be encoded in a query value:
+    // '+', '/', '=', '?', '&', space, '%', '#'. A naive concatenation
+    // (e.g. `?session_token=${token}`) would corrupt the URL or split the
+    // query into multiple params. websocket.js routes through URLSearchParams
+    // so the assertions here pin the encoding contract.
+    const tricky = 'tok+with/sensitive=chars?&space %and#hash'
+    const future = new Date(Date.now() + 60_000).toISOString()
+    sessionHelper.saveSession(tricky, future)
+
+    const wsInstances = []
+    class FakeWS {
+      constructor(url) {
+        this.url = url
+        this.readyState = 0
+        this.close = vi.fn()
+        this.send = vi.fn()
+        wsInstances.push(this)
+      }
+    }
+    vi.stubGlobal('WebSocket', FakeWS)
+    globalStore.currentUser = null
+
+    try {
+      wsClient.connect()
+      expect(wsInstances).toHaveLength(1)
+      const url = wsInstances[0].url
+
+      // The raw token must NOT appear verbatim — every URL-sensitive
+      // character must be percent-encoded (URLSearchParams uses `+` for
+      // space per application/x-www-form-urlencoded).
+      expect(url).not.toContain(tricky)
+      expect(url).toContain('session_token=tok%2Bwith%2Fsensitive%3Dchars%3F%26space+%25and%23hash')
+      // No accidental param splitting: only one query separator after /ws.
+      expect(url.split('?')[1]?.split('&')).toHaveLength(1)
+      // Decoded query parses back to the original token (decodeURIComponent
+      // turns '+' back into space, matching form-encoding semantics).
+      const qs = url.split('?')[1]
+      const decoded = decodeURIComponent(qs.replace(/\+/g, ' '))
+      expect(decoded).toBe(`session_token=${tricky}`)
+    } finally {
+      wsClient.disconnect()
+      vi.unstubAllGlobals()
+      sessionHelper.clearSession()
+      globalStore.currentUser = null
+    }
+  })
 })

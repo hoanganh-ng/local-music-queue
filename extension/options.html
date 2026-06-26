@@ -201,6 +201,27 @@
         <p class="help-text">Numeric user ID for the Local Music Queue app. Defaults to 0 if not set.</p>
       </div>
 
+      <div class="form-group">
+        <label for="session-token">
+          Session Token
+          <span class="optional">(R05 — required to add songs)</span>
+        </label>
+        <input
+          type="text"
+          id="session-token"
+          name="sessionToken"
+          placeholder="paste lmq_session_token here"
+          autocomplete="off"
+          spellcheck="false"
+        >
+        <p class="help-text">
+          Paste the value of <code>lmq_session_token</code> from your browser's
+          localStorage on the Local Music Queue app. The extension sends it as
+          <code>Authorization: Bearer &lt;token&gt;</code>. When unset, /api/queue/add
+          returns 401 and songs cannot be added. Re-paste after each new login.
+        </p>
+      </div>
+
       <div class="button-row">
         <button type="submit" class="btn-primary">Save Settings</button>
         <button type="button" class="btn-secondary" id="test-btn">Test Connection</button>
