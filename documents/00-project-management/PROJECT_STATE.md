@@ -6,7 +6,7 @@
 **Sprint 003 Implementation Predecessor Commit:** `9c0fba72ca21f933c88817c3b4975bf3319f9b2b`
 **Sprint 003 Final Reviewed Commit:** `b0a822478c5d4cee6162702d5969605cfc2702f2`
 
-The most recently closed sprint that introduced architectural changes documented here is **Sprint 009 / R03 — SQLite-to-PostgreSQL Data Migration**. The Database section, the Deployment Topology section, and the data migration CLI description below describe the post-R03 state. Earlier sprints (001-009) are recorded in `documents/00-project-management/SPRINTS/`; the most recent closure records are `008-postgresql-foundation-with-existing-behavior-preserved.md` (R02) and `009-sqlite-to-postgresql-data-migration.md` (R03).
+The most recently closed sprint that introduced architectural changes documented here is **Sprint R05 — Session Token Authentication & Authorization**. R05 shipped server-issued in-memory session tokens, `Authorization: Bearer <token>` enforcement on privileged REST endpoints, role-gated authorization per the route matrix in the Authentication & Authorization section, `?session_token=<opaque>` WebSocket authentication, the additive `error` event for rejected client-originated requests, and browser-extension session-token handling. Earlier sprints (001-010) are recorded in `documents/00-project-management/SPRINTS/`; the most recent closed sprint records are `009-sqlite-to-postgresql-data-migration.md` (R03), `010-room-domain-invite-membership-lifecycle.md` (R04, pending PO acceptance), and the R05 closure record at `documents/00-project-management/SPRINTS/011-session-token-authentication-authorization.md`.
 
 ## Source-Priority Rule
 This `PROJECT_STATE.md` document is the authoritative documentation snapshot for the inspected commit. If any other documentation conflicts with this document, this document is correct regarding the documented state of the codebase. However, if conflicts are discovered between this document and the actual implementation or tests, the implementation and tests themselves remain the ultimate source of truth.
@@ -119,10 +119,11 @@ During the Sprint 003 verification:
 - `git status --short --untracked-files=all` - PASS
 
 ## Prioritized Known-Risk Register
-1. **Critical:** Absence of JWT/server session/per-request identity allowing trivial spoofing of identity/roles on most endpoints, with the song removal endpoint (`POST /api/queue/remove`) as the explicit exception.
-2. **Critical:** Lack of backend authorization checks on most queue operations (except song removal) and auto-queue configuration.
+
+1. **Mitigated by R05 (residual):** Session-token-based identity now authenticates privileged REST endpoints and the WebSocket accept path. Sessions live strictly in-memory and are lost on restart, so a server restart logs every client out and requires re-login. Browser-extension clients must re-paste the token after each new login; no automatic refresh path exists.
+2. **Mitigated by R05 (residual):** Privileged REST endpoints are role-gated per the route matrix above. Authorization still relies on the in-memory session, so the same restart-loss caveat applies.
 3. **High:** In-memory voting state is lost on restart.
-4. **High:** WebSocket vulnerabilities (origin not validated, `user_id` via query string).
+4. **High:** WebSocket origin is not validated; the legacy `?user_id=...` query parameter remains accepted as a non-authenticated daily-priority hint.
 
 ## Deferred Runtime Sprint Candidates
 - Implement secure JWT-based or session-based authentication.
