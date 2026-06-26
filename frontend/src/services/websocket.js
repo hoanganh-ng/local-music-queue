@@ -106,17 +106,12 @@ class WebSocketClient {
     const API_BASE = import.meta.env.VITE_API_BASE_URL || 'https://localhost:443'
     const wsBase = API_BASE.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws'
 
-    // R05: build the query via URLSearchParams so URL-sensitive characters
-    // in the session token are percent-encoded. session_token is required for
-    // client-originated messages (request_full_sync). user_id is preserved as
-    // a legacy non-authenticated hint for the daily-priority check.
+    // A01: the backend no longer accepts ?user_id= for identity or
+    // daily-priority attribution. Only the session_token is sent; clients
+    // that omit it remain read-only spectators per R05.
     const params = new URLSearchParams()
     if (sessionHelper.isValid()) {
       params.set('session_token', sessionHelper.getToken())
-    }
-    const currentUser = globalStore.currentUser
-    if (currentUser?.id) {
-      params.set('user_id', String(currentUser.id))
     }
     const wsUrl = params.toString() ? `${wsBase}?${params.toString()}` : wsBase
 

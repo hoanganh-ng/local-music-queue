@@ -524,7 +524,8 @@ describe('WebSocketClient', () => {
       }
     }
     vi.stubGlobal('WebSocket', FakeWS)
-    // Force a user_id too, to assert both params coexist.
+    // A01: legacy ?user_id= is no longer sent. Verify session_token is in the
+    // URL and user_id is NOT.
     globalStore.currentUser = { id: 7 }
 
     try {
@@ -532,7 +533,7 @@ describe('WebSocketClient', () => {
       expect(wsInstances).toHaveLength(1)
       const url = wsInstances[0].url
       expect(url).toContain('session_token=tok-r05-url')
-      expect(url).toContain('user_id=7')
+      expect(url).not.toContain('user_id=')
     } finally {
       wsClient.disconnect()
       vi.unstubAllGlobals()
