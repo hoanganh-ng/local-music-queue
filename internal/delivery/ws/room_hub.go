@@ -82,6 +82,7 @@ func (m multiRoomResolver) QueueByRoomID(ctx context.Context, roomID int64) (*en
 type roomClientState struct {
 	conn        *websocket.Conn
 	roomSlug    string
+	roomID      int64
 	userID      int
 	writeMu     sync.Mutex
 	connectedAt time.Time
@@ -110,11 +111,20 @@ type RoomWSHub struct {
 	seqNum  map[string]int64                               // roomSlug -> next seq
 
 	broadcast  chan roomBroadcast
-	register   chan *roomClientState
+	register   chan registerReq
 	unregister chan *roomClientState
 
 	closed chan struct{}
 	once   sync.Once
+}
+
+// registerReq couples a connecting client with the channel the hub loop
+// closes after the initial sync attempt completes (or fails). The buffered
+// channel lets RegisterHandler wait without leaking a goroutine if the hub
+// loop is busy with another slow write.
+type registerReq struct {
+	cs          *roomClientState
+	initialSync chan error
 }
 
 // RoomSessionResolver is satisfied by *auth.Interactor. Same shape as
@@ -144,7 +154,7 @@ func NewRoomWSHub(roomResolver RoomBySlugResolver, memberResolver RoomMemberReso
 		clients:    map[string]map[*websocket.Conn]*roomClientState{},
 		seqNum:     map[string]int64{},
 		broadcast:  make(chan roomBroadcast),
-		register:   make(chan *roomClientState),
+		register:   make(chan registerReq),
 		unregister: make(chan *roomClientState),
 		closed:     make(chan struct{}),
 	}
@@ -189,7 +199,8 @@ func (h *RoomWSHub) Run() {
 		select {
 		case <-h.closed:
 			return
-		case cs := <-h.register:
+		case req := <-h.register:
+			cs := req.cs
 			h.mu.Lock()
 			if h.clients[cs.roomSlug] == nil {
 				h.clients[cs.roomSlug] = map[*websocket.Conn]*roomClientState{}
@@ -197,6 +208,18 @@ func (h *RoomWSHub) Run() {
 			h.clients[cs.roomSlug][cs.conn] = cs
 			h.mu.Unlock()
 			log.Printf("room ws: client connected to %s", cs.roomSlug)
+
+			// Initial sync runs INSIDE the hub loop so the seq allocation is
+			// linearised with the broadcast channel: any later dispatch() call
+			// will allocate a strictly greater seq_num than the one we stamp here.
+			state, err := h.resolver.QueueByRoomID(context.Background(), cs.roomID)
+			if err != nil || state == nil {
+				log.Printf("room ws: initial sync fetch failed (%s): %v", cs.roomSlug, err)
+				close(req.initialSync)
+				continue
+			}
+			h.sendInitialSync(cs, state)
+			close(req.initialSync)
 		case cs := <-h.unregister:
 			h.mu.Lock()
 			if m, ok := h.clients[cs.roomSlug]; ok {
@@ -349,18 +372,58 @@ func (h *RoomWSHub) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	cs := &roomClientState{
 		conn:        conn,
 		roomSlug:    slug,
+		roomID:      roomObj.ID,
 		userID:      user.ID,
 		connectedAt: time.Now(),
 	}
 
-	// Send initial room_queue_sync BEFORE registering so the client
-	// receives its snapshot even if the register channel is slow.
-	if state, err := h.resolver.QueueByRoomID(r.Context(), roomObj.ID); err == nil && state != nil {
-		h.sendToClient(cs, EventRoomQueueSync, RoomQueueSyncData{RoomSlug: slug, State: state})
+	// Order-safe registration: the hub loop is the only place that allocates
+	// per-room seqs, so any subsequent broadcast will carry a strictly greater
+	// seq than the initial sync the loop is about to send.
+	initialSync := make(chan error, 1)
+	select {
+	case h.register <- registerReq{cs: cs, initialSync: initialSync}:
+	case <-h.closed:
+		conn.Close()
+		return
 	}
 
-	h.register <- cs
+	// Wait briefly for the initial sync to be sent. The buffered channel
+	// guarantees the hub loop's close() does not block; the timeout guards
+	// against a wedged hub loop without hanging the HTTP request forever.
+	select {
+	case <-initialSync:
+	case <-time.After(2 * time.Second):
+		log.Printf("room ws: initial sync timed out for %s", slug)
+	case <-h.closed:
+		conn.Close()
+		return
+	}
+
 	go h.readPump(cs)
+}
+
+// sendInitialSync stamps a room_queue_sync envelope with the NEXT per-room
+// seq (allocated under h.mu via nextSeq) and writes it to a single client.
+// Always called from inside the hub loop so the seq allocation is
+// linearised with broadcasts.
+func (h *RoomWSHub) sendInitialSync(cs *roomClientState, state *entity.Queue) {
+	seq := h.nextSeq(cs.roomSlug)
+	payload := BroadcastMessage{
+		Type:      EventRoomQueueSync,
+		Data:      RoomQueueSyncData{RoomSlug: cs.roomSlug, State: state},
+		SeqNum:    seq,
+		Timestamp: time.Now(),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("room ws: marshal sync failed: %v", err)
+		return
+	}
+	if err := cs.writeMessage(websocket.TextMessage, raw); err != nil {
+		log.Printf("room ws: sync write failed: %v", err)
+		cs.unregisterAndClose(h)
+	}
 }
 
 // sendToClient sends a single envelope to one client, using the

@@ -317,3 +317,82 @@ func TestRoomHub_RegisterHandler_RequiresSessionToken(t *testing.T) {
 		t.Fatalf("expected 401 without session token, got %v", resp)
 	}
 }
+
+// TestRoomHub_InitialSyncOrderedBeforeBroadcasts pins the contract that
+// when a client connects AFTER a broadcast has been issued, the initial
+// room_queue_sync seq is strictly greater than that prior broadcast's seq.
+//
+// Without the hub-loop ordering fix, RegisterHandler reads the queue state
+// via the resolver, then calls nextSeq in RegisterHandler before sending
+// to the register channel. A concurrent dispatch() running in the
+// broadcaster can call nextSeq first, allocate a HIGHER seq, and then the
+// client's initial sync gets the LOWER seq. With the fix, registration
+// and initial sync are both performed inside the hub loop, so the
+// registerReq handler is the ONLY consumer of nextSeq that touches the
+// client register path; broadcasts that were dispatched AFTER the
+// RegisterHandler entered the hub loop must therefore carry seqs strictly
+// greater than the sync seq.
+func TestRoomHub_InitialSyncOrderedBeforeBroadcasts(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("alpha", &entity.Room{ID: 11, Slug: "alpha", Status: entity.RoomStatusActive})
+	resolver.SetQueue(11, &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "T1"}}})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{"valid": {ID: 1, Role: entity.RoleHost, DisplayName: "H"}},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	// Drain: connect a throwaway client first to make the next broadcast
+	// the only outstanding operation, so its seq is exactly 1. Then close
+	// the throwaway so only the real client remains connected.
+	warmup := dialRoomWS(t, server, "alpha", "valid")
+	warmup.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := warmup.ReadMessage(); err != nil {
+		t.Fatalf("warmup drain: %v", err)
+	}
+	warmup.Close()
+
+	// Issue a broadcast BEFORE the real client connects. Because the
+	// hub-loop ordering fix only applies to registration, this broadcast's
+	// seq is allocated independently. The real client must receive an
+	// initial sync whose seq is STRICTLY GREATER than this broadcast's seq.
+	state := &entity.Queue{Songs: []entity.Song{{ID: "added", Title: "A"}}}
+	hub.BroadcastRoomQueueSongAdded("alpha", entity.Song{ID: "added", Title: "A"}, 0, state)
+	// dispatch() allocates nextSeq synchronously before returning, so
+	// reading the seq counter now reflects the broadcast's seq.
+	hub.mu.Lock()
+	broadcastSeq := hub.seqNum["alpha"]
+	hub.mu.Unlock()
+
+	// Now connect the real client. The initial sync seq MUST be > broadcastSeq.
+	conn := dialRoomWS(t, server, "alpha", "valid")
+	defer conn.Close()
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read initial sync: %v", err)
+	}
+	var env struct {
+		Type   string            `json:"type"`
+		SeqNum int64             `json:"seq_num"`
+		Data   RoomQueueSyncData `json:"data"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal sync: %v", err)
+	}
+	if env.Type != EventRoomQueueSync {
+		t.Fatalf("expected first frame to be %q, got %q", EventRoomQueueSync, env.Type)
+	}
+	if env.SeqNum <= broadcastSeq {
+		t.Fatalf("initial sync seq (%d) must be strictly greater than the broadcast seq (%d) issued before connect — hub-loop ordering fix is not in effect", env.SeqNum, broadcastSeq)
+	}
+}
