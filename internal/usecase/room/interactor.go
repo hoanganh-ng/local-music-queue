@@ -27,6 +27,13 @@ var (
 	ErrInviteExhausted = errors.New("invite exhausted")
 	ErrArchived        = errors.New("room archived")
 	ErrForbidden       = errors.New("forbidden")
+
+	// Player-lease sentinels (R06).
+	ErrPlayerLeaseExists    = errors.New("player lease exists")
+	ErrPlayerLeaseNotFound  = errors.New("player lease not found")
+	ErrPlayerLeaseGone      = errors.New("player lease gone (past grace)")
+	ErrPlayerLeaseForbidden = errors.New("forbidden")
+	ErrNotLeaseHolder       = errors.New("not lease holder")
 )
 
 // DefaultInviteExpiry is the documented default invite lifetime (ADR 001 §7).
@@ -34,6 +41,21 @@ const DefaultInviteExpiry = 7 * 24 * time.Hour
 
 // MaxInviteLifetime caps invite expiry override at 30 days from creation.
 const MaxInviteLifetime = 30 * 24 * time.Hour
+
+// DefaultLeaseDuration is the ADR 001 §6 lease length (60s).
+const DefaultLeaseDuration = 60 * time.Second
+
+// DefaultLeaseGrace is the ADR 001 §6 grace after expiry (30s).
+const DefaultLeaseGrace = 30 * time.Second
+
+// RoomArchivedEvent is emitted by the lease expiry sweeper and by the
+// explicit release path. The ws transport converts this into the
+// room_archived envelope.
+type RoomArchivedEvent struct {
+	RoomID     int64
+	Reason     string // entity.PlayerLeaseArchiveReason serialized as string
+	ArchivedAt time.Time
+}
 
 // Interactor owns the room, invite, and membership use cases.
 type Interactor struct {

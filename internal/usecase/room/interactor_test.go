@@ -29,6 +29,18 @@ func pgInter(t *testing.T) (*Interactor, func()) {
 	return inter, cleanup
 }
 
+// pgInterWithDB returns the interactor plus the underlying *sql.DB so
+// sibling repositories (e.g. PlayerLease) can be constructed against the
+// same per-test schema. Existing R04 tests use pgInter unchanged.
+func pgInterWithDB(t *testing.T) (*Interactor, *sql.DB, func()) {
+	t.Helper()
+	db, cleanup := persistence.NewRoomTestDB(t)
+	seedUsers(t, db)
+	repo := persistence.NewPostgresRoomRepository(db)
+	inter := NewInteractor(repo)
+	return inter, db, cleanup
+}
+
 // seedUsers inserts a small set of users (1..5) the tests reference.
 // CreateRoomAndHost enforces the room_members -> users FK.
 func seedUsers(t *testing.T, db *sql.DB) {

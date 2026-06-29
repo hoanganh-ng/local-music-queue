@@ -111,8 +111,16 @@ func (r *PostgresPlayerLeaseRepository) ReleaseByHolder(ctx context.Context, roo
 }
 
 // EndLease ends the active lease for a room (used by sweep + explicit
-// archive). Returns sql.ErrNoRows when no active lease exists.
+// archive). Returns sql.ErrNoRows when no active lease exists. The
+// returned *entity.PlayerLease carries the just-ended row's pre-end
+// snapshot so callers don't need a follow-up GetByRoom (which would
+// return ErrNoRows because GetByRoom filters ended_at IS NULL).
 func (r *PostgresPlayerLeaseRepository) EndLease(ctx context.Context, roomID int64, now time.Time) (*entity.PlayerLease, error) {
+	// Snapshot the active row first (GetByRoom filters ended_at IS NULL).
+	current, err := r.GetByRoom(ctx, roomID)
+	if err != nil {
+		return nil, err
+	}
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE player_leases SET ended_at = $1
 		 WHERE room_id = $2 AND ended_at IS NULL`,
@@ -127,7 +135,7 @@ func (r *PostgresPlayerLeaseRepository) EndLease(ctx context.Context, roomID int
 	if n == 0 {
 		return nil, sql.ErrNoRows
 	}
-	return r.GetByRoom(ctx, roomID)
+	return current, nil
 }
 
 // GetByRoom fetches the active lease for a room.
