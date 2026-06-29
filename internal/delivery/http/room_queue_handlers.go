@@ -33,7 +33,7 @@ func NewRoomQueueHandlers(inter *roomqueue.Interactor, a *auth.Interactor) *Room
 // --- Request/response shapes ---
 
 type roomQueueAddReq struct {
-	URL      string                `json:"url"`
+	URL      string               `json:"url"`
 	Metadata *entity.SearchResult `json:"metadata,omitempty"`
 }
 

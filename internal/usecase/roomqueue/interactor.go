@@ -153,13 +153,11 @@ func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, 
 		}
 		song = fetched
 	}
-	// Actor identity is server-resolved from the bearer token; the
-	// request body MUST NOT supply AddedBy / AddedByID. We set them from
-	// the caller here (the handler passes user.DisplayName / user.ID).
-	// The handler is the only place this is allowed; tests that bypass
-	// the handler MUST pass the values explicitly via metadata or via
-	// a small helper.
-	_ = actorUserID
+	// Actor identity is server-resolved from the bearer token by the
+	// handler, which stamps metadata.AddedBy / metadata.AddedByID before
+	// calling AddSong. The handler is the single source of attribution;
+	// tests that bypass the handler must set those fields explicitly on
+	// the metadata argument.
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
