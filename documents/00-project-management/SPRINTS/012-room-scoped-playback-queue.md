@@ -61,3 +61,57 @@ The current implementation does not maintain a durable queue.  Tracks are passed
 ## Execution note
 
 This document is a planning stub.  It captures the intent and requirements for the **room‑scoped playback queue** sprint but does not reflect any implemented changes.  When the sprint begins, update this file with any clarifications that arise during shaping, and upon completion summarise the outcome and mark the status as **closed** in both this document and `ROOM_EPIC_SPRINT_SEQUENCE.md`.
+
+## Implementation summary (R07a)
+
+R07a is the narrow first slice of R07. It establishes the per-room
+queue persistence and the four room-scoped REST endpoints without
+changing the existing global queue behavior, without introducing a
+compatibility shim, and without emitting any new WebSocket events
+(the global hub is unchanged in this slice).
+
+**What landed:**
+- Migration `0006_room_queue_state.up.sql` adds a single-row-per-room
+  JSONB table keyed by `rooms.id`.
+- `repository.RoomQueueRepository` + `PostgresRoomQueueRepository`:
+  `Load(roomID)` returns `ErrRoomQueueNotFound` for empty rooms;
+  `Save(roomID, queue)` upserts the JSONB document. Mirrors the
+  existing global `queue_state` shape.
+- `usecase/roomqueue.Interactor`: `GetState`, `AddSong`, `RemoveSong`,
+  `ClearQueue` under a per-interactor mutex; reuses `entity.Queue`
+  invariants (Add / Remove / Clear / ContainsSong). Actor identity
+  flows from the bearer token only; `AddedBy` / `AddedByID` are set
+  by the handler from the resolved user.
+- HTTP routes behind `roomAuth` (bearer token):
+  - `GET    /api/rooms/{slug}/queue`
+  - `POST   /api/rooms/{slug}/queue/add`
+  - `POST   /api/rooms/{slug}/queue/remove`
+  - `POST   /api/rooms/{slug}/queue/clear`
+- Permission model:
+  - read: any active member
+  - add: any active member
+  - remove: host/admin may remove any song; guest may remove only
+    their own upcoming song (`CurrentIndex < index` AND
+    `AddedByID == actorUserID`)
+  - clear: host/admin only
+- No WebSocket events emitted from these routes. The global hub is
+  unchanged. Per-room WS deltas are deferred to R08.
+- The global `/api/queue/...` routes are untouched. There is no
+  compatibility shim in this slice.
+- Schema version after migration lands: **6**.
+
+**Deferred to the rest of R07 (or later):**
+- Per-room WebSocket events, per-room sequence numbers, and
+  `/ws/rooms/{slug}` (R08).
+- Per-song relational rows in place of the JSONB blob.
+- Reorder endpoint and vote endpoint (room-scoped).
+- Migration of the existing global `queue_state` into a room and
+  the global compatibility shim / `410 Gone` cleanup (R14).
+- Cross-process safety.
+
+**Verification:**
+- `go test -count=1 ./internal/domain/entity ./internal/usecase/queue ./internal/usecase/room ./internal/delivery/http ./internal/infrastructure/persistence ./cmd/server`
+- `go test -race -count=1 ./internal/usecase/queue ./internal/usecase/room ./internal/delivery/http`
+- `go build ./cmd/... ./internal/...`
+- `go vet ./cmd/... ./internal/...`
+- `git diff --check`
