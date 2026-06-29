@@ -164,6 +164,7 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	ytRelatedFetcher := youtube.NewYtDlpRelatedFetcher(cfg.YTDLPPath, 10)
 	autoQueueInteractor := usecaseAutoQueue.NewInteractor(autoQueueRepo, queueRepo, ytRelatedFetcher)
 	roomInteractor := usecaseRoom.NewInteractor(pgRoom)
+	playerLeaseInteractor := usecaseRoom.NewPlayerLeaseInteractor(persistence.NewPostgresPlayerLeaseRepository(dbHandle), pgRoom, dbHandle, usecaseRoom.DefaultLeaseDuration, usecaseRoom.DefaultLeaseGrace)
 
 	// Wire auto-queue into queue interactor
 	qInteractor.SetAutoQueueTrigger(autoQueueInteractor)
@@ -206,6 +207,11 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 
 	// Wire priority interactor into hub
 	hub.SetPriorityInteractor(priorityInteractor)
+
+	// Wire player-lease sweeper into hub. The adapter converts the
+	// usecase/room event shape into the ws package's local shape so ws
+	// does not import usecase.
+	hub.SetPlayerLeaseSweeper(wsLeaseSweeperAdapter{interactor: playerLeaseInteractor})
 
 	handlers := delivery.NewHandlers(qInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, hub)
 	autoQueueHandlers := delivery.NewAutoQueueHandlers(autoQueueInteractor, hub)
@@ -374,4 +380,25 @@ type actorKey struct{}
 func actorFromCtx(ctx context.Context) int {
 	v, _ := ctx.Value(actorKey{}).(int)
 	return v
+}
+
+// wsLeaseSweeperAdapter converts usecase/room.RoomArchivedEvent slices
+// returned by PlayerLeaseInteractor.SweepExpired into the ws package's
+// RoomArchivedBroadcast shape so the ws package does not import usecase.
+type wsLeaseSweeperAdapter struct {
+	interactor *usecaseRoom.PlayerLeaseInteractor
+}
+
+// SweepExpired implements ws.PlayerLeaseSweeper.
+func (a wsLeaseSweeperAdapter) SweepExpired(ctx context.Context) []ws.RoomArchivedBroadcast {
+	src := a.interactor.SweepExpired(ctx)
+	out := make([]ws.RoomArchivedBroadcast, len(src))
+	for i, e := range src {
+		out[i] = ws.RoomArchivedBroadcast{
+			RoomID:     e.RoomID,
+			Reason:     e.Reason,
+			ArchivedAt: e.ArchivedAt,
+		}
+	}
+	return out
 }

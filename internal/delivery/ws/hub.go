@@ -34,6 +34,23 @@ type SessionResolver interface {
 	ResolveSession(ctx context.Context, token string) (*entity.User, error)
 }
 
+// RoomArchivedBroadcast is the payload the hub needs to broadcast a
+// room_archived event. The usecase/room layer converts its internal
+// RoomArchivedEvent into this shape before handing it to the hub. Defined
+// here (not in usecase/room) so the ws package does not import usecase.
+type RoomArchivedBroadcast struct {
+	RoomID     int64
+	Reason     string
+	ArchivedAt time.Time
+}
+
+// PlayerLeaseSweeper is satisfied by an adapter that wraps
+// room.PlayerLeaseInteractor.SweepExpired. Defined here to keep ws
+// decoupled from usecase/room.
+type PlayerLeaseSweeper interface {
+	SweepExpired(ctx context.Context) []RoomArchivedBroadcast
+}
+
 // ClientState tracks per-client connection info
 type ClientState struct {
 	conn        *websocket.Conn
@@ -69,16 +86,17 @@ type BroadcastMessage struct {
 
 // Hub manages WebSocket connections and broadcasts updates.
 type Hub struct {
-	clients            map[*websocket.Conn]*ClientState
-	broadcast          chan *BroadcastMessage
-	register           chan *websocket.Conn
-	unregister         chan *websocket.Conn
-	mu                 sync.Mutex
-	seqNum             int64
-	getQueueState      func(context.Context) (*entity.Queue, error)
-	voteInteractor     VoteExpiryRunner
-	priorityInteractor PriorityChecker
-	authInteractor     SessionResolver
+	clients             map[*websocket.Conn]*ClientState
+	broadcast           chan *BroadcastMessage
+	register            chan *websocket.Conn
+	unregister          chan *websocket.Conn
+	mu                  sync.Mutex
+	seqNum              int64
+	getQueueState       func(context.Context) (*entity.Queue, error)
+	voteInteractor      VoteExpiryRunner
+	priorityInteractor  PriorityChecker
+	authInteractor      SessionResolver
+	playerLeaseSweeper  PlayerLeaseSweeper
 	// originChecker is invoked by RegisterHandler for both the upgrade gate
 	// (CheckOrigin) and any pre-upgrade classification. nil means "allow
 	// everything" — tests rely on this default so the legacy package-level
@@ -173,6 +191,16 @@ func (h *Hub) Run() {
 			}
 
 		case <-ticker.C:
+			if h.playerLeaseSweeper != nil {
+				events := h.playerLeaseSweeper.SweepExpired(context.Background())
+				for _, e := range events {
+					h.Broadcast(EventRoomArchived, RoomArchivedData{
+						RoomID:     e.RoomID,
+						Reason:     e.Reason,
+						ArchivedAt: e.ArchivedAt,
+					})
+				}
+			}
 			if h.voteInteractor != nil {
 				expired := h.voteInteractor.ExpireOldSessions(context.Background())
 				for _, e := range expired {
@@ -474,4 +502,11 @@ func (h *Hub) SetVoteInteractor(v VoteExpiryRunner) {
 // SetPriorityInteractor sets the priority interactor for daily token checks.
 func (h *Hub) SetPriorityInteractor(pi PriorityChecker) {
 	h.priorityInteractor = pi
+}
+
+// SetPlayerLeaseSweeper wires the periodic lease expiry sweep. When set,
+// the existing 5 s ticker calls SweepExpired and broadcasts a room_archived
+// event for every returned archive. R06 addition.
+func (h *Hub) SetPlayerLeaseSweeper(s PlayerLeaseSweeper) {
+	h.playerLeaseSweeper = s
 }

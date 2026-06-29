@@ -1,6 +1,8 @@
 package ws
 
 import (
+	"time"
+
 	"local-music-queue/internal/domain/entity"
 )
 
@@ -26,6 +28,11 @@ const (
 	// action (e.g. unauthenticated request_full_sync, role mismatch on a
 	// future privileged client message). R05 addition; purely additive.
 	EventError = "error"
+	// EventRoomArchived is sent when a room transitions to archived because
+	// the player lease expired past grace or the host explicitly released.
+	// R06 addition; purely additive. Clients treat it as the redirect
+	// trigger to Welcome.
+	EventRoomArchived = "room_archived"
 )
 
 // UserJoinedData contains only the new user info
@@ -177,4 +184,13 @@ type ClientMessage struct {
 type ErrorData struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+// RoomArchivedData describes an archived room event payload.
+// R06 addition; purely additive. The 16 pre-existing event types and
+// their JSON tags remain byte-for-byte compatible.
+type RoomArchivedData struct {
+	RoomID     int64     `json:"room_id"`
+	Reason     string    `json:"reason"`
+	ArchivedAt time.Time `json:"archived_at"`
 }
