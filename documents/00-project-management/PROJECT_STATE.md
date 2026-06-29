@@ -21,7 +21,7 @@ Current deployment topology consists of a two-service direct-HTTPS deployment or
 - **PostgreSQL Required at Startup:** `DATABASE_URL` (with `POSTGRES_*` overrides) is now mandatory. The backend refuses to start without it; the SQLite runtime fallback was removed in R03. The `backend-db` volume and the SQLite source mount are no longer present in `docker-compose.yml`.
 
 ## REST Endpoints
-There are exactly 19 registered HTTP REST endpoints plus 1 WebSocket endpoint (`/ws`):
+There are exactly 37 registered HTTP REST endpoints plus 2 WebSocket endpoints (`/ws` for the global queue, `/ws/rooms/{slug}` for per-room queue deltas introduced in R07b):
 1. `POST /api/auth/google`
 2. `POST /api/auth` (Deprecated)
 3. `GET /api/queue`
@@ -41,6 +41,24 @@ There are exactly 19 registered HTTP REST endpoints plus 1 WebSocket endpoint (`
 17. `POST /api/vote/prioritize`
 18. `POST /api/autoqueue/toggle`
 19. `GET /api/autoqueue/status`
+20. `POST /api/rooms`
+21. `GET /api/rooms`
+22. `GET /api/rooms/{slug}`
+23. `GET /api/rooms/{slug}/members`
+24. `POST /api/rooms/{slug}/members/{userId}/promote`
+25. `POST /api/rooms/{slug}/members/{userId}/demote`
+26. `POST /api/rooms/{slug}/invites`
+27. `GET /api/rooms/{slug}/invites`
+28. `DELETE /api/rooms/{slug}/invites/{inviteId}`
+29. `POST /api/invites/{token}/redeem`
+30. `POST /api/rooms/{slug}/player/claim`
+31. `POST /api/rooms/{slug}/player/heartbeat`
+32. `POST /api/rooms/{slug}/player/release`
+33. `GET /api/rooms/{slug}/player/lease`
+34. `GET /api/rooms/{slug}/queue`
+35. `POST /api/rooms/{slug}/queue/add`
+36. `POST /api/rooms/{slug}/queue/remove`
+37. `POST /api/rooms/{slug}/queue/clear`
 
 ## WebSocket Envelope & Events
 WebSocket uses a structured envelope for delta state distribution.
@@ -68,6 +86,7 @@ WebSocket uses a structured envelope for delta state distribution.
 - **R05 Auth Posture (WebSocket):** Client-originated messages (e.g. `request_full_sync`) require a valid session presented at connect time as `?session_token=<opaque>`. When present and valid the backend marks the connection `authenticated` and processes client requests. The legacy `?user_id=...` query parameter remains accepted as a non-authenticated daily-priority hint. Connections presenting neither are read-only spectators and any client message they send is rejected.
 - **R05 Additive `error` Event:** The backend emits `{"type":"error","data":{"code":"<code>","message":"<message>"}}` when it rejects a client-originated request. This is purely additive — the existing 16-event inventory is unchanged. Pre-existing fields and JSON tags for all other events remain byte-for-byte compatible.
 - **R07b Additive Room Queue Events (per-room endpoint only):** `room_queue_sync` (initial on connect), `room_queue_song_added`, `room_queue_song_removed`, `room_queue_cleared`. These ride the new `GET /ws/rooms/{slug}?session_token=<opaque>` route — NOT the global `/ws` endpoint — and are scoped to a single room. The 16-event backend application inventory above is unchanged; R07b events are additive and live on the per-room endpoint. Per-room sequence numbers are independent of the global seq counter. Sequencing is single-process / in-memory; no cross-process ordering claim is made. The `roomqueue.Broadcaster` interface seam in `usecase/roomqueue` keeps the use case independent of `delivery/ws`.
+- **Per-room WebSocket inventory (R07b, additive):** `GET /ws/rooms/{slug}` carries exactly four event types — `room_queue_sync` (initial on connect), `room_queue_song_added`, `room_queue_song_removed`, and `room_queue_cleared`. These live on a separate endpoint with independent per-room sequence numbers; they do not appear on the global `/ws` endpoint and the 16-event global inventory is unchanged.
 
 ## Database
 PostgreSQL 16 (via `pgx/v5/stdlib`) is the only persistence backend. Schema version is **3** after the embedded migrations run. SQLite is retained ONLY as the offline source reader inside `cmd/migrate-data` / `internal/infrastructure/persistence/migratedata`; the runtime backend, the `DBPath` config field, the `DB_PATH` env fallback, the `backend-db` volume, and the SQLite repository implementations were all removed in R03.
