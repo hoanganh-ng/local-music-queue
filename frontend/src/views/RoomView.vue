@@ -193,6 +193,10 @@ watch(slug, async (newSlug) => {
   teardownCurrentClient()
   connectedSlug = newSlug
   globalStore.setRoomQueueConnected(newSlug, false)
+  // Mirror the mount path: REST-seed the new room's queue before opening
+  // the room WebSocket so the UI is consistent with the next room's state
+  // even if the WS initial sync is delayed.
+  await seedStateFromRest()
   wsClient = buildRoomClient(newSlug)
   wsClient.connect()
 })

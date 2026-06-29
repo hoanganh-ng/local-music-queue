@@ -111,6 +111,10 @@ describe('RoomView', () => {
   })
 
   it('on REST error during recovery, captures lastError and does not throw', async () => {
+    // The route-param watcher (R07c polish) REST-seeds the new room on
+    // navigation; queue one rejection for that seed and one for the onGap
+    // refetch below so both rejections are accounted for.
+    apiMock.getRoomQueue.mockRejectedValueOnce(Object.assign(new Error('forbidden'), { status: 403 }))
     apiMock.getRoomQueue.mockRejectedValueOnce(Object.assign(new Error('forbidden'), { status: 403 }))
     const { wrapper, router } = mountRoomView()
     await router.push('/rooms/lobby')
@@ -164,6 +168,30 @@ describe('RoomView', () => {
     for (const banned of ['radio-mode-toggle', 'volume', 'vote', 'prioritize', 'invite', 'lease', 'skip', 'autoplay', 'auto-queue']) {
       expect(html.toLowerCase()).not.toContain(banned)
     }
+  })
+
+  it('route-param change REST-seeds the new room and rebuilds the ws client', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+
+    const firstClient = wsFactoryMock.lastInstance
+    expect(apiMock.getRoomQueue).toHaveBeenCalledWith('lobby')
+
+    // Change the route param: lounge is a different room.
+    apiMock.getRoomQueue.mockClear()
+    await router.push('/rooms/lounge')
+    await flushPromises()
+
+    // REST-seed must have been called for the NEW slug before the new WS opens.
+    expect(apiMock.getRoomQueue).toHaveBeenCalledWith('lounge')
+    expect(firstClient.disconnect).toHaveBeenCalled()
+    const secondClient = wsFactoryMock.lastInstance
+    expect(secondClient).not.toBe(firstClient)
+    expect(secondClient.connect).toHaveBeenCalled()
+    expect(globalStore.roomQueues.lounge).toBeTruthy()
+    wrapper.unmount()
   })
 
   it('does not send raw token / raw URL in toast or log payloads on errors', async () => {

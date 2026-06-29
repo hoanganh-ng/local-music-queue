@@ -41,7 +41,7 @@ describe('room-websocket', () => {
     vi.unstubAllGlobals()
   })
 
-  it('connect URL works without a session token (read-only spectator)', () => {
+  it('connect URL omits session_token when no session is saved (URL construction only — backend still requires session_token + active room membership on /ws/rooms/{slug})', () => {
     const wsInstances = []
     class FakeWS {
       constructor(url) { this.url = url; this.readyState = 0; this.close = vi.fn(); wsInstances.push(this) }
