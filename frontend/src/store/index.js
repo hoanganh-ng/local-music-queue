@@ -228,7 +228,95 @@ export const globalStore = reactive({
   // Convenience: return priority session for a song ID, or null
   prioritySessionFor(songID) {
     return this.voteSessions[`prioritize:${songID}`] || null
-  }
+  },
+
+  // --- R07c: per-room queue slice (isolated from global queue state) ---
+  roomQueues: {},
+
+  // Make sure a slug has an entry; returns the entry.
+  _ensureRoomEntry(slug) {
+    if (!this.roomQueues[slug]) {
+      this.roomQueues[slug] = {
+        state: { songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] },
+        lastSeqNum: 0,
+        recoveryInFlight: false,
+        lastError: null,
+        connected: false,
+      }
+    }
+    return this.roomQueues[slug]
+  },
+
+  setRoomQueueConnected(slug, connected) {
+    this._ensureRoomEntry(slug).connected = !!connected
+  },
+
+  setRoomQueueError(slug, message) {
+    if (!slug) return
+    this._ensureRoomEntry(slug).lastError = message
+  },
+
+  setRoomQueueRecoveryInFlight(slug, inFlight) {
+    this._ensureRoomEntry(slug).recoveryInFlight = !!inFlight
+  },
+
+  setRoomQueueSeq(slug, seq) {
+    this._ensureRoomEntry(slug).lastSeqNum = seq
+  },
+
+  setRoomQueueState(slug, state) {
+    const entry = this._ensureRoomEntry(slug)
+    entry.state = state
+    entry.lastError = null
+  },
+
+  applyRoomSongAdded(slug, song, position, fullState) {
+    const entry = this._ensureRoomEntry(slug)
+    if (fullState) {
+      entry.state = fullState
+      return
+    }
+    const s = entry.state
+    s.songs = Array.isArray(s.songs) ? s.songs.slice() : []
+    s.songs.splice(position, 0, song)
+    if (typeof s.current_index !== 'number') s.current_index = -1
+  },
+
+  applyRoomSongRemoved(slug, removedIndex, fullState) {
+    const entry = this._ensureRoomEntry(slug)
+    if (fullState) {
+      entry.state = fullState
+      return
+    }
+    const s = entry.state
+    if (removedIndex < 0 || removedIndex >= (s.songs || []).length) return
+    s.songs = s.songs.slice()
+    s.songs.splice(removedIndex, 1)
+    if (typeof s.current_index !== 'number') return
+    if (removedIndex < s.current_index) s.current_index--
+    else if (removedIndex === s.current_index) {
+      s.current_song = s.songs[s.current_index] || null
+    }
+  },
+
+  applyRoomQueueCleared(slug, fullState) {
+    const entry = this._ensureRoomEntry(slug)
+    if (fullState) {
+      entry.state = fullState
+      return
+    }
+    const s = entry.state
+    s.songs = []
+    s.current_index = -1
+    s.current_song = null
+    s.status = 'stopped'
+  },
+
+  clearRoomQueueState(slug) {
+    if (this.roomQueues[slug]) {
+      delete this.roomQueues[slug]
+    }
+  },
 })
 
 // Watch for changes to currentUser and persist to localStorage
