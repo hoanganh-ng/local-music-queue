@@ -207,3 +207,62 @@ horizontally-scaled deployment would need a separate solution.
 - `go build ./cmd/... ./internal/...`
 - `go vet ./cmd/... ./internal/...`
 - `git diff --check`
+
+## Implementation summary (R07c)
+
+R07c is the frontend narrow wiring slice for R07a/R07b. It does not
+change any backend contract or handler; it consumes the per-room REST
+endpoints and the per-room WebSocket event inventory as already
+shipped and accepted.
+
+**What landed:**
+- Four thin API methods in `frontend/src/services/api.js` that reuse
+  the existing bearer-token path: `getRoomQueue`, `addRoomSong`,
+  `removeRoomSong`, `clearRoomQueue`. None of them send
+  client-supplied identity fields (`added_by`, `added_by_id`,
+  `requested_by`, `user_id`, `user_role`).
+- A dedicated `frontend/src/services/room-websocket.js` module that
+  opens `GET /ws/rooms/{slug}?session_token=<opaque>`, tracks the
+  per-room sequence number, dispatches only the four documented room
+  event types (`room_queue_sync`, `room_queue_song_added`,
+  `room_queue_song_removed`, `room_queue_cleared`), and surfaces a
+  seq-gap via an `onGap` callback. The client **never** sends any
+  frame to the room hub; frames are ignored by the backend per
+  R07b. The raw room WS URL and the raw token are never logged.
+- An isolated `globalStore.roomQueues` slice (slug-keyed) in
+  `frontend/src/store/index.js` with dedicated mutators
+  (`setRoomQueueState`, `applyRoomSongAdded`,
+  `applyRoomSongRemoved`, `applyRoomQueueCleared`,
+  `clearRoomQueueState`, plus connection/seq/error/recovery
+  bookkeeping). Room events **never** mutate the global
+  `queueState`, `currentUser`, `voteSessions`, or `autoQueueConfig`.
+- An authenticated `/rooms/:slug` route registered in
+  `frontend/src/router/index.js` (existing `requiresAuth` guard).
+- A minimal `frontend/src/views/RoomView.vue` that:
+  - Performs a REST seed fetch on mount, then opens the room WS.
+  - Renders the room queue, an add-by-URL control, a per-row
+    remove button, and a clear control.
+  - Recovers from a sequence gap by REST-refetching
+    `GET /api/rooms/{slug}/queue` and applying the authoritative
+    state.
+  - Surfaces backend 401/403/404/409 responses as clear per-status
+    messages through the toast channel.
+  - Disconnects the room WS and clears per-slug state on unmount.
+  - Omits playback, vote, priority, auto-queue, invite, member,
+    and player-lease UI per the R07c scope.
+
+**Out of scope (unchanged from R07a/R07b):**
+- Backend routes, event payloads, or hub internals.
+- Room-scoped playback controls.
+- Room-scoped voting/priority.
+- Auto-queue room scoping.
+- Relational queue rows.
+- Global compatibility shim or 410 cleanup.
+- Public unauthenticated room API.
+- Full room discovery/invite/member/Welcome UX.
+- Cross-process safety.
+
+**Verification (reported when implementation finishes):**
+- `cd frontend && npm run test:unit -- --run` — PASS
+- `cd frontend && npm run build` — PASS
+- `git diff --check` — PASS
