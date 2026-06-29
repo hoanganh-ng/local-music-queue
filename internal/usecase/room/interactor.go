@@ -62,9 +62,12 @@ type RoomArchivedEvent struct {
 // interface (not the concrete *ws.Hub) so it can stay independent of
 // delivery/ws while still fanning out archive notifications.
 //
-// Implementations are expected to be non-blocking — the sweeper and the
-// release path call Broadcast synchronously from inside Hub.Run, so a
-// blocking broadcaster would deadlock the hub.
+// Implementations are expected to be non-blocking from the caller's
+// perspective. The explicit release path invokes BroadcastRoomArchived
+// from the HTTP request goroutine (after the interactor returns). The
+// sweep path invokes the equivalent Hub broadcast from goroutines that
+// fan out from Hub.Run, so the hub loop never blocks on its own
+// unbuffered broadcast channel.
 type RoomArchivedBroadcaster interface {
 	BroadcastRoomArchived(ev RoomArchivedEvent)
 }
