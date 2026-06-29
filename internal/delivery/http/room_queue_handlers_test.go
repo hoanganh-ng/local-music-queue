@@ -1,0 +1,216 @@
+package http
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"local-music-queue/internal/domain/entity"
+	"local-music-queue/internal/infrastructure/persistence"
+	"local-music-queue/internal/usecase/auth"
+	"local-music-queue/internal/usecase/roomqueue"
+)
+
+// seedUserQueue inserts a user row with the given role and a fixed id.
+// Lives in the same per-test schema as newRoomHandlers so foreign keys
+// in room_members resolve correctly. Used here in addition to the
+// same-name helper in room_handlers_test.go so the queue-handler tests
+// can pin explicit ids (42, 200, 999) without colliding on the user
+// id sequence.
+func seedUserQueue(t *testing.T, db *sql.DB, id int, email string, role entity.Role) {
+	t.Helper()
+	if _, err := db.Exec(
+		`INSERT INTO users (id, email, display_name, role, priority_balance, created_at, updated_at)
+		 VALUES ($1, $2, $2, $3, 0, NOW(), NOW())`,
+		id, email, role,
+	); err != nil {
+		t.Fatalf("seed user %d (%s): %v", id, email, err)
+	}
+}
+
+// newRoomQueueHandlers builds RoomQueueHandlers against the same
+// per-test schema newRoomHandlers creates. The schema is dropped and
+// the *sql.DB closed on test cleanup. PG connectivity is optional:
+// when LMQ_TEST_DATABASE_URL is unreachable the calling test is
+// skipped by newRoomHandlers.
+func newRoomQueueHandlers(t *testing.T) (*RoomQueueHandlers, *sql.DB, func()) {
+	t.Helper()
+	_, _, db := newRoomHandlers(t)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	authI := auth.NewInteractor(
+		persistence.NewPostgresUserRepository(db),
+		"", nil, nil, nil, nil,
+	)
+	rqh := NewRoomQueueHandlers(roomqueue.NewInteractor(roomRepo, queueRepo, nil), authI)
+	cleanup := func() {
+		// schema drop + db close registered by newRoomHandlers' t.Cleanup
+	}
+	return rqh, db, cleanup
+}
+
+// mustRoomIDQueue looks up the numeric room id for slug via the same
+// scoped *sql.DB the rest of the test uses.
+func mustRoomIDQueue(t *testing.T, db *sql.DB, slug string) int64 {
+	t.Helper()
+	var id int64
+	if err := db.QueryRow(`SELECT id FROM rooms WHERE slug = $1`, slug).Scan(&id); err != nil {
+		t.Fatalf("lookup room %q: %v", slug, err)
+	}
+	return id
+}
+
+func TestRoomQueue_GetQueue_ReturnsEmptyForNewRoom(t *testing.T) {
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	defer cleanup()
+
+	seedUserQueue(t, db, 42, "host-rq-get@example.com", entity.RoleHost)
+	// Create the room via the repo so user 42 is the host member.
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, "rq-rest", "RQRest", 42, time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/rooms/rq-rest/queue", nil)
+	rr := httptest.NewRecorder()
+	rqh.HandleGetRoomQueue(rr, req, "rq-rest", 42)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var got entity.Queue
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode queue: %v", err)
+	}
+	if len(got.Songs) != 0 {
+		t.Errorf("expected empty queue, got %d songs", len(got.Songs))
+	}
+}
+
+func TestRoomQueue_AddSong_ReturnsInsertedSong(t *testing.T) {
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	defer cleanup()
+
+	seedUserQueue(t, db, 42, "host-rq-add@example.com", entity.RoleHost)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, "rq-rest-add", "RQAdd", 42, time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	body := []byte(`{"metadata":{"id":"vid-add","title":"Add Me","artist":"Tester","duration":120,"thumbnail":"","url":"https://example/vid-add"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-rest-add/queue/add", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleAddRoomSong(rr, req, "rq-rest-add", 42)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var got entity.Song
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode song: %v", err)
+	}
+	if got.ID != "vid-add" {
+		t.Errorf("expected song id vid-add, got %s", got.ID)
+	}
+	if got.AddedByID != 42 {
+		t.Errorf("expected AddedByID=42, got %d", got.AddedByID)
+	}
+}
+
+func TestRoomQueue_RemoveSong_AsHost_Succeeds(t *testing.T) {
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	defer cleanup()
+
+	seedUserQueue(t, db, 42, "host-rq-rm@example.com", entity.RoleHost)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, "rq-rest-rm", "RQRM", 42, time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	// Host adds a song at index 0 so the subsequent remove has
+	// something to delete.
+	addBody := []byte(`{"metadata":{"id":"vid-rm","title":"Remove Me","url":"https://example/rm"}}`)
+	addReq := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-rest-rm/queue/add", bytes.NewReader(addBody))
+	addReq.Header.Set("Content-Type", "application/json")
+	addRR := httptest.NewRecorder()
+	rqh.HandleAddRoomSong(addRR, addReq, "rq-rest-rm", 42)
+	if addRR.Code != http.StatusOK {
+		t.Fatalf("add pre-condition: expected 200, got %d body=%s", addRR.Code, addRR.Body.String())
+	}
+
+	// Host removes index 0.
+	rmBody := []byte(`{"index":0}`)
+	rmReq := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-rest-rm/queue/remove", bytes.NewReader(rmBody))
+	rmReq.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleRemoveRoomSong(rr, rmReq, "rq-rest-rm", 42)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("remove expected 204, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRoomQueue_ClearQueue_AsGuest_Returns403(t *testing.T) {
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	defer cleanup()
+
+	seedUserQueue(t, db, 42, "host-rq-clr@example.com", entity.RoleHost)
+	seedUserQueue(t, db, 200, "guest-rq-clr@example.com", entity.RoleGuest)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, "rq-rest-clr", "RQClear", 42, time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := mustRoomIDQueue(t, db, "rq-rest-clr")
+	if err := roomRepo.AddMember(ctx, roomID, 200, entity.RoomRoleGuest, time.Now().UTC()); err != nil {
+		t.Fatalf("add guest member: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-rest-clr/queue/clear", nil)
+	rr := httptest.NewRecorder()
+	rqh.HandleClearRoomQueue(rr, req, "rq-rest-clr", 200)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("guest clear expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRoomQueue_GetQueue_AsNonMember_Returns403(t *testing.T) {
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	defer cleanup()
+
+	seedUserQueue(t, db, 42, "host-rq-nm@example.com", entity.RoleHost)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, "rq-rest-nm", "RQNM", 42, time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	// user 999 is NOT seeded as a user and NOT added as a room member.
+
+	req := httptest.NewRequest(http.MethodGet, "/api/rooms/rq-rest-nm/queue", nil)
+	rr := httptest.NewRecorder()
+	rqh.HandleGetRoomQueue(rr, req, "rq-rest-nm", 999)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("non-member get expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRoomQueue_AddSong_RequiresAuthenticatedActor(t *testing.T) {
+	rqh, _, cleanup := newRoomQueueHandlers(t)
+	defer cleanup()
+
+	body := []byte(`{"metadata":{"id":"any","title":"T","url":"https://x"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/some-room/queue/add", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	// actorUserID=0 → handler must reject before touching DB.
+	rqh.HandleAddRoomSong(rr, req, "some-room", 0)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
