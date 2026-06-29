@@ -64,4 +64,24 @@ describe('Router Guard', () => {
 
     expect(router.currentRoute.value.name).toBe('Auth')
   })
+
+  it('allows an authenticated user with a valid token to reach /rooms/lobby', async () => {
+    globalStore.setUser({ id: 42, role: 'guest' })
+    const future = new Date(Date.now() + 60 * 60_000).toISOString()
+    sessionHelper.saveSession('valid-token', future)
+
+    await router.push('/rooms/lobby')
+
+    expect(router.currentRoute.value.name).toBe('Room')
+    expect(router.currentRoute.value.params.slug).toBe('lobby')
+  })
+
+  it('redirects an unauthenticated visitor away from /rooms/lobby to Auth', async () => {
+    // Force a navigation so the beforeEach guard re-runs (router.push to the
+    // same route after the prior authenticated push is a no-op otherwise).
+    await router.push('/auth')
+    await router.push('/rooms/lobby')
+
+    expect(router.currentRoute.value.name).toBe('Auth')
+  })
 })

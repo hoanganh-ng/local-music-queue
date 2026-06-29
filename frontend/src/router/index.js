@@ -13,6 +13,15 @@ const routes = [
     path: '/auth',
     name: 'Auth',
     component: () => import('../views/AuthView.vue')
+  },
+  {
+    // R07c: minimal authenticated per-room queue view. The router guard
+    // (beforeEach) already enforces requiresAuth via the same path used
+    // for the global Dashboard.
+    path: '/rooms/:slug',
+    name: 'Room',
+    component: () => import('../views/RoomView.vue'),
+    meta: { requiresAuth: true }
   }
 ]
 
