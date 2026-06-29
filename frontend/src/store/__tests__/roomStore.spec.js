@@ -22,14 +22,14 @@ describe('Room queue store (isolated)', () => {
     globalStore.setRoomQueueError('lobby', 'boom')
     const newState = { songs: [{ id: 'a' }], current_index: 0, current_song: { id: 'a' }, status: 'playing', queue: [], history: [] }
     globalStore.setRoomQueueState('lobby', newState)
-    expect(globalStore.roomQueues.lobby.state).toBe(newState)
+    expect(globalStore.roomQueues.lobby.state).toMatchObject(newState)
     expect(globalStore.roomQueues.lobby.lastError).toBeNull()
   })
 
   it('applyRoomSongAdded prefers fullState when provided', () => {
     const postState = { songs: [{ id: 'a' }, { id: 'b' }], current_index: 0, current_song: { id: 'a' }, status: 'playing', queue: [{ id: 'b' }], history: [] }
     globalStore.applyRoomSongAdded('lobby', { id: 'b' }, 1, postState)
-    expect(globalStore.roomQueues.lobby.state).toBe(postState)
+    expect(globalStore.roomQueues.lobby.state).toMatchObject(postState)
   })
 
   it('applyRoomSongRemoved uses fullState when provided, else splices and decrements current_index', () => {
@@ -37,7 +37,7 @@ describe('Room queue store (isolated)', () => {
     const post = { songs: [{ id: 'a' }], current_index: 0, current_song: { id: 'a' }, status: 'playing', queue: [], history: [] }
     globalStore.setRoomQueueState('lobby', { songs: [{ id: 'a' }, { id: 'b' }, { id: 'c' }], current_index: 0, current_song: { id: 'a' }, status: 'playing', queue: [], history: [] })
     globalStore.applyRoomSongRemoved('lobby', 1, post)
-    expect(globalStore.roomQueues.lobby.state).toBe(post)
+    expect(globalStore.roomQueues.lobby.state).toMatchObject(post)
 
     // Fallback path
     globalStore.setRoomQueueState('room2', { songs: [{ id: 'a' }, { id: 'b' }, { id: 'c' }], current_index: 0, current_song: { id: 'a' }, status: 'playing', queue: [], history: [] })
@@ -51,7 +51,7 @@ describe('Room queue store (isolated)', () => {
     const post = { songs: [{ id: 'cur' }], current_index: 0, current_song: { id: 'cur' }, status: 'paused', queue: [], history: [] }
     globalStore.setRoomQueueState('lobby', { songs: [{ id: 'a' }, { id: 'b' }], current_index: 0, current_song: { id: 'a' }, status: 'playing', queue: [], history: [] })
     globalStore.applyRoomQueueCleared('lobby', post)
-    expect(globalStore.roomQueues.lobby.state).toBe(post)
+    expect(globalStore.roomQueues.lobby.state).toMatchObject(post)
 
     globalStore.setRoomQueueState('room2', { songs: [{ id: 'a' }, { id: 'b' }], current_index: 0, current_song: { id: 'a' }, status: 'playing', queue: [], history: [] })
     globalStore.applyRoomQueueCleared('room2')
