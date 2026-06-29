@@ -26,6 +26,12 @@ type RoomRepository interface {
 	ListRooms(ctx context.Context, status entity.RoomStatus) ([]entity.Room, error)
 	ArchiveRoom(ctx context.Context, roomID int64, now time.Time) error
 
+	// ArchiveRoomIfActive transitions an active room to archived and returns
+	// whether the update affected a row. Used by player-lease expiry/explicit
+	// archive paths that must remain idempotent (idempotent = room not
+	// archived twice).
+	ArchiveRoomIfActive(ctx context.Context, roomID int64, now time.Time) (bool, error)
+
 	// Members
 	AddMember(ctx context.Context, roomID int64, userID int, role entity.RoomMemberRole, now time.Time) error
 	GetMember(ctx context.Context, roomID int64, userID int) (*entity.RoomMember, error)

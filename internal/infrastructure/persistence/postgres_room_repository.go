@@ -134,6 +134,23 @@ func (r *PostgresRoomRepository) ArchiveRoom(ctx context.Context, roomID int64, 
 	return nil
 }
 
+// ArchiveRoomIfActive transitions an active room to archived and returns
+// whether the update affected a row. Idempotent: returns (false, nil) when
+// the room is already archived.
+func (r *PostgresRoomRepository) ArchiveRoomIfActive(ctx context.Context, roomID int64, now time.Time) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE rooms SET status = 'archived', updated_at = $1 WHERE id = $2 AND status = 'active'`,
+		now, roomID)
+	if err != nil {
+		return false, fmt.Errorf("archive if active: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("rows affected: %w", err)
+	}
+	return n > 0, nil
+}
+
 // AddMember inserts a membership row. Caller is responsible for invariant
 // checks (one host per room).
 func (r *PostgresRoomRepository) AddMember(ctx context.Context, roomID int64, userID int, role entity.RoomMemberRole, now time.Time) error {
