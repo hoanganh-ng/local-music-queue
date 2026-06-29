@@ -57,7 +57,8 @@ func (f RoomQueueStateResolverFunc) QueueByRoomID(ctx context.Context, roomID in
 // roomPingInterval controls how often the per-room hub sends a WebSocket
 // PingMessage to each connected client to keep idle connections alive. It
 // is a package-level var so tests can shorten it; production callers must
-// NOT mutate it.
+// NOT mutate it. The value is snapshotted into RoomWSHub at construction
+// time so concurrent tests with different intervals don't race.
 var roomPingInterval = 30 * time.Second
 
 // multiRoomResolver composes the three single-method resolvers into
@@ -105,6 +106,7 @@ type RoomWSHub struct {
 	resolver        multiRoomResolver
 	sessionResolver RoomSessionResolver
 	originChecker   func(r *http.Request) bool
+	pingInterval    time.Duration
 
 	mu      sync.Mutex
 	clients map[string]map[*websocket.Conn]*roomClientState // roomSlug -> clients
@@ -151,12 +153,13 @@ func NewRoomWSHub(roomResolver RoomBySlugResolver, memberResolver RoomMemberReso
 			member: memberResolver,
 			state:  stateResolver,
 		},
-		clients:    map[string]map[*websocket.Conn]*roomClientState{},
-		seqNum:     map[string]int64{},
-		broadcast:  make(chan roomBroadcast),
-		register:   make(chan registerReq),
-		unregister: make(chan *roomClientState),
-		closed:     make(chan struct{}),
+		pingInterval: roomPingInterval,
+		clients:      map[string]map[*websocket.Conn]*roomClientState{},
+		seqNum:       map[string]int64{},
+		broadcast:    make(chan roomBroadcast),
+		register:     make(chan registerReq),
+		unregister:   make(chan *roomClientState),
+		closed:       make(chan struct{}),
 	}
 }
 
@@ -192,7 +195,7 @@ func (h *RoomWSHub) Close() {
 // callers from outside Run MUST dispatch from a goroutine; dispatch()
 // wraps the send accordingly.
 func (h *RoomWSHub) Run() {
-	pingTicker := time.NewTicker(roomPingInterval)
+	pingTicker := time.NewTicker(h.pingInterval)
 	defer pingTicker.Stop()
 
 	for {
