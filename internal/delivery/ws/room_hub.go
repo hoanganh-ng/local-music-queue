@@ -54,6 +54,12 @@ func (f RoomQueueStateResolverFunc) QueueByRoomID(ctx context.Context, roomID in
 	return f(ctx, roomID)
 }
 
+// roomPingInterval controls how often the per-room hub sends a WebSocket
+// PingMessage to each connected client to keep idle connections alive. It
+// is a package-level var so tests can shorten it; production callers must
+// NOT mutate it.
+var roomPingInterval = 30 * time.Second
+
 // multiRoomResolver composes the three single-method resolvers into
 // one shape for the hub's internal use.
 type multiRoomResolver struct {
@@ -176,6 +182,9 @@ func (h *RoomWSHub) Close() {
 // callers from outside Run MUST dispatch from a goroutine; dispatch()
 // wraps the send accordingly.
 func (h *RoomWSHub) Run() {
+	pingTicker := time.NewTicker(roomPingInterval)
+	defer pingTicker.Stop()
+
 	for {
 		select {
 		case <-h.closed:
@@ -202,6 +211,8 @@ func (h *RoomWSHub) Run() {
 			h.mu.Unlock()
 			log.Printf("room ws: client disconnected from %s", cs.roomSlug)
 		case msg := <-h.broadcast:
+			// Snapshot clients under the lock; writes happen without the lock
+			// so a slow peer cannot stall the hub loop.
 			h.mu.Lock()
 			conns := make([]*roomClientState, 0, len(h.clients[msg.roomSlug]))
 			for _, cs := range h.clients[msg.roomSlug] {
@@ -217,15 +228,25 @@ func (h *RoomWSHub) Run() {
 			for _, cs := range conns {
 				if err := cs.writeMessage(websocket.TextMessage, data); err != nil {
 					log.Printf("room ws: write failed (%s): %v", msg.roomSlug, err)
-					cs.conn.Close()
-					h.mu.Lock()
-					if m, ok := h.clients[cs.roomSlug]; ok {
-						delete(m, cs.conn)
-						if len(m) == 0 {
-							delete(h.clients, cs.roomSlug)
-						}
-					}
-					h.mu.Unlock()
+					cs.unregisterAndClose(h)
+				}
+			}
+		case <-pingTicker.C:
+			// Snapshot clients under the lock so a slow write cannot hold the
+			// hub mutex for the duration of the network round-trip.
+			h.mu.Lock()
+			clients := make([]*roomClientState, 0)
+			for _, m := range h.clients {
+				for _, cs := range m {
+					clients = append(clients, cs)
+				}
+			}
+			h.mu.Unlock()
+
+			for _, cs := range clients {
+				if err := cs.writeMessage(websocket.PingMessage, nil); err != nil {
+					log.Printf("room ws: ping failed (%s): %v", cs.roomSlug, err)
+					cs.unregisterAndClose(h)
 				}
 			}
 		}
@@ -377,5 +398,24 @@ func (h *RoomWSHub) readPump(cs *roomClientState) {
 		if _, _, err := cs.conn.ReadMessage(); err != nil {
 			return
 		}
+	}
+}
+
+// unregisterAndClose safely removes a client from the hub's client map and
+// closes the underlying connection. The channel send is non-blocking via the
+// default branch so a closed hub never panics here.
+func (cs *roomClientState) unregisterAndClose(h *RoomWSHub) {
+	h.mu.Lock()
+	if m, ok := h.clients[cs.roomSlug]; ok {
+		delete(m, cs.conn)
+		if len(m) == 0 {
+			delete(h.clients, cs.roomSlug)
+		}
+	}
+	h.mu.Unlock()
+	cs.conn.Close()
+	select {
+	case h.unregister <- cs:
+	default:
 	}
 }

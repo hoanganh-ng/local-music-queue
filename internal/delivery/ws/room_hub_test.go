@@ -227,6 +227,68 @@ func TestRoomHub_RegisterHandler_NonMemberRejected(t *testing.T) {
 	}
 }
 
+// TestRoomHub_PingKeepalive_UnregistersOnFailedPing asserts the room
+// hub sends WebSocket pings to connected clients on the configured
+// interval and unregisters a client whose ping write fails (idle peer
+// closed the TCP connection without sending a Close frame).
+func TestRoomHub_PingKeepalive_UnregistersOnFailedPing(t *testing.T) {
+	// Shorten the ping interval so the test runs in milliseconds.
+	orig := roomPingInterval
+	roomPingInterval = 20 * time.Millisecond
+	t.Cleanup(func() { roomPingInterval = orig })
+
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("alpha", &entity.Room{ID: 11, Slug: "alpha", Status: entity.RoomStatusActive})
+	resolver.SetQueue(11, &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "T1"}}})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{"valid": {ID: 1, Role: entity.RoleHost, DisplayName: "H"}},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	conn := dialRoomWS(t, server, "alpha", "valid")
+	defer conn.Close()
+	// Drain the initial sync envelope so the read pump is unblocked.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("drain initial sync: %v", err)
+	}
+
+	// Wait long enough for at least one ping cycle. With roomPingInterval
+	// set to 20ms, the hub will attempt to ping a couple of times before
+	// we tear down the connection below.
+	time.Sleep(60 * time.Millisecond)
+
+	// Drop the client side so the next ping write fails and the hub
+	// unregisters the connection.
+	conn.Close()
+
+	// Give the hub loop enough time to observe the failed ping and
+	// unregister. Then assert the client set is empty.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		hub.mu.Lock()
+		n := len(hub.clients["alpha"])
+		hub.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	hub.mu.Lock()
+	n := len(hub.clients["alpha"])
+	hub.mu.Unlock()
+	t.Fatalf("expected hub to unregister client after failed ping, got %d remaining", n)
+}
+
 // TestRoomHub_RegisterHandler_RequiresSessionToken verifies the auth
 // gate: a missing/invalid session token results in 401.
 func TestRoomHub_RegisterHandler_RequiresSessionToken(t *testing.T) {
