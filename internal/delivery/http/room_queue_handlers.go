@@ -86,10 +86,17 @@ func (h *RoomQueueHandlers) HandleAddRoomSong(w http.ResponseWriter, r *http.Req
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	_, song, err := h.inter.AddSong(r.Context(), slug, actorUserID, displayName, req.URL, req.Metadata)
+	queue, song, err := h.inter.AddSong(r.Context(), slug, actorUserID, displayName, req.URL, req.Metadata)
 	if err != nil {
 		writeRoomQueueError(w, err)
 		return
+	}
+	if bc := h.inter.Broadcaster(); bc != nil {
+		pos := 0
+		if queue != nil {
+			pos = len(queue.Songs) - 1
+		}
+		bc.BroadcastRoomQueueSongAdded(slug, *song, pos, queue)
 	}
 	writeJSON(w, http.StatusOK, song)
 }
@@ -134,9 +141,13 @@ func (h *RoomQueueHandlers) HandleRemoveRoomSong(w http.ResponseWriter, r *http.
 		writeRoomQueueError(w, err)
 		return
 	}
-	if _, err := h.inter.RemoveSong(r.Context(), slug, actorUserID, role, req.Index); err != nil {
+	queue, err := h.inter.RemoveSong(r.Context(), slug, actorUserID, role, req.Index)
+	if err != nil {
 		writeRoomQueueError(w, err)
 		return
+	}
+	if bc := h.inter.Broadcaster(); bc != nil {
+		bc.BroadcastRoomQueueSongRemoved(slug, req.Index, queue)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -153,9 +164,13 @@ func (h *RoomQueueHandlers) HandleClearRoomQueue(w http.ResponseWriter, r *http.
 		writeRoomQueueError(w, err)
 		return
 	}
-	if _, err := h.inter.ClearQueue(r.Context(), slug, actorUserID, role); err != nil {
+	queue, err := h.inter.ClearQueue(r.Context(), slug, actorUserID, role)
+	if err != nil {
 		writeRoomQueueError(w, err)
 		return
+	}
+	if bc := h.inter.Broadcaster(); bc != nil {
+		bc.BroadcastRoomQueueCleared(slug, queue)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

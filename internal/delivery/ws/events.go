@@ -33,6 +33,13 @@ const (
 	// R06 addition; purely additive. Clients treat it as the redirect
 	// trigger to Welcome.
 	EventRoomArchived = "room_archived"
+	// Room queue events (R07b). Purely additive — the 16-event backend
+	// application inventory and the room_archived envelope from R06 are
+	// unchanged. Sequencing is per-room, single-process, in-memory.
+	EventRoomQueueSync        = "room_queue_sync"
+	EventRoomQueueSongAdded   = "room_queue_song_added"
+	EventRoomQueueSongRemoved = "room_queue_song_removed"
+	EventRoomQueueCleared     = "room_queue_cleared"
 )
 
 // UserJoinedData contains only the new user info
@@ -193,4 +200,39 @@ type RoomArchivedData struct {
 	RoomID     int64     `json:"room_id"`
 	Reason     string    `json:"reason"`
 	ArchivedAt time.Time `json:"archived_at"`
+}
+
+// RoomQueueSyncData is the initial snapshot a room client receives on
+// connect. Mirrors FullSyncData but is scoped to a single room and uses
+// its own envelope name so clients can route room events independently
+// of the global full_sync.
+type RoomQueueSyncData struct {
+	RoomSlug string        `json:"room_slug"`
+	State    *entity.Queue `json:"state"`
+}
+
+// RoomQueueSongAddedData is broadcast after a successful POST
+// /api/rooms/{slug}/queue/add. Carries the post-mutation snapshot so
+// clients can render the new queue without a follow-up sync.
+type RoomQueueSongAddedData struct {
+	RoomSlug string        `json:"room_slug"`
+	Song     entity.Song   `json:"song"`
+	Position int           `json:"position"`
+	State    *entity.Queue `json:"state"`
+}
+
+// RoomQueueSongRemovedData is broadcast after a successful POST
+// /api/rooms/{slug}/queue/remove. The post-mutation snapshot is
+// authoritative; clients do not need to re-fetch.
+type RoomQueueSongRemovedData struct {
+	RoomSlug     string        `json:"room_slug"`
+	RemovedIndex int           `json:"removed_index"`
+	State        *entity.Queue `json:"state"`
+}
+
+// RoomQueueClearedData is broadcast after a successful POST
+// /api/rooms/{slug}/queue/clear.
+type RoomQueueClearedData struct {
+	RoomSlug string        `json:"room_slug"`
+	State    *entity.Queue `json:"state"`
 }

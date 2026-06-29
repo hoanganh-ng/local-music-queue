@@ -1,6 +1,6 @@
 # R07 – Room‑scoped playback queue
 
-**Status:** closed — R07a (Room-scoped playback queue, narrow first slice) accepted 2026-06-29. The remaining R07 scope (per-room WebSocket events, relational queue rows, reorder/vote endpoints, cross-process safety, migration of the legacy global `queue_state` into a room) remains split and deferred to subsequent slices; see *Implementation summary (R07a)* for what shipped and *Deferred to the rest of R07* for the carve-out.
+**Status:** in progress — R07a (Room-scoped playback queue, narrow first slice) closed 2026-06-29; R07b (Room Queue WebSocket Sync and Deltas, this slice) added per-room WebSocket sync/delta broadcasts on top of R07a. See *Implementation summary (R07a)* and *Implementation summary (R07b)* below. Remaining R07 scope (relational queue rows, room-scoped reorder/vote endpoints, cross-process safety, migration of the legacy global `queue_state` into a room) remains split and deferred to subsequent slices.
 
 **Sprint name:** Room‑scoped playback queue
 
@@ -116,6 +116,59 @@ compatibility shim, and without emitting any new WebSocket events
 **Verification:**
 - `go test -count=1 ./internal/domain/entity ./internal/usecase/queue ./internal/usecase/room ./internal/delivery/http ./internal/infrastructure/persistence ./cmd/server`
 - `go test -race -count=1 ./internal/usecase/queue ./internal/usecase/room ./internal/delivery/http`
+- `go build ./cmd/... ./internal/...`
+- `go vet ./cmd/... ./internal/...`
+- `git diff --check`
+
+## Implementation summary (R07b)
+
+R07b lands the per-room WebSocket sync and delta events on top of R07a.
+
+**What landed:**
+- Four additive WebSocket events scoped to the per-room endpoint:
+  - `room_queue_sync` (initial on connect)
+  - `room_queue_song_added`
+  - `room_queue_song_removed`
+  - `room_queue_cleared`
+- New route `GET /ws/rooms/{slug}?session_token=<opaque>` behind the
+  existing A01 `ALLOWED_ORIGINS` policy (same `policy.AllowWebSocket`
+  gate as the global `/ws` endpoint).
+- Authentication: resolved session token only (R05). The legacy
+  `?user_id=...` hint is ignored for identity (A01).
+- Authorization: active room membership required. Non-members receive
+  `403 Forbidden`; archived rooms return `409 Conflict`; missing or
+  invalid session tokens return `401 Unauthorized`.
+- Initial sync is sent to the client before it is registered with the
+  hub loop so a fast disconnect still receives its snapshot.
+- Per-room sequence numbers, per-room client maps, and a per-room
+  broadcaster dispatcher with goroutine fan-out (mirrors the global
+  hub's room_archived ticker deadlock fix in R06).
+- `usecase/roomqueue.Broadcaster` seam keeps the use case independent
+  of `delivery/ws`. The room queue handlers are the only call sites
+  for the broadcaster; the interactor itself does not broadcast.
+
+**Renumbering note:** The original R08 placeholder ("Public read-only
+API and CORS") referenced in `ROOM_EPIC_SPRINT_SEQUENCE.md` is
+deferred and renumberable. R07b is the narrow second slice of R07
+(per-room WS), not the original R08 scope. The R08 row in the
+sequence table remains "Planned" pending renumber.
+
+**Single-process caveat:** All sequencing is single-process / in-memory.
+No cross-process broadcast ordering is provided. Clients in a
+horizontally-scaled deployment would need a separate solution.
+
+**Out of scope (carried forward to subsequent slices):**
+- Relational queue rows (per-song) — JSONB blob remains the storage shape.
+- Reorder endpoint and vote endpoint (room-scoped).
+- Migration of the legacy global `queue_state` into a room and the
+  global compatibility shim / `410 Gone` cleanup.
+- Cross-process broadcast safety.
+- Public unauthenticated room API or broad CORS redesign beyond
+  reusing the existing A01 origin policy.
+
+**Verification:**
+- `go test -count=1 ./internal/usecase/roomqueue ./internal/delivery/http ./internal/delivery/ws ./cmd/server`
+- `go test -race -count=1 ./internal/usecase/roomqueue ./internal/delivery/http ./internal/delivery/ws`
 - `go build ./cmd/... ./internal/...`
 - `go vet ./cmd/... ./internal/...`
 - `git diff --check`

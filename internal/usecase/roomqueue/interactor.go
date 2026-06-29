@@ -42,6 +42,11 @@ type Interactor struct {
 	queueRepo repository.RoomQueueRepository
 	youtube   service.YouTubeService
 	mu        sync.Mutex
+	// broadcaster is the seam used by the delivery layer to fan out room
+	// queue events. The interactor does NOT broadcast itself — the seam
+	// exists so handlers can invoke Broadcast* after a successful mutation
+	// without the usecase package importing delivery/ws. nil is tolerated.
+	broadcaster Broadcaster
 }
 
 // NewInteractor constructs a room queue interactor. youtube may be nil
@@ -57,6 +62,26 @@ func NewInteractor(roomRepo repository.RoomRepository, queueRepo repository.Room
 // SetYouTube attaches a metadata fetcher after DI setup. Used in tests
 // that construct the interactor without a real YouTube service.
 func (i *Interactor) SetYouTube(y service.YouTubeService) { i.youtube = y }
+
+// Broadcaster is the seam the delivery layer implements to fan out
+// room queue events. Implementations are expected to be non-blocking
+// from the caller's perspective.
+type Broadcaster interface {
+	BroadcastRoomQueueSync(roomSlug string, state *entity.Queue)
+	BroadcastRoomQueueSongAdded(roomSlug string, song entity.Song, position int, state *entity.Queue)
+	BroadcastRoomQueueSongRemoved(roomSlug string, removedIndex int, state *entity.Queue)
+	BroadcastRoomQueueCleared(roomSlug string, state *entity.Queue)
+}
+
+// SetBroadcaster wires the broadcaster used by the delivery layer to
+// publish room queue events after successful mutations. nil disables
+// broadcasting (handler skips the call).
+func (i *Interactor) SetBroadcaster(b Broadcaster) { i.broadcaster = b }
+
+// Broadcaster returns the broadcaster wired via SetBroadcaster, or nil
+// when none is wired. The delivery layer uses this to invoke broadcasts
+// after successful mutations.
+func (i *Interactor) Broadcaster() Broadcaster { return i.broadcaster }
 
 // resolveActiveRoom fetches the room by slug, ensures it is active, and
 // returns it. Slug validation mirrors usecase/room.
@@ -272,4 +297,13 @@ func (i *Interactor) MemberRole(ctx context.Context, slug string, actorUserID in
 		return "", fmt.Errorf("get member: %w", err)
 	}
 	return member.Role, nil
+}
+
+// GetStateByRoomID returns the persisted queue for an internal caller
+// (no membership check). Used by the room WS hub's initial sync path;
+// auth/authorization is enforced at the hub upgrade gate, not here.
+func (i *Interactor) GetStateByRoomID(ctx context.Context, roomID int64) (*entity.Queue, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.loadQueue(ctx, roomID)
 }

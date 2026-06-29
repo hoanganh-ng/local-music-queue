@@ -300,6 +300,50 @@ func TestRoomQueue_GetState_ForbiddenForNonMember(t *testing.T) {
 	}
 }
 
+// TestRoomQueue_Broadcaster_SetterAcceptsStub verifies the interactor
+// accepts a non-nil broadcaster seam. The seam is used by the delivery
+// layer; the interactor itself does not broadcast.
+func TestRoomQueue_Broadcaster_SetterAcceptsStub(t *testing.T) {
+	inter, _, cleanup := pgRoomQueue(t)
+	defer cleanup()
+
+	stub := &recordingBroadcaster{}
+	inter.SetBroadcaster(stub)
+	if got := inter.Broadcaster(); got != stub {
+		t.Fatalf("expected broadcaster to be wired, got %v", got)
+	}
+}
+
+// recordingBroadcaster is a no-op roomqueue.Broadcaster for tests.
+type recordingBroadcaster struct {
+	mu      sync.Mutex
+	syncN   int
+	addN    int
+	removeN int
+	clearN  int
+}
+
+func (r *recordingBroadcaster) BroadcastRoomQueueSync(_ string, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.syncN++
+}
+func (r *recordingBroadcaster) BroadcastRoomQueueSongAdded(_ string, _ entity.Song, _ int, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.addN++
+}
+func (r *recordingBroadcaster) BroadcastRoomQueueSongRemoved(_ string, _ int, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.removeN++
+}
+func (r *recordingBroadcaster) BroadcastRoomQueueCleared(_ string, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.clearN++
+}
+
 // --- helpers ---
 
 func testTime() (t time.Time) {

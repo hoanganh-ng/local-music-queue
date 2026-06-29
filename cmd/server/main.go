@@ -131,11 +131,18 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	}
 	pgRoom := persistence.NewPostgresRoomRepository(dbHandle)
 	pgRoomQueue := persistence.NewPostgresRoomQueueRepository(dbHandle)
+	// roomWSHub is declared as nil here so the cleanup closure below can
+	// reference it safely; the real *ws.RoomWSHub is constructed later in
+	// the delivery wiring step (after the auth interactor exists).
+	var roomWSHub *ws.RoomWSHub
 	// dbHandle is non-nil only for the PostgreSQL path. The *sql.DB must stay
 	// open for the entire server lifetime, so its Close is owned by main via
 	// the cleanup closure returned below — closing it here would invalidate
 	// every repository handle before ListenAndServe runs.
 	cleanup := func() {
+		if roomWSHub != nil {
+			roomWSHub.Close()
+		}
 		if dbHandle != nil {
 			_ = dbHandle.Close()
 		}
@@ -202,6 +209,37 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	hub.SetOriginChecker(policy.AllowWebSocket)
 	hub.SetAuthInteractor(authInteractor)
 	go hub.Run() // Start WebSocket hub loop
+
+	// R07b: per-room WebSocket hub. Satisfies usecase/roomqueue.Broadcaster
+	// implicitly, so it can be wired straight into the room queue interactor.
+	// Sequencing is single-process / in-memory; no cross-process ordering
+	// claim is made. The three single-method resolvers are composed by the
+	// hub constructor and delegate to the existing repositories / interactors.
+	roomWSHub = ws.NewRoomWSHub(
+		ws.RoomQueueResolverFunc(func(ctx context.Context, slug string) (*entity.Room, error) {
+			return pgRoom.GetRoomBySlug(ctx, slug)
+		}),
+		ws.RoomMemberResolverFunc(func(ctx context.Context, roomID int64, userID int) (bool, error) {
+			if _, err := pgRoom.GetMember(ctx, roomID, userID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return false, nil
+				}
+				return false, err
+			}
+			return true, nil
+		}),
+		ws.RoomQueueStateResolverFunc(func(ctx context.Context, roomID int64) (*entity.Queue, error) {
+			return roomQueueInteractor.GetStateByRoomID(ctx, roomID)
+		}),
+	)
+	roomWSHub.SetOriginChecker(policy.AllowWebSocket)
+	roomWSHub.SetSessionResolver(authInteractor)
+	go roomWSHub.Run()
+
+	// Wire the room queue interactor's broadcaster seam to the per-room WS
+	// hub. nil-safe: the seam tolerates an unset broadcaster; the handler
+	// path short-circuits without a broadcast when nil.
+	roomQueueInteractor.SetBroadcaster(roomWSHub)
 
 	// Wire auto-queue broadcaster to WS hub
 	autoQueueInteractor.SetBroadcaster(hub.Broadcast)
@@ -342,6 +380,9 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 
 	// WebSocket
 	mux.HandleFunc("/ws", hub.RegisterHandler)
+	// R07b: per-room WebSocket endpoint. Shares the same ALLOWED_ORIGINS
+	// policy as the global /ws endpoint through roomWSHub.originChecker.
+	mux.HandleFunc("/ws/rooms/{slug}", roomWSHub.RegisterHandler)
 
 	return mux, cfg, policy, cleanup, nil
 }

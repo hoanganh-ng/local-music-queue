@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -213,6 +214,172 @@ func TestRoomQueue_AddSong_RequiresAuthenticatedActor(t *testing.T) {
 	rqh.HandleAddRoomSong(rr, req, "some-room", 0)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// recordingRoomBroadcaster captures broadcaster calls without a real
+// WebSocket. The handler tests assert it was invoked on success and
+// NOT invoked on error paths.
+type recordingRoomBroadcaster struct {
+	mu          sync.Mutex
+	syncCalls   []string
+	addCalls    []string
+	removeCalls []int
+	clearCalls  []string
+}
+
+func (r *recordingRoomBroadcaster) BroadcastRoomQueueSync(slug string, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.syncCalls = append(r.syncCalls, slug)
+}
+func (r *recordingRoomBroadcaster) BroadcastRoomQueueSongAdded(slug string, _ entity.Song, _ int, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.addCalls = append(r.addCalls, slug)
+}
+func (r *recordingRoomBroadcaster) BroadcastRoomQueueSongRemoved(slug string, idx int, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.removeCalls = append(r.removeCalls, idx)
+}
+func (r *recordingRoomBroadcaster) BroadcastRoomQueueCleared(slug string, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.clearCalls = append(r.clearCalls, slug)
+}
+
+func TestRoomQueue_AddSong_BroadcastsSongAdded(t *testing.T) {
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	defer cleanup()
+
+	seedUserQueue(t, db, 42, "host-rq-bc-add@example.com", entity.RoleHost)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, "rq-bc-add", "RQBcAdd", 42, time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	body := []byte(`{"metadata":{"id":"vid-bc-1","title":"BC Add","url":"https://x/1"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-bc-add/queue/add", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleAddRoomSong(rr, req, "rq-bc-add", 42)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("add: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.addCalls) != 1 || bc.addCalls[0] != "rq-bc-add" {
+		t.Fatalf("expected 1 add broadcast for rq-bc-add, got %+v", bc.addCalls)
+	}
+}
+
+func TestRoomQueue_RemoveSong_BroadcastsSongRemoved(t *testing.T) {
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	defer cleanup()
+
+	seedUserQueue(t, db, 42, "host-rq-bc-rm@example.com", entity.RoleHost)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, "rq-bc-rm", "RQBcRm", 42, time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	addBody := []byte(`{"metadata":{"id":"vid-bc-rm","title":"R","url":"https://x/r"}}`)
+	addReq := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-bc-rm/queue/add", bytes.NewReader(addBody))
+	addReq.Header.Set("Content-Type", "application/json")
+	addRR := httptest.NewRecorder()
+	rqh.HandleAddRoomSong(addRR, addReq, "rq-bc-rm", 42)
+	if addRR.Code != http.StatusOK {
+		t.Fatalf("seed add: %d body=%s", addRR.Code, addRR.Body.String())
+	}
+
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	rmBody := []byte(`{"index":0}`)
+	rmReq := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-bc-rm/queue/remove", bytes.NewReader(rmBody))
+	rmReq.Header.Set("Content-Type", "application/json")
+	rmRR := httptest.NewRecorder()
+	rqh.HandleRemoveRoomSong(rmRR, rmReq, "rq-bc-rm", 42)
+	if rmRR.Code != http.StatusNoContent {
+		t.Fatalf("remove: expected 204, got %d", rmRR.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.removeCalls) != 1 || bc.removeCalls[0] != 0 {
+		t.Fatalf("expected 1 remove broadcast at idx 0, got %+v", bc.removeCalls)
+	}
+}
+
+func TestRoomQueue_ClearQueue_BroadcastsCleared(t *testing.T) {
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	defer cleanup()
+
+	seedUserQueue(t, db, 42, "host-rq-bc-clr@example.com", entity.RoleHost)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, "rq-bc-clr", "RQBcClr", 42, time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-bc-clr/queue/clear", nil)
+	rr := httptest.NewRecorder()
+	rqh.HandleClearRoomQueue(rr, req, "rq-bc-clr", 42)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("clear: expected 204, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.clearCalls) != 1 || bc.clearCalls[0] != "rq-bc-clr" {
+		t.Fatalf("expected 1 clear broadcast for rq-bc-clr, got %+v", bc.clearCalls)
+	}
+}
+
+// Error paths must NOT broadcast.
+func TestRoomQueue_RemoveSong_NoBroadcastOnForbidden(t *testing.T) {
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	defer cleanup()
+
+	seedUserQueue(t, db, 42, "host-rq-bc-fb@example.com", entity.RoleHost)
+	seedUserQueue(t, db, 200, "guest-rq-bc-fb@example.com", entity.RoleGuest)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, "rq-bc-fb", "RQBcFb", 42, time.Now().UTC()); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	roomID := mustRoomIDQueue(t, db, "rq-bc-fb")
+	if err := roomRepo.AddMember(ctx, roomID, 200, entity.RoomRoleGuest, time.Now().UTC()); err != nil {
+		t.Fatalf("add guest: %v", err)
+	}
+
+	addBody := []byte(`{"metadata":{"id":"vid-fb","title":"F","url":"https://x/f"}}`)
+	addReq := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-bc-fb/queue/add", bytes.NewReader(addBody))
+	addReq.Header.Set("Content-Type", "application/json")
+	rqh.HandleAddRoomSong(httptest.NewRecorder(), addReq, "rq-bc-fb", 42)
+
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	rmBody := []byte(`{"index":0}`)
+	rmReq := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-bc-fb/queue/remove", bytes.NewReader(rmBody))
+	rmReq.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleRemoveRoomSong(rr, rmReq, "rq-bc-fb", 200)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.removeCalls) != 0 {
+		t.Errorf("expected NO remove broadcast on forbidden, got %d", len(bc.removeCalls))
 	}
 }
 

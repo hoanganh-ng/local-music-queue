@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"runtime"
 	"testing"
@@ -76,5 +78,31 @@ func TestSetupApp(t *testing.T) {
 	}
 	if cfg.DatabaseURL == "" {
 		t.Error("Expected DatabaseURL to be set")
+	}
+}
+
+// TestSetupApp_RegistersRoomWSRoute pins the R07b wiring contract:
+// /ws/rooms/{slug} is registered on the same mux. A plain GET without
+// the required query params returns 401 from the handler before the
+// upgrade is attempted, which proves the route is wired.
+func TestSetupApp_RegistersRoomWSRoute(t *testing.T) {
+	scopedDSN := setupPostgresForTest(t)
+	if os.Getenv("YTDLP_PATH") == "" {
+		os.Setenv("YTDLP_PATH", "/bin/true")
+	}
+	os.Setenv("DATABASE_URL", scopedDSN)
+	defer os.Unsetenv("DATABASE_URL")
+
+	mux, _, _, cleanup, err := setupApp()
+	if err != nil {
+		t.Fatalf("setupApp: %v", err)
+	}
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/ws/rooms/anything", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected /ws/rooms/{slug} to be registered (401 without session token), got %d", rr.Code)
 	}
 }
