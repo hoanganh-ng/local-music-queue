@@ -215,7 +215,7 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 
 	handlers := delivery.NewHandlers(qInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, hub)
 	autoQueueHandlers := delivery.NewAutoQueueHandlers(autoQueueInteractor, hub)
-	roomHandlers := delivery.NewRoomHandlers(roomInteractor, authInteractor)
+	roomHandlers := delivery.NewRoomHandlers(roomInteractor, playerLeaseInteractor, authInteractor)
 
 	// 5. Setup Routes
 	mux := http.NewServeMux()
@@ -305,6 +305,18 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	}))
 	mux.HandleFunc("POST /api/invites/{token}/redeem", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomHandlers.HandleRedeemInvite(w, r, r.PathValue("token"), actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("POST /api/rooms/{slug}/player/claim", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomHandlers.HandleClaimPlayer(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("POST /api/rooms/{slug}/player/heartbeat", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomHandlers.HandleHeartbeatPlayer(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("POST /api/rooms/{slug}/player/release", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomHandlers.HandleReleasePlayer(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("GET /api/rooms/{slug}/player/lease", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomHandlers.HandleGetPlayerLease(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
 
 	// WebSocket

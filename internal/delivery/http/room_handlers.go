@@ -25,12 +25,13 @@ import (
 type RoomHandlers struct {
 	inter *room.Interactor
 	auth  *auth.Interactor
+	lease *room.PlayerLeaseInteractor
 }
 
 // NewRoomHandlers constructs RoomHandlers with an interactor and the auth
 // interactor (for session resolution).
-func NewRoomHandlers(inter *room.Interactor, a *auth.Interactor) *RoomHandlers {
-	return &RoomHandlers{inter: inter, auth: a}
+func NewRoomHandlers(inter *room.Interactor, lease *room.PlayerLeaseInteractor, a *auth.Interactor) *RoomHandlers {
+	return &RoomHandlers{inter: inter, auth: a, lease: lease}
 }
 
 // --- Request/response shapes ---
@@ -271,6 +272,70 @@ func (h *RoomHandlers) HandleRedeemInvite(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, member)
 }
 
+// HandleClaimPlayer: POST /api/rooms/{slug}/player/claim — host claims the
+// active player lease for the room. Returns 409 on duplicate valid claim,
+// 403 on non-host caller.
+func (h *RoomHandlers) HandleClaimPlayer(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
+	if actorUserID == 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	lease, err := h.lease.Claim(r.Context(), slug, actorUserID)
+	if err != nil {
+		writeRoomError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, lease)
+}
+
+// HandleHeartbeatPlayer: POST /api/rooms/{slug}/player/heartbeat — current
+// lease holder renews the lease. Returns 403 for non-holder, 410 past grace.
+func (h *RoomHandlers) HandleHeartbeatPlayer(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
+	if actorUserID == 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	lease, err := h.lease.Heartbeat(r.Context(), slug, actorUserID)
+	if err != nil {
+		writeRoomError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, lease)
+}
+
+// HandleReleasePlayer: POST /api/rooms/{slug}/player/release — host ends
+// the lease and archives the room. Returns 204 on success.
+func (h *RoomHandlers) HandleReleasePlayer(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
+	if actorUserID == 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err := h.lease.Release(r.Context(), slug, actorUserID); err != nil {
+		writeRoomError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleGetPlayerLease: GET /api/rooms/{slug}/player/lease — any active
+// member may read the current lease.
+func (h *RoomHandlers) HandleGetPlayerLease(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
+	if actorUserID == 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	lease, err := h.lease.GetLease(r.Context(), slug, actorUserID)
+	if err != nil {
+		writeRoomError(w, err)
+		return
+	}
+	if lease == nil {
+		http.Error(w, "no lease", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, lease)
+}
+
 // writeRoomError maps use-case sentinel errors to the documented status codes.
 func writeRoomError(w http.ResponseWriter, err error) {
 	switch {
@@ -282,6 +347,15 @@ func writeRoomError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, room.ErrInviteExhausted):
 		http.Error(w, err.Error(), http.StatusGone)
+	case errors.Is(err, room.ErrPlayerLeaseExists):
+		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, room.ErrPlayerLeaseGone):
+		http.Error(w, err.Error(), http.StatusGone)
+	case errors.Is(err, room.ErrPlayerLeaseNotFound):
+		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, room.ErrNotLeaseHolder),
+		errors.Is(err, room.ErrPlayerLeaseForbidden):
+		http.Error(w, "forbidden", http.StatusForbidden)
 	case errors.Is(err, room.ErrRoomNotFound),
 		errors.Is(err, room.ErrInviteNotFound),
 		errors.Is(err, room.ErrInviteInvalid),

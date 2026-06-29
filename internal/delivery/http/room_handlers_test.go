@@ -102,7 +102,7 @@ func newRoomHandlers(t *testing.T) (*RoomHandlers, *Handlers, *sql.DB) {
 
 	repo := persistence.NewPostgresRoomRepository(scoped)
 	inter := room.NewInteractor(repo)
-	return NewRoomHandlers(inter, base.auth), base, scoped
+	return NewRoomHandlers(inter, nil, base.auth), base, scoped
 }
 
 func TestRoomHandler_CreateRoom_Success(t *testing.T) {
