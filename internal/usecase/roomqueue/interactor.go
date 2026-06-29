@@ -259,3 +259,20 @@ func (i *Interactor) ClearQueue(ctx context.Context, slug string, actorUserID in
 	}
 	return queue, nil
 }
+
+// MemberRole returns the actor's room-scoped role. Returns ("", nil)
+// when the actor is not a member (handlers map that to ErrForbidden).
+func (i *Interactor) MemberRole(ctx context.Context, slug string, actorUserID int) (entity.RoomMemberRole, error) {
+	roomObj, err := i.resolveActiveRoom(ctx, slug)
+	if err != nil {
+		return "", err
+	}
+	member, err := i.roomRepo.GetMember(ctx, roomObj.ID, actorUserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("get member: %w", err)
+	}
+	return member.Role, nil
+}
