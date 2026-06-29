@@ -135,10 +135,18 @@ type RoomSessionResolver interface {
 	ResolveSession(ctx context.Context, token string) (*entity.User, error)
 }
 
-// roomBroadcast is the internal envelope sent through the hub loop.
+// roomBroadcast is the internal envelope sent through the hub loop. It
+// carries the raw (msgType, data) pair and is intentionally NOT a
+// pre-sequenced BroadcastMessage: the hub loop is the single owner of
+// per-room sequence allocation, so the seq_num is stamped inside Run
+// when the broadcast case is dequeued. This guarantees that any
+// broadcast dequeued after the register case (which added the client
+// and stamped the initial sync) carries a strictly greater seq than
+// the initial sync for every connected client.
 type roomBroadcast struct {
 	roomSlug string
-	payload  BroadcastMessage
+	msgType  string
+	data     interface{}
 }
 
 // NewRoomWSHub constructs a RoomWSHub. The three resolvers are split
@@ -178,6 +186,14 @@ func (h *RoomWSHub) SetSessionResolver(s RoomSessionResolver) {
 
 // nextSeq returns the next per-room sequence number. Single-process /
 // in-memory: no cross-process ordering claim.
+//
+// nextSeq is called ONLY from inside the hub loop (the register case
+// stamps the initial-sync seq, the broadcast case stamps every delta
+// seq). Centralising the allocation in Run is what preserves the
+// sequenced-delta contract: the register case finishes allocating its
+// seq before any subsequent broadcast case allocates the next one, so
+// the seq stamped on the initial sync is strictly less than the seq
+// stamped on any broadcast that reaches the new client.
 func (h *RoomWSHub) nextSeq(roomSlug string) int64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -246,7 +262,21 @@ func (h *RoomWSHub) Run() {
 			}
 			h.mu.Unlock()
 
-			data, err := json.Marshal(msg.payload)
+			// Stamp the seq_num HERE, inside the hub loop. Doing it here
+			// (rather than in dispatch) is what makes the initial-sync
+			// contract safe: any register case that ran before this
+			// broadcast was dequeued has already stamped its own seq under
+			// the same hub-loop invariant, so the seq we allocate now is
+			// strictly greater than every initial-sync seq stamped earlier
+			// in the room.
+			seq := h.nextSeq(msg.roomSlug)
+			payload := BroadcastMessage{
+				Type:      msg.msgType,
+				Data:      msg.data,
+				SeqNum:    seq,
+				Timestamp: time.Now(),
+			}
+			data, err := json.Marshal(payload)
 			if err != nil {
 				log.Printf("room ws: marshal failed: %v", err)
 				continue
@@ -282,19 +312,19 @@ func (h *RoomWSHub) Run() {
 // dispatch sends a payload to a room's clients. Non-blocking — wraps
 // in a goroutine so the hub loop cannot deadlock on its own unbuffered
 // broadcast channel (mirrors the global hub fix in hub.go ticker path).
+//
+// dispatch does NOT allocate a seq_num; that happens in the hub loop
+// when the broadcast is dequeued. Allocating the seq inside the loop is
+// the single point of ordering for per-room sequences, so the
+// initial-sync seq stamped by the register case is guaranteed to be
+// strictly less than the seq stamped by this broadcast whenever the
+// register case ran first.
 func (h *RoomWSHub) dispatch(roomSlug string, msgType string, data interface{}) {
-	seq := h.nextSeq(roomSlug)
-	payload := BroadcastMessage{
-		Type:      msgType,
-		Data:      data,
-		SeqNum:    seq,
-		Timestamp: time.Now(),
-	}
 	go func() {
 		select {
 		case <-h.closed:
 			return
-		case h.broadcast <- roomBroadcast{roomSlug: roomSlug, payload: payload}:
+		case h.broadcast <- roomBroadcast{roomSlug: roomSlug, msgType: msgType, data: data}:
 		}
 	}()
 }
