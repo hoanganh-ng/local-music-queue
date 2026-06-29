@@ -140,6 +140,8 @@ func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, 
 			Duration:  metadata.Duration,
 			Thumbnail: metadata.Thumbnail,
 			URL:       metadata.URL,
+			AddedBy:   metadata.AddedBy,
+			AddedByID: metadata.AddedByID,
 		}
 	} else {
 		if i.youtube == nil {

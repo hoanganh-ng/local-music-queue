@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"local-music-queue/internal/domain/entity"
@@ -62,9 +63,9 @@ func (h *RoomQueueHandlers) HandleGetRoomQueue(w http.ResponseWriter, r *http.Re
 // ignored.
 //
 // The handler stamps Metadata.AddedBy / AddedByID from the bearer-resolved
-// actor so the interactor (which currently discards its own actorUserID
-// for song ownership) inherits correct attribution. The display name is
-// not in scope for R07a — we stamp "user-<id>" as a placeholder.
+// actor so the interactor (which carries those fields onto entity.Song)
+// records correct attribution. The display name is not in scope for
+// R07a — we stamp "user-<id>" as a placeholder.
 func (h *RoomQueueHandlers) HandleAddRoomSong(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
 	if actorUserID == 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -75,15 +76,9 @@ func (h *RoomQueueHandlers) HandleAddRoomSong(w http.ResponseWriter, r *http.Req
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	// NOTE: stamping AddedBy / AddedByID on the metadata is deferred —
-	// entity.SearchResult does not carry those fields, only entity.Song
-	// does. Actor identity still flows via the actorUserID argument to
-	// AddSong. Logging the carry so future R07 work can attach the
-	// display name lookup here without breaking the API surface.
-	_ = actorUserID
-	if req.Metadata == nil {
-		// Slow path (yt-dlp fetch) is not exercised in R07a; the
-		// interactor's metadata-supplied path is the supported one.
+	if req.Metadata != nil {
+		req.Metadata.AddedByID = actorUserID
+		req.Metadata.AddedBy = fmt.Sprintf("user-%d", actorUserID)
 	}
 	_, song, err := h.inter.AddSong(r.Context(), slug, actorUserID, req.URL, req.Metadata)
 	if err != nil {
