@@ -57,6 +57,18 @@ type RoomArchivedEvent struct {
 	ArchivedAt time.Time
 }
 
+// RoomArchivedBroadcaster is implemented by the delivery layer to publish
+// RoomArchivedEvents to subscribed clients. The usecase layer holds the
+// interface (not the concrete *ws.Hub) so it can stay independent of
+// delivery/ws while still fanning out archive notifications.
+//
+// Implementations are expected to be non-blocking — the sweeper and the
+// release path call Broadcast synchronously from inside Hub.Run, so a
+// blocking broadcaster would deadlock the hub.
+type RoomArchivedBroadcaster interface {
+	BroadcastRoomArchived(ev RoomArchivedEvent)
+}
+
 // Interactor owns the room, invite, and membership use cases.
 type Interactor struct {
 	repo repository.RoomRepository

@@ -26,12 +26,25 @@ type RoomHandlers struct {
 	inter *room.Interactor
 	auth  *auth.Interactor
 	lease *room.PlayerLeaseInteractor
+	// archiveBroadcaster is implemented by *ws.Hub (via a thin adapter in
+	// main.go) so an explicit POST /player/release can publish a
+	// room_archived event without usecase/room importing delivery/ws.
+	// nil is tolerated — the handler skips the broadcast rather than
+	// failing the request.
+	archiveBroadcaster room.RoomArchivedBroadcaster
 }
 
 // NewRoomHandlers constructs RoomHandlers with an interactor and the auth
 // interactor (for session resolution).
 func NewRoomHandlers(inter *room.Interactor, lease *room.PlayerLeaseInteractor, a *auth.Interactor) *RoomHandlers {
 	return &RoomHandlers{inter: inter, auth: a, lease: lease}
+}
+
+// SetArchiveBroadcaster wires the broadcaster used to fan out room_archived
+// events on explicit release. Optional — when unset the handler still
+// succeeds; it just doesn't broadcast.
+func (h *RoomHandlers) SetArchiveBroadcaster(b room.RoomArchivedBroadcaster) {
+	h.archiveBroadcaster = b
 }
 
 // --- Request/response shapes ---
@@ -304,15 +317,24 @@ func (h *RoomHandlers) HandleHeartbeatPlayer(w http.ResponseWriter, r *http.Requ
 }
 
 // HandleReleasePlayer: POST /api/rooms/{slug}/player/release — host ends
-// the lease and archives the room. Returns 204 on success.
+// the lease and archives the room. Returns 204 on success, 404 if no
+// active lease exists, 403 for non-host callers.
+//
+// When the release actually archives the room, a room_archived event is
+// dispatched through the broadcaster (if wired). The usecase layer
+// stays independent of delivery/ws; the broadcaster is the seam.
 func (h *RoomHandlers) HandleReleasePlayer(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
 	if actorUserID == 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if err := h.lease.Release(r.Context(), slug, actorUserID); err != nil {
+	ev, err := h.lease.Release(r.Context(), slug, actorUserID)
+	if err != nil {
 		writeRoomError(w, err)
 		return
+	}
+	if ev != nil && h.archiveBroadcaster != nil {
+		h.archiveBroadcaster.BroadcastRoomArchived(*ev)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -32,9 +32,20 @@ func TestPlayerLease_IsWithinGrace(t *testing.T) {
 
 func TestPlayerLease_IsExpired(t *testing.T) {
 	now := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
-	ended := now.Add(-1 * time.Second)
-	l := &PlayerLease{ExpiresAt: now.Add(-60 * time.Second), EndedAt: &ended}
-	if !l.IsExpired(now) {
-		t.Error("expected ended lease to be expired")
+	// Ended 1s ago, expires_at was just before now — we are inside the
+	// 30s grace window after expires_at, so NOT yet expired.
+	recentlyEnded := now.Add(-1 * time.Second)
+	l := &PlayerLease{ExpiresAt: now.Add(-10 * time.Second), EndedAt: &recentlyEnded}
+	if l.IsExpired(now, 30*time.Second) {
+		t.Error("expected ended-but-still-in-grace lease to NOT be expired")
+	}
+	// Step forward so now is past expires_at + grace: expired.
+	if !l.IsExpired(now.Add(25*time.Second), 30*time.Second) {
+		t.Error("expected ended lease past grace to be expired")
+	}
+	// Active (not ended) lease is never expired regardless of time.
+	active := &PlayerLease{ExpiresAt: now.Add(-120 * time.Second)}
+	if active.IsExpired(now, 30*time.Second) {
+		t.Error("expected active (non-ended) lease to NOT be expired")
 	}
 }

@@ -24,11 +24,13 @@ func (l *PlayerLease) IsWithinGrace(now time.Time, grace time.Duration) bool {
 }
 
 // IsExpired reports whether the lease has been ended AND is past grace.
-func (l *PlayerLease) IsExpired(now time.Time) bool {
+// Callers pass the grace duration they consider expired; the entity does
+// not bake a magic number in.
+func (l *PlayerLease) IsExpired(now time.Time, grace time.Duration) bool {
 	if l.EndedAt == nil {
 		return false
 	}
-	return !l.IsWithinGrace(now, 30*time.Second)
+	return !l.IsWithinGrace(now, grace)
 }
 
 // PlayerLeaseArchiveReason describes why a room was archived in connection

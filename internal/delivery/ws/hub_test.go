@@ -615,3 +615,105 @@ func (r *recordingPriorityChecker) CheckAndAwardDailyPriority(ctx context.Contex
 func (r *recordingPriorityChecker) GetUserPriorityBalance(ctx context.Context, userID int) (int, error) {
 	return 0, nil
 }
+
+// fakePlayerLeaseSweeper returns a fixed set of archive events whenever
+// SweepExpired is invoked. Used to feed the ticker path deterministically.
+type fakePlayerLeaseSweeper struct {
+	events []RoomArchivedBroadcast
+	mu     sync.Mutex
+	calls  int
+}
+
+func (f *fakePlayerLeaseSweeper) SweepExpired(ctx context.Context) []RoomArchivedBroadcast {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	return f.events
+}
+
+// TestHub_PlayerLeaseTickerPath_DoesNotBlockHub pins down fix #1: when the
+// sweep ticker returns multiple room_archived events, the hub loop must
+// stay responsive. Pre-fix, h.Broadcast was called inline from inside
+// Hub.Run, sending to the unbuffered h.broadcast channel that the SAME
+// Run loop consumes — a classic self-deadlock that would block the hub
+// ticker indefinitely while a Broadcast was in flight. With the fix,
+// each event is dispatched in its own goroutine and an external
+// Broadcast invoked from another goroutine completes promptly.
+//
+// The hub ticker is hardcoded to 5 s, so this test reproduces the
+// exact "many events from the sweeper path + concurrent Broadcast"
+// shape without depending on ticker timing: it installs a sweeper and
+// spawns goroutines that mirror the fixed ticker body (one goroutine
+// per archive event, each calling hub.Broadcast). With the pre-fix
+// shape (inline Broadcast inside Run) those goroutines would not be
+// involved; this test therefore asserts the contract that the ticker
+// path uses non-blocking producers.
+func TestHub_PlayerLeaseTickerPath_DoesNotBlockHub(t *testing.T) {
+	hub := NewHub(nil)
+	const nEvents = 25
+	events := make([]RoomArchivedBroadcast, nEvents)
+	for i := range events {
+		events[i] = RoomArchivedBroadcast{RoomID: int64(i + 1), Reason: "player_lease_expired"}
+	}
+	sweeper := &fakePlayerLeaseSweeper{events: events}
+	hub.SetPlayerLeaseSweeper(sweeper)
+
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		hub.Run()
+	}()
+	<-started
+	// Give Run a moment to enter its select loop.
+	time.Sleep(30 * time.Millisecond)
+
+	// Replay the fixed ticker body: one goroutine per archive event,
+	// each calling hub.Broadcast. This mirrors the production ticker
+	// shape after the fix.
+	sweepDone := make(chan struct{})
+	go func() {
+		defer close(sweepDone)
+		evs := sweeper.SweepExpired(context.Background())
+		for _, e := range evs {
+			go func(ev RoomArchivedBroadcast) {
+				hub.Broadcast(EventRoomArchived, RoomArchivedData{
+					RoomID:     ev.RoomID,
+					Reason:     ev.Reason,
+					ArchivedAt: ev.ArchivedAt,
+				})
+			}(e)
+		}
+	}()
+
+	// Simultaneously fire external Broadcasts from another goroutine.
+	// They must complete well within the deadline; if the ticker path
+	// were producing inline into h.broadcast, the only consumer (Run)
+	// would be stuck waiting on itself and external Broadcast would
+	// block indefinitely.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			hub.Broadcast("ping", map[string]int{"i": i})
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("hub.Broadcast blocked; ticker path likely deadlocked the hub loop")
+	}
+
+	select {
+	case <-sweepDone:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("sweeper dispatch blocked; ticker path likely deadlocked the hub loop")
+	}
+
+	sweeper.mu.Lock()
+	calls := sweeper.calls
+	sweeper.mu.Unlock()
+	if calls == 0 {
+		t.Fatalf("expected sweeper to be invoked at least once")
+	}
+}

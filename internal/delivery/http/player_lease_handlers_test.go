@@ -72,11 +72,26 @@ func TestPlayerLeaseHandler_Release_204AndRoomArchived(t *testing.T) {
 		t.Fatalf("claim: %v", err)
 	}
 
+	// Wire a recorder broadcaster to assert the handler invokes the
+	// room_archived path on a real release (R06 fix #2).
+	rec := &recordingBroadcaster{}
+	rh.SetArchiveBroadcaster(rec)
+
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rel-room/player/release", nil)
 	rh.HandleReleasePlayer(rr, req, "rel-room", hostID)
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("release expected 204, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	if len(rec.events) != 1 {
+		t.Fatalf("expected broadcaster to receive 1 archive event, got %d", len(rec.events))
+	}
+	if rec.events[0].Reason != string(entity.PlayerLeaseExplicit) {
+		t.Errorf("expected reason %q, got %q", entity.PlayerLeaseExplicit, rec.events[0].Reason)
+	}
+	if rec.events[0].RoomID != roomObj.ID {
+		t.Errorf("expected RoomID %d, got %d", roomObj.ID, rec.events[0].RoomID)
 	}
 
 	updated, err := rh.inter.Repo().GetRoomByID(context.Background(), roomObj.ID)
@@ -86,6 +101,51 @@ func TestPlayerLeaseHandler_Release_204AndRoomArchived(t *testing.T) {
 	if updated.Status != entity.RoomStatusArchived {
 		t.Errorf("expected archived after release, got %s", updated.Status)
 	}
+}
+
+// TestPlayerLeaseHandler_Release_NoLease_404LeavesRoomActive covers R06
+// fix #3: POST /player/release on a room with no active lease must
+// return 404 and must NOT touch the room (no archive, no broadcaster
+// invocation).
+func TestPlayerLeaseHandler_Release_NoLease_404LeavesRoomActive(t *testing.T) {
+	rh, db := newLeaseHandlersWithDB(t)
+	hostID := seedUser(t, db, "host-rel-nolease@example.com", entity.RoleHost)
+	roomObj, err := rh.inter.CreateRoom(context.Background(), "rel-nolease-room", "RelNoLease", hostID)
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	rec := &recordingBroadcaster{}
+	rh.SetArchiveBroadcaster(rec)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rel-nolease-room/player/release", nil)
+	rh.HandleReleasePlayer(rr, req, "rel-nolease-room", hostID)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("release with no lease expected 404, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	if len(rec.events) != 0 {
+		t.Errorf("broadcaster must NOT be invoked when there is no lease, got %d events", len(rec.events))
+	}
+
+	updated, err := rh.inter.Repo().GetRoomByID(context.Background(), roomObj.ID)
+	if err != nil {
+		t.Fatalf("get room: %v", err)
+	}
+	if updated.Status != entity.RoomStatusActive {
+		t.Errorf("expected room to remain active when no lease to release, got %s", updated.Status)
+	}
+}
+
+// recordingBroadcaster captures every archive event handed to it so
+// handler-level tests can assert the room_archived path was exercised.
+type recordingBroadcaster struct {
+	events []room.RoomArchivedEvent
+}
+
+func (r *recordingBroadcaster) BroadcastRoomArchived(ev room.RoomArchivedEvent) {
+	r.events = append(r.events, ev)
 }
 
 func TestPlayerLeaseHandler_GetLease_404WhenNone(t *testing.T) {

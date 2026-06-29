@@ -193,12 +193,17 @@ func (h *Hub) Run() {
 		case <-ticker.C:
 			if h.playerLeaseSweeper != nil {
 				events := h.playerLeaseSweeper.SweepExpired(context.Background())
+				// Run each broadcast in a goroutine — h.broadcast is unbuffered
+				// and consumed only by this same Run loop, so sending from
+				// inside Run would deadlock.
 				for _, e := range events {
-					h.Broadcast(EventRoomArchived, RoomArchivedData{
-						RoomID:     e.RoomID,
-						Reason:     e.Reason,
-						ArchivedAt: e.ArchivedAt,
-					})
+					go func(ev RoomArchivedBroadcast) {
+						h.Broadcast(EventRoomArchived, RoomArchivedData{
+							RoomID:     ev.RoomID,
+							Reason:     ev.Reason,
+							ArchivedAt: ev.ArchivedAt,
+						})
+					}(e)
 				}
 			}
 			if h.voteInteractor != nil {

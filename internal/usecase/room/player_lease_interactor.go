@@ -89,23 +89,44 @@ func (p *PlayerLeaseInteractor) Heartbeat(ctx context.Context, slug string, acto
 	return renewed, nil
 }
 
-// Release ends the lease and archives the room exactly once.
-func (p *PlayerLeaseInteractor) Release(ctx context.Context, slug string, actorUserID int) error {
+// Release ends the active lease and archives the room exactly once.
+// If there is no active lease for the room, it returns ErrPlayerLeaseNotFound
+// without touching the room state (no archive, no event). When the release
+// actually archives a room, a *RoomArchivedEvent is returned so the caller
+// (delivery/http) can map it to the ws room_archived broadcast.
+//
+// The interactor itself does NOT broadcast; it returns the event. Wiring
+// it through a broadcaster keeps usecase/room independent of delivery/ws.
+func (p *PlayerLeaseInteractor) Release(ctx context.Context, slug string, actorUserID int) (*RoomArchivedEvent, error) {
 	room, err := p.resolveActiveRoom(ctx, slug)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := p.requireHost(ctx, room.ID, actorUserID); err != nil {
-		return ErrPlayerLeaseForbidden
+		return nil, ErrPlayerLeaseForbidden
 	}
 	now := p.now()
-	if _, err := p.leaseRepo.EndLease(ctx, room.ID, now); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("end lease: %w", err)
+	if _, err := p.leaseRepo.EndLease(ctx, room.ID, now); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// No active lease — nothing to release, nothing to archive.
+			return nil, ErrPlayerLeaseNotFound
+		}
+		return nil, fmt.Errorf("end lease: %w", err)
 	}
-	if _, err := p.roomRepo.ArchiveRoomIfActive(ctx, room.ID, now); err != nil {
-		return fmt.Errorf("archive room: %w", err)
+	archived, err := p.roomRepo.ArchiveRoomIfActive(ctx, room.ID, now)
+	if err != nil {
+		return nil, fmt.Errorf("archive room: %w", err)
 	}
-	return nil
+	if !archived {
+		// Lease ended but the room was already archived by some other path
+		// (e.g. sweeper). No event to broadcast.
+		return nil, nil
+	}
+	return &RoomArchivedEvent{
+		RoomID:     room.ID,
+		Reason:     string(entity.PlayerLeaseExplicit),
+		ArchivedAt: now,
+	}, nil
 }
 
 // GetLease returns the active lease for a room; any active member may read.

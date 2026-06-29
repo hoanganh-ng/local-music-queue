@@ -56,13 +56,57 @@ func TestPlayerLease_Claim_RenewHeartbeat_Release_ArchivesRoom(t *testing.T) {
 		t.Errorf("expected ErrNotLeaseHolder, got %v", err)
 	}
 
-	// Release by host archives the room exactly once.
-	if err := pi.Release(ctx, "claim-room", 42); err != nil {
+	// Release by host archives the room exactly once AND emits the
+	// room_archived event with reason=explicit (R06 fix #2).
+	ev, err := pi.Release(ctx, "claim-room", 42)
+	if err != nil {
 		t.Fatalf("release: %v", err)
+	}
+	if ev == nil {
+		t.Fatalf("expected a RoomArchivedEvent from Release, got nil")
+	}
+	if ev.RoomID != roomObj.ID {
+		t.Errorf("expected event RoomID %d, got %d", roomObj.ID, ev.RoomID)
+	}
+	if ev.Reason != string(entity.PlayerLeaseExplicit) {
+		t.Errorf("expected reason %q, got %q", entity.PlayerLeaseExplicit, ev.Reason)
 	}
 	roomAfter, _ := inter.Repo().GetRoomByID(ctx, roomObj.ID)
 	if roomAfter.Status != entity.RoomStatusArchived {
 		t.Errorf("expected archived after release, got %s", roomAfter.Status)
+	}
+}
+
+// TestPlayerLease_ReleaseWithoutLease_Returns404_NoArchive pins down fix
+// #3: an explicit release on a room with no active lease must return
+// ErrPlayerLeaseNotFound (HTTP 404) without archiving the room.
+func TestPlayerLease_ReleaseWithoutLease_Returns404_NoArchive(t *testing.T) {
+	inter, db, cleanup := pgInterWithDB(t)
+	defer cleanup()
+	leaseRepo := persistence.NewPostgresPlayerLeaseRepository(db)
+	pi := NewPlayerLeaseInteractor(leaseRepo, inter.repo, db, 60*time.Second, 30*time.Second)
+	ctx := context.Background()
+
+	roomObj, err := inter.CreateRoom(ctx, "norel-room", "NoRel", 42)
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	// No claim -> release must error and must NOT archive the room.
+	ev, err := pi.Release(ctx, "norel-room", 42)
+	if !errors.Is(err, ErrPlayerLeaseNotFound) {
+		t.Fatalf("expected ErrPlayerLeaseNotFound, got err=%v ev=%v", err, ev)
+	}
+	if ev != nil {
+		t.Errorf("expected nil event when no lease exists, got %+v", ev)
+	}
+
+	roomAfter, err := inter.Repo().GetRoomByID(ctx, roomObj.ID)
+	if err != nil {
+		t.Fatalf("get room: %v", err)
+	}
+	if roomAfter.Status != entity.RoomStatusActive {
+		t.Errorf("expected room to remain ACTIVE when no lease to release, got %s", roomAfter.Status)
 	}
 }
 

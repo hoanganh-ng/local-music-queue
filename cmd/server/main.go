@@ -216,6 +216,11 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	handlers := delivery.NewHandlers(qInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, hub)
 	autoQueueHandlers := delivery.NewAutoQueueHandlers(autoQueueInteractor, hub)
 	roomHandlers := delivery.NewRoomHandlers(roomInteractor, playerLeaseInteractor, authInteractor)
+	// Adapter lets the room handler publish room_archived without
+	// importing the ws package. hub.Broadcast is non-blocking when called
+	// from outside Hub.Run; for the in-ticker case the goroutine fan-out
+	// added in hub.go keeps the hub loop from deadlocking itself.
+	roomHandlers.SetArchiveBroadcaster(hubArchiveBroadcaster{hub: hub})
 
 	// 5. Setup Routes
 	mux := http.NewServeMux()
@@ -413,4 +418,19 @@ func (a wsLeaseSweeperAdapter) SweepExpired(ctx context.Context) []ws.RoomArchiv
 		}
 	}
 	return out
+}
+
+// hubArchiveBroadcaster adapts *ws.Hub to the room.RoomArchivedBroadcaster
+// interface so usecase/room stays free of delivery/ws imports.
+type hubArchiveBroadcaster struct {
+	hub *ws.Hub
+}
+
+// BroadcastRoomArchived implements room.RoomArchivedBroadcaster.
+func (b hubArchiveBroadcaster) BroadcastRoomArchived(ev usecaseRoom.RoomArchivedEvent) {
+	b.hub.Broadcast(ws.EventRoomArchived, ws.RoomArchivedData{
+		RoomID:     ev.RoomID,
+		Reason:     ev.Reason,
+		ArchivedAt: ev.ArchivedAt,
+	})
 }
