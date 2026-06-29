@@ -1,6 +1,6 @@
 # R07 – Room‑scoped playback queue
 
-**Status:** in progress — the R07a slice (per-room queue persistence + four room-scoped REST endpoints) has landed on `dev`. The full R07 sprint is intentionally split: R07a is shipped, and the remaining R07 scope (per-room WebSocket events, relational queue rows, reorder/vote endpoints, cross-process safety, migration of the legacy global `queue_state`) remains deferred to subsequent slices and is detailed in the *Implementation summary (R07a)* and *Deferred to the rest of R07* sections below.
+**Status:** closed — R07a (Room-scoped playback queue, narrow first slice) accepted 2026-06-29. The remaining R07 scope (per-room WebSocket events, relational queue rows, reorder/vote endpoints, cross-process safety, migration of the legacy global `queue_state` into a room) remains split and deferred to subsequent slices; see *Implementation summary (R07a)* for what shipped and *Deferred to the rest of R07* for the carve-out.
 
 **Sprint name:** Room‑scoped playback queue
 
