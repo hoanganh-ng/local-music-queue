@@ -60,7 +60,11 @@ The current implementation does not maintain a durable queue.  Tracks are passed
 
 ## Execution note
 
-This document is a planning stub.  It captures the intent and requirements for the **room‑scoped playback queue** sprint but does not reflect any implemented changes.  When the sprint begins, update this file with any clarifications that arise during shaping, and upon completion summarise the outcome and mark the status as **closed** in both this document and `ROOM_EPIC_SPRINT_SEQUENCE.md`.
+R07a has landed on `dev` (per the implementation summary below). The
+remaining R07 scope listed under *Deferred to the rest of R07* is
+intentionally split into subsequent slices; this document remains the
+authoritative entry point for tracking that work and should be updated
+as each deferred slice ships.
 
 ## Implementation summary (R07a)
 
