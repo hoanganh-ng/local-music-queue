@@ -1,6 +1,6 @@
 # R07 – Room‑scoped playback queue
 
-**Status:** R07a closed 2026-06-29 (accepted by the Product Owner); R07b closed 2026-06-29 (accepted by the Product Owner). R07b (Room Queue WebSocket Sync and Deltas, this slice) added per-room WebSocket sync/delta broadcasts on top of R07a. See *Implementation summary (R07a)* and *Implementation summary (R07b)* below. Remaining R07 scope (relational queue rows, room-scoped reorder/vote endpoints, cross-process safety, migration of the legacy global `queue_state` into a room) remains split and deferred to subsequent slices.
+**Status:** R07a closed 2026-06-29 (accepted by the Product Owner); R07b closed 2026-06-29 (accepted by the Product Owner); R07c closed 2026-06-29 (accepted by the Product Owner). R07a persisted the room queue. R07b added per-room WebSocket sync/delta broadcasts on top of R07a. R07c (this slice) added a narrow authenticated frontend path against the R07a/R07b contracts without changing any backend behavior. See *Implementation summary (R07a)*, *Implementation summary (R07b)*, and *Implementation summary (R07c)* below. Remaining R07 scope (relational queue rows, room-scoped reorder/vote endpoints, cross-process safety, migration of the legacy global `queue_state` into a room) remains split and deferred to subsequent slices.
 
 **Sprint name:** Room‑scoped playback queue
 
@@ -266,3 +266,5 @@ shipped and accepted.
 - `cd frontend && npm run test:unit -- --run` — PASS
 - `cd frontend && npm run build` — PASS
 - `git diff --check` — PASS
+
+**Closure:** R07c closed 2026-06-29 and accepted by the Product Owner. A small follow-up polish pass on the same day (route-param watcher now REST-seeds the new room before opening the new room WebSocket) is included in this acceptance; the polish commit keeps the frontend in sync with the mount path and does not change any backend contract. R07c is the narrow final slice of R07 as currently scoped; the remaining R07 scope above is intentionally deferred to later slices.
