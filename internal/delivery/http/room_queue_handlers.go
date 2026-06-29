@@ -15,9 +15,11 @@ import (
 
 // RoomQueueHandlers wires the room-scoped queue REST endpoints. Actor
 // identity is supplied by the routing wrapper (main.go's roomAuth)
-// which already resolved the bearer token. R07a intentionally does NOT
-// broadcast WebSocket events from these handlers; per-room WS deltas
-// are scoped to R08.
+// which already resolved the bearer token. R07b wires these handlers to
+// the per-room WebSocket hub (via the interactor's Broadcaster seam) so
+// successful add/remove/clear mutations fan out room_queue_song_added,
+// room_queue_song_removed, and room_queue_cleared to /ws/rooms/{slug}
+// subscribers.
 type RoomQueueHandlers struct {
 	inter *roomqueue.Interactor
 	auth  *auth.Interactor

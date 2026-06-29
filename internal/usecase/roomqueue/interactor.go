@@ -7,8 +7,10 @@
 //   - preserving queue invariants (Add / Remove / Clear / ContainsSong)
 //   - mapping sentinel errors to documented HTTP statuses
 //
-// The package does NOT broadcast WebSocket events; the global hub is
-// unchanged in R07a. Per-room WS deltas land in R08.
+// Broadcasts: the package exposes a Broadcaster seam that the delivery
+// layer wires to the per-room WebSocket hub (R07b). The interactor itself
+// does NOT broadcast — mutations return the post-state and the handler
+// fans it out so the usecase package stays independent of delivery/ws.
 package roomqueue
 
 import (
