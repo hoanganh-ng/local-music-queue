@@ -169,6 +169,15 @@ func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, 
 	if queue.ContainsSong(song.ID) {
 		return nil, nil, entity.ErrSongAlreadyInQueue
 	}
+	// entity.Queue.ContainsSong only inspects upcoming songs (after
+	// CurrentIndex). R07a's contract also rejects a duplicate when the
+	// song is already the currently-playing track, so we do a full
+	// range check here without mutating the entity.
+	for _, s := range queue.Songs {
+		if s.ID == song.ID {
+			return nil, nil, entity.ErrSongAlreadyInQueue
+		}
+	}
 	queue.Add(*song)
 	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 		return nil, nil, fmt.Errorf("save room queue: %w", err)
@@ -202,12 +211,12 @@ func (i *Interactor) RemoveSong(ctx context.Context, slug string, actorUserID in
 
 	if actorRoomRole != entity.RoomRoleHost && actorRoomRole != entity.RoomRoleAdmin {
 		if actorRoomRole == entity.RoomRoleGuest {
-			if index <= queue.CurrentIndex {
-				return nil, ErrCannotRemoveSong
-			}
 			song := queue.Songs[index]
 			if song.AddedByID == 0 || song.AddedByID != actorUserID {
 				return nil, ErrNotSongOwner
+			}
+			if index <= queue.CurrentIndex {
+				return nil, ErrCannotRemoveSong
 			}
 		} else {
 			return nil, ErrNotSongOwner

@@ -102,18 +102,15 @@ func TestRoomQueue_RemoveSong_GuestCannotRemoveOthers(t *testing.T) {
 	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, "rq-rm", "RmRoom", 42, testTime()); err != nil {
 		t.Fatalf("create room: %v", err)
 	}
-	// Host adds two songs; mark the second as owned by user 200.
+	if err := inter.roomRepo.AddMember(ctx, mustRoomID(t, inter, "rq-rm"), 200, entity.RoomRoleGuest, testTime()); err != nil {
+		t.Fatalf("add guest: %v", err)
+	}
+	// Host adds a song.
 	if _, _, err := inter.AddSong(ctx, "rq-rm", 42, "", &entity.SearchResult{ID: "h-1", Title: "H1", URL: "https://example/h1"}); err != nil {
 		t.Fatalf("add host: %v", err)
 	}
-	// Add the second song with AddedByID set so we can simulate "owned
-	// by user 200". The handler normally sets this; here we reach into
-	// the persisted queue to flip the field.
-	if err := setAddedByID(t, ctx, inter, "rq-rm", "h-1", 0, 200); err != nil {
-		t.Fatalf("flip ownership: %v", err)
-	}
-	// Now an admin-guest (user 200 as guest role) tries to remove a song
-	// they don't own: index 0 (host-owned).
+	// Guest 200 tries to remove the host's current song (index 0).
+	// Ownership check fires first → ErrNotSongOwner.
 	_, err := inter.RemoveSong(ctx, "rq-rm", 200, entity.RoomRoleGuest, 0)
 	if !errors.Is(err, ErrNotSongOwner) {
 		t.Fatalf("expected ErrNotSongOwner, got %v", err)
@@ -168,7 +165,8 @@ func mustRoomID(t *testing.T, inter *Interactor, slug string) int64 {
 
 // setAddedByID mutates the persisted JSON to set AddedByID for the song
 // whose id matches songID, so the test can simulate "song owned by a
-// specific user" without re-running the metadata path.
+// specific user" without re-running the metadata path. Retained for
+// future tests that need ownership simulation.
 func setAddedByID(t *testing.T, ctx context.Context, inter *Interactor, slug string, songID string, oldID, newID int) error {
 	t.Helper()
 	q, err := inter.queueRepo.Load(ctx, mustRoomID(t, inter, slug))
