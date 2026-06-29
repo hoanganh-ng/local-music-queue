@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,10 +63,11 @@ func (h *RoomQueueHandlers) HandleGetRoomQueue(w http.ResponseWriter, r *http.Re
 // identity from the bearer token; request-body identity fields are
 // ignored.
 //
-// The handler stamps Metadata.AddedBy / AddedByID from the bearer-resolved
-// actor so the interactor (which carries those fields onto entity.Song)
-// records correct attribution. The display name is not in scope for
-// R07a — we stamp "user-<id>" as a placeholder.
+// The handler resolves the actor's display name via the existing
+// auth/UserRepository path used by the rest of the app and forwards it
+// to the interactor. The interactor stamps the constructed Song's
+// AddedBy / AddedByID for both the metadata-supplied and the bare-URL
+// branches so the persisted queue always records the resolved actor.
 func (h *RoomQueueHandlers) HandleAddRoomSong(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
 	if actorUserID == 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -76,16 +78,41 @@ func (h *RoomQueueHandlers) HandleAddRoomSong(w http.ResponseWriter, r *http.Req
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if req.Metadata != nil {
-		req.Metadata.AddedByID = actorUserID
-		req.Metadata.AddedBy = fmt.Sprintf("user-%d", actorUserID)
+	// Resolve the actor's display name through the existing
+	// auth/UserRepository path. Body-supplied display_name /
+	// added_by / user_id are ignored.
+	displayName, err := h.resolveActorDisplayName(r.Context(), actorUserID)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
 	}
-	_, song, err := h.inter.AddSong(r.Context(), slug, actorUserID, req.URL, req.Metadata)
+	_, song, err := h.inter.AddSong(r.Context(), slug, actorUserID, displayName, req.URL, req.Metadata)
 	if err != nil {
 		writeRoomQueueError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, song)
+}
+
+// resolveActorDisplayName loads the actor's display name through the
+// auth interactor. Falls back to a generic placeholder if the user row
+// is missing a display name; the actorUserID itself is the
+// authoritative attribution key.
+func (h *RoomQueueHandlers) resolveActorDisplayName(ctx context.Context, actorUserID int) (string, error) {
+	user, err := h.auth.GetUserByID(ctx, actorUserID)
+	if err != nil {
+		return "", err
+	}
+	if user == nil {
+		return "", auth.ErrInvalidToken
+	}
+	if user.DisplayName != "" {
+		return user.DisplayName, nil
+	}
+	if user.Email != "" {
+		return user.Email, nil
+	}
+	return fmt.Sprintf("user-%d", actorUserID), nil
 }
 
 // HandleRemoveRoomSong: POST /api/rooms/{slug}/queue/remove — host/admin

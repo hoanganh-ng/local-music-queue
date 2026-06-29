@@ -122,7 +122,13 @@ func (i *Interactor) GetState(ctx context.Context, slug string, actorUserID int)
 // duplicate-check + auto-start rules as the global interactor, persists
 // the new queue, and returns the resulting queue plus the inserted
 // song. Any active member may add.
-func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, url string, metadata *entity.SearchResult) (*entity.Queue, *entity.Song, error) {
+//
+// actorUserID and actorDisplayName are server-resolved from the bearer
+// token by the delivery layer; request-body identity fields are ignored.
+// The interactor stamps the constructed Song's AddedBy / AddedByID so
+// the URL-only branch (no metadata body) also carries correct
+// attribution.
+func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, actorDisplayName string, url string, metadata *entity.SearchResult) (*entity.Queue, *entity.Song, error) {
 	roomObj, err := i.resolveActiveRoom(ctx, slug)
 	if err != nil {
 		return nil, nil, err
@@ -153,11 +159,11 @@ func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, 
 		}
 		song = fetched
 	}
-	// Actor identity is server-resolved from the bearer token by the
-	// handler, which stamps metadata.AddedBy / metadata.AddedByID before
-	// calling AddSong. The handler is the single source of attribution;
-	// tests that bypass the handler must set those fields explicitly on
-	// the metadata argument.
+	// Server-resolved attribution is authoritative. Overwrite any
+	// metadata-supplied AddedBy / AddedByID so a client cannot spoof a
+	// host's add via the request body.
+	song.AddedBy = actorDisplayName
+	song.AddedByID = actorUserID
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -168,15 +174,6 @@ func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, 
 	}
 	if queue.ContainsSong(song.ID) {
 		return nil, nil, entity.ErrSongAlreadyInQueue
-	}
-	// entity.Queue.ContainsSong only inspects upcoming songs (after
-	// CurrentIndex). R07a's contract also rejects a duplicate when the
-	// song is already the currently-playing track, so we do a full
-	// range check here without mutating the entity.
-	for _, s := range queue.Songs {
-		if s.ID == song.ID {
-			return nil, nil, entity.ErrSongAlreadyInQueue
-		}
 	}
 	queue.Add(*song)
 	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {

@@ -21,12 +21,13 @@ import (
 // in room_members resolve correctly. Used here in addition to the
 // same-name helper in room_handlers_test.go so the queue-handler tests
 // can pin explicit ids (42, 200, 999) without colliding on the user
-// id sequence.
+// id sequence. profile_picture is set to an empty string so the NOT-NULL
+// tolerant scan in GetUserByID does not fail.
 func seedUserQueue(t *testing.T, db *sql.DB, id int, email string, role entity.Role) {
 	t.Helper()
 	if _, err := db.Exec(
-		`INSERT INTO users (id, email, display_name, role, priority_balance, created_at, updated_at)
-		 VALUES ($1, $2, $2, $3, 0, NOW(), NOW())`,
+		`INSERT INTO users (id, email, display_name, profile_picture, role, priority_balance, created_at, updated_at)
+		 VALUES ($1, $2, $2, '', $3, 0, NOW(), NOW())`,
 		id, email, role,
 	); err != nil {
 		t.Fatalf("seed user %d (%s): %v", id, email, err)
@@ -212,5 +213,125 @@ func TestRoomQueue_AddSong_RequiresAuthenticatedActor(t *testing.T) {
 	rqh.HandleAddRoomSong(rr, req, "some-room", 0)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// stubYTHandler is a service.YouTubeService used to drive the bare-URL
+// branch of HandleAddRoomSong from HTTP tests without yt-dlp.
+type stubYTHandler struct {
+	song *entity.Song
+}
+
+func (s *stubYTHandler) FetchMetadata(ctx context.Context, url string) (*entity.Song, error) {
+	return s.song, nil
+}
+func (s *stubYTHandler) SearchYouTube(ctx context.Context, query string, maxResults int) ([]*entity.SearchResult, error) {
+	return nil, nil
+}
+
+// TestRoomQueue_AddSong_URLOnly_PersistsServerAttribution covers task
+// (2) above: a bare-URL add (no metadata body) must result in a song
+// whose AddedByID / AddedBy are server-resolved from the bearer token,
+// and a guest must be able to remove their own upcoming URL-added
+// song (proving attribution is persisted and consulted).
+func TestRoomQueue_AddSong_URLOnly_PersistsServerAttribution(t *testing.T) {
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	defer cleanup()
+
+	// Need both the host (42) for room creation and the guest (999)
+	// for the URL add + own-removal assertions.
+	seedUserQueue(t, db, 42, "host-rq-url@example.com", entity.RoleHost)
+	seedUserQueue(t, db, 999, "guest-rq-url@example.com", entity.RoleGuest)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, "rq-rest-url", "RQUrl", 42, time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := mustRoomIDQueue(t, db, "rq-rest-url")
+	if err := roomRepo.AddMember(ctx, roomID, 999, entity.RoomRoleGuest, time.Now().UTC()); err != nil {
+		t.Fatalf("add guest: %v", err)
+	}
+
+	// Drive the URL-only branch by attaching a stub YouTubeService that
+	// returns a song. The constructor uses nil for youtube; we attach
+	// via SetYouTube for this test only.
+	rqh.inter.SetYouTube(&stubYTHandler{song: &entity.Song{
+		ID: "yt-url-1", Title: "FromURL", Artist: "YT", Duration: 60, Thumbnail: "t",
+		URL: "https://youtube.com/watch?v=yt-url-1",
+	}})
+
+	// Guest 999 issues a URL-only add. The body MUST NOT contain
+	// added_by / added_by_id / user_id / display_name — those are
+	// ignored.
+	body := []byte(`{"url":"https://youtube.com/watch?v=yt-url-1"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-rest-url/queue/add", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleAddRoomSong(rr, req, "rq-rest-url", 999)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("url add: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var got entity.Song
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode song: %v", err)
+	}
+	if got.AddedByID != 999 {
+		t.Errorf("expected AddedByID=999 from server-resolved actor, got %d", got.AddedByID)
+	}
+	if got.AddedBy == "" || got.AddedBy == "user-999" {
+		t.Errorf("expected AddedBy populated from server-side display name/email, got %q", got.AddedBy)
+	}
+
+	// Persisted queue must carry the server-resolved attribution.
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	persisted, err := queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("load persisted queue: %v", err)
+	}
+	if len(persisted.Songs) != 1 {
+		t.Fatalf("expected 1 persisted song, got %d", len(persisted.Songs))
+	}
+	if persisted.Songs[0].AddedByID != 999 {
+		t.Errorf("persisted song: expected AddedByID=999, got %d", persisted.Songs[0].AddedByID)
+	}
+	if persisted.Songs[0].AddedBy == "" {
+		t.Errorf("persisted song: expected AddedBy populated, got empty")
+	}
+
+	// Guest 999 adds a SECOND URL-only song so we have an upcoming one
+	// to remove.
+	rqh.inter.SetYouTube(&stubYTHandler{song: &entity.Song{
+		ID: "yt-url-2", Title: "FromURL2", Artist: "YT", Duration: 60, Thumbnail: "t",
+		URL: "https://youtube.com/watch?v=yt-url-2",
+	}})
+	body2 := []byte(`{"url":"https://youtube.com/watch?v=yt-url-2"}`)
+	req2 := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-rest-url/queue/add", bytes.NewReader(body2))
+	req2.Header.Set("Content-Type", "application/json")
+	rr2 := httptest.NewRecorder()
+	rqh.HandleAddRoomSong(rr2, req2, "rq-rest-url", 999)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("second url add: expected 200, got %d body=%s", rr2.Code, rr2.Body.String())
+	}
+
+	// Now the guest removes their own upcoming song at index 1. The
+	// ownership check uses AddedByID == actorUserID; this succeeds
+	// only because the server-resolved attribution was persisted.
+	rmBody := []byte(`{"index":1}`)
+	rmReq := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-rest-url/queue/remove", bytes.NewReader(rmBody))
+	rmReq.Header.Set("Content-Type", "application/json")
+	rmRR := httptest.NewRecorder()
+	rqh.HandleRemoveRoomSong(rmRR, rmReq, "rq-rest-url", 999)
+	if rmRR.Code != http.StatusNoContent {
+		t.Fatalf("guest remove own upcoming: expected 204, got %d body=%s", rmRR.Code, rmRR.Body.String())
+	}
+	after, err := queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("load after remove: %v", err)
+	}
+	if len(after.Songs) != 1 {
+		t.Fatalf("expected 1 persisted song after remove, got %d (songs=%+v)", len(after.Songs), after.Songs)
+	}
+	if after.Songs[0].ID != "yt-url-1" {
+		t.Errorf("expected only yt-url-1 to remain, got %s", after.Songs[0].ID)
 	}
 }
