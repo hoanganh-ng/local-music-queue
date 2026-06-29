@@ -1,25 +1,25 @@
-# Sprint 011 / R05 — Player Lease and Host Departure Semantics
+# Sprint 011 / R06 — Player Lease and Host Departure Semantics
 
 ## Status
 
-Planned — documentation stub for the **R05 – Player Lease and Host Departure Semantics** sprint.  This file sketches the intent and scope of the sprint based on the approved room epic sequence.  The actual implementation and verification notes will be added when the sprint is executed and closed.
+Implemented (R06) — documentation stub for the **R06 – Player Lease and Host Departure Semantics** sprint.  This file sketches the intent and scope of the sprint based on the approved room epic sequence.  The actual implementation and verification notes will be added when the sprint is executed and closed.
 
 ## Sprint name
 
-Sprint 011 / R05 — Player Lease and Host Departure Semantics
+Sprint 011 / R06 — Player Lease and Host Departure Semantics
 
 ## Goal
 
 Model the one‑speaker/player responsibility explicitly.  The global application currently does not distinguish between the human host (room owner) and the device that holds the active player.  This sprint introduces a per‑room **player lease** so that the host’s browser can claim, heartbeat, and release control of the playback device.  Losing the active player (e.g. by disconnecting or missing heartbeats) triggers room archival under defined grace semantics.  Admins remain able to control queue/playback while a lease exists, but they cannot prevent archive once the lease expires.
 
-## Current behavior (pre‑R05 baseline)
+## Current behavior (pre‑R06 baseline)
 
 * No `player_lease` entity exists.  The host concept conflates the person and the playback device.
 * Rooms introduced in R04 lack any notion of player lease or host device tracking.
 * When the host leaves the room or closes the browser, there is no automatic archive.  The room stays active indefinitely until manually archived in later sprints.
 * Admins can control queue/playback but there is no safeguard preventing a room from staying alive without a player.
 
-## Desired behavior (post‑R05)
+## Desired behavior (post‑R06)
 
 * A new `PlayerLease` persistence model associates exactly one active lease with an active room.  Each lease records the claiming user ID, a `claimed_at` timestamp, a `last_heartbeat_at` timestamp and an `expires_at` timestamp.
 * REST endpoints exist to **claim**, **heartbeat**, and **release** a player lease (`POST /api/rooms/{roomId}/player/claim`, `POST /api/rooms/{roomId}/player/heartbeat`, `POST /api/rooms/{roomId}/player/release`).  These endpoints require host authentication via bearer token.  Heartbeat extends the expiry; release ends the lease immediately.  Duplicate claims while a valid lease exists return `409 Conflict`.
@@ -68,4 +68,31 @@ The sprint must satisfy all of the following points without regressing previousl
 
 ## Execution note
 
-> **Status update:** This stub file documents the intended scope of Sprint 011 / R05.  It does not imply that implementation has started.  When the sprint begins, update this document with the current baseline, the implemented behavior, verification results, and closure notes.  When closed, update the status to “Closed” and link to the authoritative commit hashes.  Do not implement R06, R07, or later sprints while R05 is in progress.
+> **Status update:** This stub file documents the intended scope of Sprint 011 / R06.  It does not imply that implementation has started.  When the sprint begins, update this document with the current baseline, the implemented behavior, verification results, and closure notes.  When closed, update the status to “Closed” and link to the authoritative commit hashes.  Do not implement R06, R07, or later sprints while R06 is in progress.
+
+## Implementation summary (R06)
+
+- Added `player_leases` table with one-active-lease-per-room partial unique
+  index (migration 0005). Schema version 5.
+- Added claim / heartbeat / release / get REST endpoints under
+  `/api/rooms/{slug}/player/...` behind bearer-token auth.
+- Added additive `room_archived` WebSocket event; the 16 pre-existing events
+  remain byte-for-byte compatible.
+- Sweep ticker (existing 5 s hub loop) ends leases past grace, archives the
+  room exactly once, and broadcasts `room_archived { room_id, reason, archived_at }`.
+- No changes to global queue/playback/voting/auto-queue, frontend, Docker,
+  or migration CLI.
+
+## Verification Results (R06)
+
+- `go build ./cmd/... ./internal/...` — PASS
+- `go vet ./cmd/... ./internal/...` — PASS
+- Targeted tests — PASS (entity, usecase/room, persistence, delivery/http)
+- Race tests on touched packages — PASS
+- `cmd/server` setup smoke — PASS
+- `git diff --check` — clean
+- `git status --short` — clean after the closure pass
+
+No frontend, Docker/HTTPS, or migration CLI changes. Pre-existing
+`letsencrypt-backend/accounts: permission denied` blocker documented in
+PROJECT_STATE.md remains orthogonal and is not in R06 scope.
