@@ -1,6 +1,6 @@
 # R07 – Room‑scoped playback queue
 
-**Status:** in progress — R07a (Room-scoped playback queue, narrow first slice) closed 2026-06-29; R07b (Room Queue WebSocket Sync and Deltas, this slice) added per-room WebSocket sync/delta broadcasts on top of R07a. See *Implementation summary (R07a)* and *Implementation summary (R07b)* below. Remaining R07 scope (relational queue rows, room-scoped reorder/vote endpoints, cross-process safety, migration of the legacy global `queue_state` into a room) remains split and deferred to subsequent slices.
+**Status:** R07a closed 2026-06-29 (accepted by the Product Owner); R07b closed 2026-06-29 (accepted by the Product Owner). R07b (Room Queue WebSocket Sync and Deltas, this slice) added per-room WebSocket sync/delta broadcasts on top of R07a. See *Implementation summary (R07a)* and *Implementation summary (R07b)* below. Remaining R07 scope (relational queue rows, room-scoped reorder/vote endpoints, cross-process safety, migration of the legacy global `queue_state` into a room) remains split and deferred to subsequent slices.
 
 **Sprint name:** Room‑scoped playback queue
 
@@ -60,11 +60,22 @@ The current implementation does not maintain a durable queue.  Tracks are passed
 
 ## Execution note
 
-R07a has landed on `dev` (per the implementation summary below). The
-remaining R07 scope listed under *Deferred to the rest of R07* is
-intentionally split into subsequent slices; this document remains the
-authoritative entry point for tracking that work and should be updated
-as each deferred slice ships.
+R07a and R07b have landed on `dev` and both are closed (Product Owner
+accepted; see the per-slice implementation summaries below). A
+post-acceptance review pass on R07b surfaced one remaining
+sequence-ordering defect: a broadcast dispatched after the client was
+inserted into the per-room hub's client map but before the initial sync
+was stamped with a seq could carry a LOWER seq than the initial sync.
+The fix centralises per-room seq allocation inside the `RoomWSHub.Run`
+loop (the hub loop is the single owner of per-room seq allocation for
+both the initial sync and room broadcasts); the new interleaving test
+`TestRoomHub_InitialSyncOrderedBeforeInterleavedBroadcast` fails on
+the pre-fix code and passes after. No changes to the global `/ws`
+contract or global queue behaviour. The remaining R07 scope listed
+under *Deferred to the rest of R07* is intentionally split into
+subsequent slices; this document remains the authoritative entry point
+for tracking that work and should be updated as each deferred slice
+ships.
 
 ## Implementation summary (R07a)
 
@@ -123,6 +134,10 @@ compatibility shim, and without emitting any new WebSocket events
 ## Implementation summary (R07b)
 
 R07b lands the per-room WebSocket sync and delta events on top of R07a.
+R07b was closed 2026-06-29 and accepted by the Product Owner. A
+post-acceptance review pass surfaced one remaining
+sequence-ordering defect (see *Post-acceptance fix pass* below), which
+is fixed on `dev` and reflected in the Verification section.
 
 **What landed:**
 - Four additive WebSocket events scoped to the per-room endpoint:
@@ -138,14 +153,34 @@ R07b lands the per-room WebSocket sync and delta events on top of R07a.
 - Authorization: active room membership required. Non-members receive
   `403 Forbidden`; archived rooms return `409 Conflict`; missing or
   invalid session tokens return `401 Unauthorized`.
-- Initial sync is sent to the client before it is registered with the
-  hub loop so a fast disconnect still receives its snapshot.
+- Initial sync runs inside the hub loop, so the per-room seq
+  allocation is linearised with broadcast dispatch. The hub loop is
+  the single owner of per-room seq allocation for both the initial
+  sync and room broadcasts (see *Post-acceptance fix pass*).
 - Per-room sequence numbers, per-room client maps, and a per-room
   broadcaster dispatcher with goroutine fan-out (mirrors the global
   hub's room_archived ticker deadlock fix in R06).
 - `usecase/roomqueue.Broadcaster` seam keeps the use case independent
   of `delivery/ws`. The room queue handlers are the only call sites
   for the broadcaster; the interactor itself does not broadcast.
+- Per-room ping keepalive (R07b follow-up). Without a ping, idle
+  per-room clients fall off after 60s.
+
+**Post-acceptance fix pass (2026-06-29):** Review found that
+`dispatch()` was calling `nextSeq()` synchronously outside the hub
+loop, racing with `sendInitialSync()` (which calls `nextSeq()` inside
+the loop). A broadcast dispatched after the new client was inserted
+into `h.clients` but before the initial sync was stamped could carry a
+LOWER seq than the initial sync, violating the sequenced-delta
+contract. The fix moves per-room seq allocation into the `Run` loop
+for both the initial sync and broadcasts; `dispatch()` no longer
+allocates a seq, it just enqueues `(roomSlug, msgType, data)`. The
+internal `roomBroadcast` envelope now carries that pair instead of a
+pre-sequenced `BroadcastMessage`. A new test
+`TestRoomHub_InitialSyncOrderedBeforeInterleavedBroadcast` fails on
+the pre-fix code and passes after the fix. Ping keepalive and
+register/sync ordering are intact; no changes to the global `/ws`
+contract or global queue behaviour.
 
 **Renumbering note:** The original R08 placeholder ("Public read-only
 API and CORS") referenced in `ROOM_EPIC_SPRINT_SEQUENCE.md` is
