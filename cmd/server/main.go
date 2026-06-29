@@ -26,6 +26,7 @@ import (
 	usecasePriority "local-music-queue/internal/usecase/priority"
 	usecaseQueue "local-music-queue/internal/usecase/queue"
 	usecaseRoom "local-music-queue/internal/usecase/room"
+	usecaseRoomQueue "local-music-queue/internal/usecase/roomqueue"
 	usecaseVote "local-music-queue/internal/usecase/vote"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -129,6 +130,7 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 		return nil, nil, nil, nil, err
 	}
 	pgRoom := persistence.NewPostgresRoomRepository(dbHandle)
+	pgRoomQueue := persistence.NewPostgresRoomQueueRepository(dbHandle)
 	// dbHandle is non-nil only for the PostgreSQL path. The *sql.DB must stay
 	// open for the entire server lifetime, so its Close is owned by main via
 	// the cleanup closure returned below — closing it here would invalidate
@@ -164,6 +166,8 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	ytRelatedFetcher := youtube.NewYtDlpRelatedFetcher(cfg.YTDLPPath, 10)
 	autoQueueInteractor := usecaseAutoQueue.NewInteractor(autoQueueRepo, queueRepo, ytRelatedFetcher)
 	roomInteractor := usecaseRoom.NewInteractor(pgRoom)
+	roomQueueInteractor := usecaseRoomQueue.NewInteractor(pgRoom, pgRoomQueue, ytService)
+	roomQueueHandlers := delivery.NewRoomQueueHandlers(roomQueueInteractor, authInteractor)
 	playerLeaseInteractor := usecaseRoom.NewPlayerLeaseInteractor(persistence.NewPostgresPlayerLeaseRepository(dbHandle), pgRoom, dbHandle, usecaseRoom.DefaultLeaseDuration, usecaseRoom.DefaultLeaseGrace)
 
 	// Wire auto-queue into queue interactor
@@ -322,6 +326,18 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	}))
 	mux.HandleFunc("GET /api/rooms/{slug}/player/lease", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomHandlers.HandleGetPlayerLease(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("GET /api/rooms/{slug}/queue", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomQueueHandlers.HandleGetRoomQueue(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("POST /api/rooms/{slug}/queue/add", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomQueueHandlers.HandleAddRoomSong(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("POST /api/rooms/{slug}/queue/remove", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomQueueHandlers.HandleRemoveRoomSong(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("POST /api/rooms/{slug}/queue/clear", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomQueueHandlers.HandleClearRoomQueue(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
 
 	// WebSocket
