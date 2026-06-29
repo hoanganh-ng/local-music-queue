@@ -185,5 +185,35 @@ export const api = {
       method: 'POST',
       body: { enabled }
     })
+  },
+
+  // Room Queue (R07a). Bearer-token auth via api.request; no client-supplied
+  // identity fields are sent. Body shapes mirror the Go handler request
+  // structs in internal/delivery/http/room_queue_handlers.go.
+  async getRoomQueue(slug) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}/queue`, { method: 'GET' })
+  },
+
+  async addRoomSong(slug, url, metadata = null) {
+    const body = { url }
+    if (metadata) body.metadata = metadata
+    return this.request(`/rooms/${encodeURIComponent(slug)}/queue/add`, {
+      method: 'POST',
+      body
+    })
+  },
+
+  async removeRoomSong(slug, index) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}/queue/remove`, {
+      method: 'POST',
+      body: { index }
+    })
+  },
+
+  async clearRoomQueue(slug) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}/queue/clear`, {
+      method: 'POST',
+      body: {}
+    })
   }
 }
