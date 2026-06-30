@@ -68,9 +68,9 @@ func (s *YTDLPService) FetchMetadata(ctx context.Context, url string) (*entity.S
 		return nil, fmt.Errorf("failed to parse yt-dlp output: %w", err)
 	}
 
-	if data.Duration > 600 {
-		return nil, fmt.Errorf("song duration exceeds 10 minutes limit (duration: %.0f seconds)", data.Duration)
-	}
+	// if data.Duration > 600 {
+	// 	return nil, fmt.Errorf("song duration exceeds 10 minutes limit (duration: %.0f seconds)", data.Duration)
+	// }
 
 	return &entity.Song{
 		ID:        data.ID,
@@ -120,9 +120,9 @@ func (s *YTDLPService) SearchYouTube(ctx context.Context, query string, maxResul
 			continue
 		}
 
-		if data.Duration > 600 {
-			continue
-		}
+		// if data.Duration > 600 {
+		// 	continue
+		// }
 
 		thumbnail := data.Thumbnail
 		if thumbnail == "" {
