@@ -62,6 +62,12 @@ var (
 	// dispatching room_vote_resolved + room_playback_song_advanced only
 	// when SkipVote succeeds.
 	ErrStaleSkipVote = errors.New("queue advanced under the vote session")
+	// R09c: ErrInvalidDirection is returned by ChangePlaybackVolume when
+	// the supplied direction is neither "up" nor "down" (case-sensitive).
+	// The handler maps this to HTTP 400. The interactor validates the
+	// value before resolving the room so malformed input is rejected
+	// without any DB / lease work.
+	ErrInvalidDirection = errors.New("invalid playback direction")
 )
 
 // Interactor owns the room-scoped queue use cases. The mutex serializes
@@ -118,6 +124,11 @@ type Broadcaster interface {
 	// hub satisfies the interface implicitly (the method names match).
 	BroadcastRoomVoteUpdated(roomSlug string, session *entity.VoteSession, actorUserID int, state *entity.Queue)
 	BroadcastRoomVoteResolved(roomSlug string, sessionID, outcome string, state *entity.Queue)
+	// R09c: the lease-holder-only volume command fires a single
+	// per-room WebSocket event with no associated queue state. The
+	// interactor does NOT call this; the handler invokes it after a
+	// successful ChangePlaybackVolume.
+	BroadcastRoomPlaybackVolumeChanged(roomSlug string, direction string)
 }
 
 // SetBroadcaster wires the broadcaster used by the delivery layer to
@@ -687,6 +698,8 @@ func (i *Interactor) PlaybackEnded(ctx context.Context, slug string, actorUserID
 // --- R09b vote-driven skip ---
 
 // SkipVote advances the room-scoped queue to the next song on behalf
+
+// SkipVote advances the room-scoped queue to the next song on behalf
 // of a winning vote session. Lease-bypassing — vote-to-skip is
 // intentionally democratic. The caller (roomvote.Interactor) supplies
 // the expectedSongID, which was captured at the moment the vote
@@ -743,4 +756,40 @@ func (i *Interactor) SkipVote(ctx context.Context, slug, expectedSongID string) 
 		return nil, 0, 0, nil, fmt.Errorf("save room queue: %w", err)
 	}
 	return queue, prevIdx, queue.CurrentIndex, newSong, nil
+}
+
+// --- R09c volume command ---
+
+// ChangePlaybackVolume is a lease-holder-only command that fires a
+// single additive per-room WebSocket event without persisting any
+// state. Direction must be exactly "up" or "down" (case-sensitive);
+// any other value returns ErrInvalidDirection, which the handler
+// maps to 400. The method enforces:
+//   - active room (else room.ErrArchived / room.ErrRoomNotFound)
+//   - active player-lease holder (else lease sentinels per R09a)
+// It does NOT load or save the queue and does NOT require a current
+// song. The returned error is nil on success so the handler can
+// broadcast unconditionally.
+//
+// Errors:
+//   ErrInvalidDirection  → direction != "up" and != "down" (handler → 400)
+//   ErrInvalidSlug       → malformed slug (handler → 400)
+//   ErrRoomNotFound      → unknown room (handler → 404)
+//   ErrArchived          → archived room (handler → 409)
+//   ErrPlaybackLeaseLost → no active lease (handler → 404)
+//   ErrPlaybackForbidden → lease held by another user (handler → 403)
+//   ErrPlaybackLeaseGone → lease past grace (handler → 410)
+func (i *Interactor) ChangePlaybackVolume(ctx context.Context, slug string, actorUserID int, direction string) error {
+	if direction != "up" && direction != "down" {
+		return ErrInvalidDirection
+	}
+	roomObj, err := i.resolveActiveRoom(ctx, slug)
+	if err != nil {
+		return err
+	}
+	if err := i.requirePlaybackLease(ctx, slug, actorUserID); err != nil {
+		return err
+	}
+	_ = roomObj // room resolved only to enforce active-room status; no state loaded
+	return nil
 }

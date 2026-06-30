@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -339,6 +340,7 @@ type recordingBroadcaster struct {
 	advancedN int
 	voteUpdatedN  int
 	voteResolvedN int
+	volumeN       int
 }
 
 func (r *recordingBroadcaster) BroadcastRoomQueueSync(_ string, _ *entity.Queue) {
@@ -390,6 +392,11 @@ func (r *recordingBroadcaster) BroadcastRoomVoteResolved(_, _, _ string, _ *enti
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.voteResolvedN++
+}
+func (r *recordingBroadcaster) BroadcastRoomPlaybackVolumeChanged(_ string, _ string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.volumeN++
 }
 
 // --- helpers ---
@@ -1057,5 +1064,119 @@ func TestRoomQueue_SkipVote_NoNextSongReturnsErrNoNextSong(t *testing.T) {
 	}
 	if persisted.CurrentIndex != 0 {
 		t.Errorf("expected current=0 unchanged, got %d", persisted.CurrentIndex)
+	}
+}
+
+// --- R09c ChangePlaybackVolume tests ---
+
+// TestRoomQueue_ChangePlaybackVolume_HolderReturnsNil pins the happy
+// path: the holder sends "up"; the interactor returns nil without
+// mutating queue state. No broadcast is asserted here — that is the
+// handler layer's job.
+func TestRoomQueue_ChangePlaybackVolume_HolderReturnsNil(t *testing.T) {
+	inter, _, cleanup := playbackFixture(t, "rq-c-vol-up", 42)
+	defer cleanup()
+	ctx := context.Background()
+
+	roomID := mustRoomID(t, inter, "rq-c-vol-up")
+	queueRepo := inter.queueRepo
+	seed := entity.NewQueue()
+	seed.Songs = []entity.Song{
+		{ID: "s1", Title: "S1", URL: "u", AddedBy: "H", AddedByID: 42},
+	}
+	seed.CurrentIndex = 0
+	seed.Status = entity.StatusPlaying
+	seed.Elapsed = 12
+	if err := queueRepo.Save(ctx, roomID, seed); err != nil {
+		t.Fatalf("reseed: %v", err)
+	}
+	pre, err := queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("pre-load: %v", err)
+	}
+	if err := inter.ChangePlaybackVolume(ctx, "rq-c-vol-up", 42, "up"); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	post, err := queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("post-load: %v", err)
+	}
+	if !reflect.DeepEqual(pre.Songs, post.Songs) ||
+		pre.CurrentIndex != post.CurrentIndex ||
+		pre.Status != post.Status ||
+		pre.Elapsed != post.Elapsed {
+		t.Fatalf("queue state mutated by volume command: pre=%+v post=%+v", pre, post)
+	}
+}
+
+// TestRoomQueue_ChangePlaybackVolume_NonHolderReturnsForbidden
+func TestRoomQueue_ChangePlaybackVolume_NonHolderReturnsForbidden(t *testing.T) {
+	inter, _, cleanup := playbackFixture(t, "rq-c-vol-nonholder", 42)
+	defer cleanup()
+	err := inter.ChangePlaybackVolume(context.Background(), "rq-c-vol-nonholder", 999, "up")
+	if !errors.Is(err, ErrPlaybackForbidden) {
+		t.Fatalf("expected ErrPlaybackForbidden, got %v", err)
+	}
+}
+
+// TestRoomQueue_ChangePlaybackVolume_MissingLeaseReturnsLeaseLost
+func TestRoomQueue_ChangePlaybackVolume_MissingLeaseReturnsLeaseLost(t *testing.T) {
+	inter, db, _, cleanup := pgRoomQueueWithDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, "rq-c-vol-nolease", "CV", 42, testTime()); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	roomID := mustRoomID(t, inter, "rq-c-vol-nolease")
+	q := entity.NewQueue()
+	q.Songs = []entity.Song{{ID: "x", Title: "X"}}
+	q.CurrentIndex = 0
+	if err := inter.queueRepo.Save(ctx, roomID, q); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	leaseRepo := persistence.NewPostgresPlayerLeaseRepository(db)
+	leaseInter := room.NewPlayerLeaseInteractor(leaseRepo, inter.roomRepo, db, room.DefaultLeaseDuration, room.DefaultLeaseGrace)
+	inter.SetLeaseAuthorizer(leaseInter)
+
+	err := inter.ChangePlaybackVolume(ctx, "rq-c-vol-nolease", 42, "up")
+	if !errors.Is(err, ErrPlaybackLeaseLost) {
+		t.Fatalf("expected ErrPlaybackLeaseLost, got %v", err)
+	}
+}
+
+// TestRoomQueue_ChangePlaybackVolume_InvalidDirectionReturnsSentinel
+func TestRoomQueue_ChangePlaybackVolume_InvalidDirectionReturnsSentinel(t *testing.T) {
+	inter, _, cleanup := playbackFixture(t, "rq-c-vol-bad-dir", 42)
+	defer cleanup()
+	for _, d := range []string{"", "left", "UP", "Down ", "0", "increase"} {
+		err := inter.ChangePlaybackVolume(context.Background(), "rq-c-vol-bad-dir", 42, d)
+		if !errors.Is(err, ErrInvalidDirection) {
+			t.Fatalf("direction=%q: expected ErrInvalidDirection, got %v", d, err)
+		}
+	}
+}
+
+// TestRoomQueue_ChangePlaybackVolume_RequiresNoCurrentSong: hold a
+// lease on a fresh, empty queue and confirm the command still returns
+// nil (R09c must not require a current song).
+func TestRoomQueue_ChangePlaybackVolume_RequiresNoCurrentSong(t *testing.T) {
+	inter, _, cleanup := playbackFixture(t, "rq-c-vol-empty", 42)
+	defer cleanup()
+	ctx := context.Background()
+	// Reset queue back to empty so the fixture's seed doesn't pin a song.
+	roomID := mustRoomID(t, inter, "rq-c-vol-empty")
+	if err := inter.queueRepo.Save(ctx, roomID, entity.NewQueue()); err != nil {
+		t.Fatalf("reset empty queue: %v", err)
+	}
+	if err := inter.ChangePlaybackVolume(ctx, "rq-c-vol-empty", 42, "down"); err != nil {
+		t.Fatalf("expected nil error on empty queue, got %v", err)
+	}
+	// And state must be unchanged (still empty).
+	post, err := inter.queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("post-load: %v", err)
+	}
+	if len(post.Songs) != 0 || post.CurrentIndex != -1 {
+		t.Fatalf("queue mutated on empty volume command: %+v", post)
 	}
 }
