@@ -175,7 +175,13 @@ function applyMessage(msg) {
     case 'room_playback_volume_changed':
       // No store mutation — there is no persisted volume state.
       // UI affordance: a low-priority toast (info, not error).
-      toast.info(`Volume ${msg.data?.direction === 'up' ? 'increased' : 'decreased'}.`)
+      // Explicit up/down branch so an unknown payload reads as a
+      // neutral change rather than silently defaulting to 'decreased'.
+      {
+        const d = msg.data?.direction
+        const verb = d === 'up' ? 'increased' : d === 'down' ? 'decreased' : 'changed'
+        toast.info(`Volume ${verb}.`)
+      }
       break
     default:
       // Ignore global / unrelated event types per the R07c contract.

@@ -269,8 +269,8 @@ func TestRoomHub_BroadcastSongPrioritized_DeliversEnvelopeAndSeq(t *testing.T) {
 		t.Fatalf("read prioritize broadcast: %v", err)
 	}
 	var env struct {
-		Type   string                      `json:"type"`
-		SeqNum int64                       `json:"seq_num"`
+		Type   string                       `json:"type"`
+		SeqNum int64                        `json:"seq_num"`
 		Data   RoomQueueSongPrioritizedData `json:"data"`
 	}
 	if err := json.Unmarshal(data, &env); err != nil {
@@ -680,9 +680,9 @@ func TestRoomHub_BroadcastPlaybackStatusChanged_DeliversEnvelopeAndSeq(t *testin
 		t.Fatalf("read status broadcast: %v", err)
 	}
 	var env struct {
-		Type   string                            `json:"type"`
-		SeqNum int64                             `json:"seq_num"`
-		Data   RoomPlaybackStatusChangedData     `json:"data"`
+		Type   string                        `json:"type"`
+		SeqNum int64                         `json:"seq_num"`
+		Data   RoomPlaybackStatusChangedData `json:"data"`
 	}
 	if err := json.Unmarshal(data, &env); err != nil {
 		t.Fatalf("unmarshal status broadcast: %v", err)
@@ -760,9 +760,9 @@ func TestRoomHub_BroadcastPlaybackElapsedSync_DeliversEnvelopeAndSeq(t *testing.
 		t.Fatalf("read elapsed broadcast: %v", err)
 	}
 	var env struct {
-		Type   string                         `json:"type"`
-		SeqNum int64                          `json:"seq_num"`
-		Data   RoomPlaybackElapsedSyncData    `json:"data"`
+		Type   string                      `json:"type"`
+		SeqNum int64                       `json:"seq_num"`
+		Data   RoomPlaybackElapsedSyncData `json:"data"`
 	}
 	if err := json.Unmarshal(data, &env); err != nil {
 		t.Fatalf("unmarshal elapsed broadcast: %v", err)
@@ -832,9 +832,9 @@ func TestRoomHub_BroadcastPlaybackSongAdvanced_DeliversEnvelopeAndSeq(t *testing
 		t.Fatalf("read advanced broadcast: %v", err)
 	}
 	var env struct {
-		Type   string                            `json:"type"`
-		SeqNum int64                             `json:"seq_num"`
-		Data   RoomPlaybackSongAdvancedData      `json:"data"`
+		Type   string                       `json:"type"`
+		SeqNum int64                        `json:"seq_num"`
+		Data   RoomPlaybackSongAdvancedData `json:"data"`
 	}
 	if err := json.Unmarshal(data, &env); err != nil {
 		t.Fatalf("unmarshal advanced broadcast: %v", err)
@@ -1062,9 +1062,9 @@ func TestRoomHub_BroadcastRoomVoteUpdated_ReachesRoomClients(t *testing.T) {
 		t.Fatalf("read vote-updated broadcast: %v", err)
 	}
 	var env struct {
-		Type   string                 `json:"type"`
-		SeqNum int64                  `json:"seq_num"`
-		Data   RoomVoteUpdatedData    `json:"data"`
+		Type   string              `json:"type"`
+		SeqNum int64               `json:"seq_num"`
+		Data   RoomVoteUpdatedData `json:"data"`
 	}
 	if err := json.Unmarshal(data, &env); err != nil {
 		t.Fatalf("unmarshal vote-updated: %v", err)
@@ -1172,9 +1172,9 @@ func TestRoomHub_BroadcastRoomVoteResolved_ReachesRoomClients(t *testing.T) {
 		t.Fatalf("read vote-resolved broadcast: %v", err)
 	}
 	var env struct {
-		Type   string                 `json:"type"`
-		SeqNum int64                  `json:"seq_num"`
-		Data   RoomVoteResolvedData   `json:"data"`
+		Type   string               `json:"type"`
+		SeqNum int64                `json:"seq_num"`
+		Data   RoomVoteResolvedData `json:"data"`
 	}
 	if err := json.Unmarshal(data, &env); err != nil {
 		t.Fatalf("unmarshal vote-resolved: %v", err)
