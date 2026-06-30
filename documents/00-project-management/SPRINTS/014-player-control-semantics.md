@@ -202,3 +202,34 @@ R09b is the **backend + WebSocket** slice for room-scoped vote-to-skip (no front
 - No frontend UI; the existing global VoteSkip UI is untouched.
 
 **Closure:** R09b was implemented on `dev` and accepted by the Product Owner (2026-06-30). The implementation follows the R09a narrow-slice contract: one additive room-scoped mutation (`POST /api/rooms/{slug}/vote/skip`), two additive per-room WebSocket deltas (`room_vote_updated`, `room_vote_resolved`), and a server-owned `expiryAdapter` ticker that fans out `room_vote_resolved outcome="expired"` on `ExpireSessions` — the use case stays free of any `delivery/ws` import. The closure pass tightened five narrow invariants on `dev`: (1) the wiring order in `cmd/server/main.go` now constructs `roomvote.Interactor` after `*ws.RoomWSHub` is assigned, removing the typed-nil-resolver panic risk; (2) the threshold rule is strict-majority `max(2, n/2 + 1)` (the prior `max(2, n/2)` produced a tie, rejected by the Product Owner); (3) the WS payload is sanitised through `RoomVoteSessionDTO` so `voted_by` is never broadcast; (4) `entity.ErrNoCurrentSong` (empty queue) maps to `400 Bad Request` rather than `404`; (5) the `.gitignore` rule `server` was tightened to `/server` so the build binary stays ignored without swallowing `cmd/server/expiry_adapter_test.go`. Global `/api/queue/...` is untouched, no priority balance spending, no relational queue rows, no mutation of the global `queueState` / `currentUser` / `voteSessions` / `autoQueueConfig` from room events, no auto-queue trigger, and per-room seq allocation remains hub-loop owned (`dispatch()` does not allocate seq).
+
+## Implementation summary (R09c)
+
+R09c is the **first narrow slice** of the R09c+ bucket (volume, prev, room auto-queue, full device integration). It adds **one backend-only HTTP command + one additive per-room WebSocket event + a narrow frontend control surface** for room-scoped volume. Vote-to-sskip, previous, room auto-queue, and full media-player device integration are intentionally NOT in this implementation. Volume is command-only: there is no `entity.Queue.Volume` field, no `room_queue_state` schema change, and the command does not call `queueRepo.Save`. R09c follows the R07d/R09a/R09b narrow-slice pattern: additive per-room REST mutation + matching per-room WebSocket delta + minimal frontend control, with no changes to global queue behavior, global `/ws` contract, auth, Docker, or deployment.
+
+**What landed:**
+- `internal/usecase/roomqueue/interactor.go`: new sentinel `ErrInvalidDirection`; new method `(*Interactor).ChangePlaybackVolume(ctx, slug, actorUserID, direction)` that resolves the active room + enforces lease-holder via `requirePlaybackLease` + returns `ErrInvalidDirection` for any direction not equal to `"up"` or `"down"`. The method does NOT load or save queue state and does NOT require a current song. The `Broadcaster` interface gains `BroadcastRoomPlaybackVolumeChanged(roomSlug, direction string)`.
+- `internal/delivery/http/room_queue_handlers.go`: new handler `HandleChangeRoomPlaybackVolume`; new request body type `roomQueuePlaybackVolumeReq`; `writeRoomQueueError` extended with the `ErrInvalidDirection` → 400 mapping.
+- `internal/delivery/ws/events.go`: new constant `EventRoomPlaybackVolumeChanged = "room_playback_volume_changed"`; new payload struct `RoomPlaybackVolumeChangedData { RoomSlug, Direction }`. The 16-event global `/ws` inventory is unchanged.
+- `internal/delivery/ws/room_hub.go`: new method `(*RoomWSHub).BroadcastRoomPlaybackVolumeChanged` following the existing dispatch pattern (no seq allocation in dispatch; hub loop stamps seq on dequeue).
+- `cmd/server/main.go`: registers `POST /api/rooms/{slug}/playback/volume` behind `roomAuth`.
+- `frontend/src/services/api.js`: new method `api.changeRoomPlaybackVolume(slug, direction)`.
+- `frontend/src/views/RoomView.vue`: small `Vol +` / `Vol −` row in the existing playback panel, gated on `canMutate` (UI convenience only; backend is authoritative). Adds a `room_playback_volume_changed` WS listener that surfaces a low-priority info toast — no store mutation, since volume is not persisted.
+
+**Request shape:** `POST /api/rooms/{slug}/playback/volume` body `{"direction":"up"}` or `{"direction":"down"}`.
+
+**Authorisation (use-case layer):**
+- Active room (else 409 archived / 404 not-found)
+- Active player-lease holder (else 404 missing lease / 403 non-holder / 410 lease past grace / 409 archived room)
+
+**No persistence:** there is no `entity.Queue.Volume` field, no `room_queue_state` schema change, and the command does not call `queueRepo.Save`. The `changePlaybackVolume` method returns immediately after validation + lease check; the broadcaster delivers the event to subscribed room clients.
+
+**Verification:** (filled in by the implementer before committing this summary)
+- `go test -count=1 ./internal/usecase/roomqueue ./internal/delivery/http ./internal/delivery/ws ./cmd/server` — PASS
+- `go test -race -count=1 ./internal/usecase/roomqueue ./internal/delivery/ws` — PASS
+- `go vet ./cmd/... ./internal/...` — PASS
+- `git diff --check` — PASS
+- `cd frontend && npm run test:unit -- --run` — PASS
+- `cd frontend && npm run build` — clean
+
+**Closure:** R09c is implemented on `dev` (2026-06-30); full Product Owner acceptance is pending. The implementation follows the R07d/R09a/R09b narrow-slice contract: one additive room-scoped command (`POST /api/rooms/{slug}/playback/volume`), one additive per-room WebSocket delta (`room_playback_volume_changed`), and a minimal frontend Vol± control surface gated on the existing lease-holder UI affordance. Volume is intentionally NOT persisted; the global `/api/queue/volume` contract, global `/ws` 16-event inventory, voting, priority balances, auto-queue, Docker, CORS, and auth/session design are all untouched.
