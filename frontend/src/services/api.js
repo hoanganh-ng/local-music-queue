@@ -263,5 +263,15 @@ export const api = {
     return this.request(`/rooms/${encodeURIComponent(slug)}/playback/ended`, {
       method: 'POST'
     })
+  },
+
+  // R09c: room-scoped volume command. Lease-holder only (the backend is
+  // authoritative and surfaces 401/403/404/409 toasts that mapPlaybackToast
+  // already handles). Body: {direction: "up"|"down"}.
+  async changeRoomPlaybackVolume(slug, direction) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}/playback/volume`, {
+      method: 'POST',
+      body: { direction }
+    })
   }
 }

@@ -89,6 +89,18 @@
             @click="songEnded"
           >Ended</button>
         </div>
+        <div class="volume-row">
+          <button
+            class="vol-up-btn"
+            :disabled="!canMutate"
+            @click="changeVolume('up')"
+          >Vol +</button>
+          <button
+            class="vol-down-btn"
+            :disabled="!canMutate"
+            @click="changeVolume('down')"
+          >Vol −</button>
+        </div>
         <p class="hint">Only the active lease holder may control playback.</p>
       </section>
     </main>
@@ -154,6 +166,16 @@ function applyMessage(msg) {
       break
     case 'room_playback_song_advanced':
       globalStore.applyRoomPlaybackSongAdvanced(slug.value, msg.data)
+      break
+    // R09c: lease-aware per-room volume delta. Payload is intentionally
+    // minimal (no state snapshot) because volume is not persisted. We
+    // surface a toast so other lease holders know a peer changed volume.
+    // The current UI does not render a global volume meter; this listener
+    // is purely informational.
+    case 'room_playback_volume_changed':
+      // No store mutation — there is no persisted volume state.
+      // UI affordance: a low-priority toast (info, not error).
+      toast.info(`Volume ${msg.data?.direction === 'up' ? 'increased' : 'decreased'}.`)
       break
     default:
       // Ignore global / unrelated event types per the R07c contract.
@@ -348,6 +370,14 @@ async function songEnded() {
     await api.roomSongEnded(slug.value)
   } catch (e) {
     mapPlaybackToast(e, 'Could not mark the song as ended.')
+  }
+}
+
+async function changeVolume(direction) {
+  try {
+    await api.changeRoomPlaybackVolume(slug.value, direction)
+  } catch (e) {
+    mapPlaybackToast(e, 'Could not change volume.')
   }
 }
 
