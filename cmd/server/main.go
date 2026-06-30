@@ -444,6 +444,9 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	mux.HandleFunc("POST /api/rooms/{slug}/playback/ended", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomQueueHandlers.HandleRoomSongEnded(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
+	mux.HandleFunc("POST /api/rooms/{slug}/playback/volume", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomQueueHandlers.HandleChangeRoomPlaybackVolume(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
 	mux.HandleFunc("POST /api/rooms/{slug}/vote/skip", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomVoteHandlers.HandleCastRoomVoteSkip(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
