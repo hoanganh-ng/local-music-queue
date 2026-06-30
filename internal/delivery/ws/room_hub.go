@@ -367,6 +367,32 @@ func (h *RoomWSHub) BroadcastRoomQueueSongPrioritized(roomSlug string, fromIndex
 	})
 }
 
+// --- R09a playback broadcast methods ---
+//
+// All three follow the same dispatch pattern as the R07b/R07d
+// broadcasters above: dispatch() does NOT allocate seq; the hub
+// loop stamps seq on dequeue. Adding them does not change the global
+// /ws 16-event inventory — they ride the per-room endpoint only.
+
+func (h *RoomWSHub) BroadcastRoomPlaybackStatusChanged(roomSlug string, status entity.PlaybackStatus, elapsed int, state *entity.Queue) {
+	h.dispatch(roomSlug, EventRoomPlaybackStatusChanged, RoomPlaybackStatusChangedData{
+		RoomSlug: roomSlug, Status: status, Elapsed: elapsed, State: state,
+	})
+}
+
+func (h *RoomWSHub) BroadcastRoomPlaybackElapsedSync(roomSlug string, elapsed int, state *entity.Queue) {
+	h.dispatch(roomSlug, EventRoomPlaybackElapsedSync, RoomPlaybackElapsedSyncData{
+		RoomSlug: roomSlug, Elapsed: elapsed, State: state,
+	})
+}
+
+func (h *RoomWSHub) BroadcastRoomPlaybackSongAdvanced(roomSlug, reason string, previousIndex, newIndex int, currentSong *entity.Song, status entity.PlaybackStatus, elapsed int, state *entity.Queue) {
+	h.dispatch(roomSlug, EventRoomPlaybackSongAdvanced, RoomPlaybackSongAdvancedData{
+		RoomSlug: roomSlug, Reason: reason, PreviousIndex: previousIndex, NewIndex: newIndex,
+		CurrentSong: currentSong, Status: status, Elapsed: elapsed, State: state,
+	})
+}
+
 // --- RegisterHandler ---
 
 // RegisterHandler handles GET /ws/rooms/{slug}?session_token=<opaque>.

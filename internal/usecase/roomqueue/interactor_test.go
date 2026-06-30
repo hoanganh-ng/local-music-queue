@@ -2,6 +2,7 @@ package roomqueue
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sync"
 	"testing"
@@ -50,6 +51,17 @@ func lastAddedByID(q *entity.Queue, id int) (entity.Song, bool) {
 // Skips when Postgres is unreachable.
 func pgRoomQueue(t *testing.T) (*Interactor, *persistence.PostgresRoomQueueRepository, func()) {
 	t.Helper()
+	inter, _, queueRepo, cleanup := pgRoomQueueWithDB(t)
+	return inter, queueRepo, cleanup
+}
+
+// pgRoomQueueWithDB is the R09a extension that also returns the
+// underlying *sql.DB so callers (the playback fixture) can wire the
+// player-lease repo against the SAME per-test schema as the room/queue
+// repos. A separate NewRoomTestDB call would create a fresh schema
+// and the lease insert would violate the rooms FK.
+func pgRoomQueueWithDB(t *testing.T) (*Interactor, *sql.DB, *persistence.PostgresRoomQueueRepository, func()) {
+	t.Helper()
 	db, cleanup := persistence.NewRoomTestDB(t)
 	now := context.Background()
 	if _, err := db.ExecContext(now,
@@ -67,7 +79,7 @@ func pgRoomQueue(t *testing.T) (*Interactor, *persistence.PostgresRoomQueueRepos
 	roomRepo := persistence.NewPostgresRoomRepository(db)
 	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
 	inter := NewInteractor(roomRepo, queueRepo, nil)
-	return inter, queueRepo, cleanup
+	return inter, db, queueRepo, cleanup
 }
 
 func TestRoomQueue_GetState_SeedsEmptyQueueForNewRoom(t *testing.T) {
@@ -322,6 +334,9 @@ type recordingBroadcaster struct {
 	removeN int
 	clearN  int
 	prioN   int
+	statusN int
+	elapsedN int
+	advancedN int
 }
 
 func (r *recordingBroadcaster) BroadcastRoomQueueSync(_ string, _ *entity.Queue) {
@@ -348,6 +363,21 @@ func (r *recordingBroadcaster) BroadcastRoomQueueSongPrioritized(_ string, _, _ 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.prioN++
+}
+func (r *recordingBroadcaster) BroadcastRoomPlaybackStatusChanged(_ string, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.statusN++
+}
+func (r *recordingBroadcaster) BroadcastRoomPlaybackElapsedSync(_ string, _ int, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.elapsedN++
+}
+func (r *recordingBroadcaster) BroadcastRoomPlaybackSongAdvanced(_ string, _ string, _, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.advancedN++
 }
 
 // --- helpers ---
@@ -545,5 +575,346 @@ func TestRoomQueue_PrioritizeSong_ReturnedSongIsPrioritizedTrue(t *testing.T) {
 	}
 	if song.ID != "up2" {
 		t.Errorf("expected returned song id up2, got %q", song.ID)
+	}
+}
+
+// --- R09a playback tests ---
+//
+// The playback fixture wires the real PlayerLeaseInteractor against
+// the SAME per-test schema as the room/queue repos so the R06 lease
+// invariants are exercised end-to-end. The interactor's
+// SetLeaseAuthorizer seam is the under-test boundary. This matches the
+// production wiring in cmd/server/main.go.
+
+// playbackFixture creates a room + 2-song queue with current at 0 and
+// claims the player lease as holderID (host user 42 by default).
+// Returns the interactor, the lease interactor (for tests that need
+// to re-shape the lease), and a cleanup.
+func playbackFixture(t *testing.T, slug string, holderID int) (*Interactor, *room.PlayerLeaseInteractor, func()) {
+	t.Helper()
+	inter, db, _, cleanup := pgRoomQueueWithDB(t)
+	ctx := context.Background()
+	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, slug, "PB-"+slug, 42, testTime()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := mustRoomID(t, inter, slug)
+	q := entity.NewQueue()
+	q.Songs = []entity.Song{
+		{ID: "cur", Title: "Cur", URL: "https://x/cur"},
+		{ID: "next", Title: "Next", URL: "https://x/next"},
+	}
+	q.CurrentIndex = 0
+	q.Status = entity.StatusPlaying
+	if err := inter.queueRepo.Save(ctx, roomID, q); err != nil {
+		t.Fatalf("save seed queue: %v", err)
+	}
+	leaseRepo := persistence.NewPostgresPlayerLeaseRepository(db)
+	leaseInter := room.NewPlayerLeaseInteractor(leaseRepo, inter.roomRepo, db, room.DefaultLeaseDuration, room.DefaultLeaseGrace)
+	if _, err := leaseInter.Claim(ctx, slug, holderID); err != nil {
+		t.Fatalf("claim lease for holder %d: %v", holderID, err)
+	}
+	inter.SetLeaseAuthorizer(leaseInter)
+	return inter, leaseInter, cleanup
+}
+
+// allowAllLeaseAuthorizer is a no-op PlaybackLeaseAuthorizer used by
+// tests that want to exercise the post-lease code paths
+// (no-current-song / no-next-song) without claiming a real lease.
+type allowAllLeaseAuthorizer struct{}
+
+func (allowAllLeaseAuthorizer) RequireActiveLeaseHolder(_ context.Context, _ string, _ int) error { return nil }
+
+// TestRoomPlayback_SetPlaybackStatus_HappyPath
+// pins the success path: holder transitions playing→paused, returned
+// queue reflects the new status, persisted state mirrors.
+func TestRoomPlayback_SetPlaybackStatus_HappyPath(t *testing.T) {
+	inter, _, cleanup := playbackFixture(t, "rq-pb-status", 42)
+	defer cleanup()
+	ctx := context.Background()
+
+	q, err := inter.SetPlaybackStatus(ctx, "rq-pb-status", 42, entity.StatusPaused)
+	if err != nil {
+		t.Fatalf("set status: %v", err)
+	}
+	if q.Status != entity.StatusPaused {
+		t.Errorf("expected returned status=paused, got %q", q.Status)
+	}
+	persisted, err := inter.GetState(ctx, "rq-pb-status", 42)
+	if err != nil {
+		t.Fatalf("get state: %v", err)
+	}
+	if persisted.Status != entity.StatusPaused {
+		t.Errorf("expected persisted status=paused, got %q", persisted.Status)
+	}
+}
+
+// TestRoomPlayback_SetPlaybackStatus_InvalidStatusReturnsErrInvalidStatus
+func TestRoomPlayback_SetPlaybackStatus_InvalidStatusReturnsErrInvalidStatus(t *testing.T) {
+	inter, _, cleanup := playbackFixture(t, "rq-pb-bad-status", 42)
+	defer cleanup()
+	ctx := context.Background()
+
+	for _, status := range []entity.PlaybackStatus{entity.StatusIdle, ""} {
+		_, err := inter.SetPlaybackStatus(ctx, "rq-pb-bad-status", 42, status)
+		if !errors.Is(err, ErrInvalidStatus) {
+			t.Errorf("status=%q: expected ErrInvalidStatus, got %v", status, err)
+		}
+	}
+}
+
+// TestRoomPlayback_SetPlaybackStatus_NoCurrentSongReturnsErrNoCurrentSong
+func TestRoomPlayback_SetPlaybackStatus_NoCurrentSongReturnsErrNoCurrentSong(t *testing.T) {
+	inter, _, cleanup := pgRoomQueue(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, "rq-pb-empty", "PB-Empty", 42, testTime()); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	inter.SetLeaseAuthorizer(allowAllLeaseAuthorizer{})
+
+	_, err := inter.SetPlaybackStatus(ctx, "rq-pb-empty", 42, entity.StatusPlaying)
+	if !errors.Is(err, ErrNoCurrentSong) {
+		t.Fatalf("expected ErrNoCurrentSong, got %v", err)
+	}
+}
+
+// TestRoomPlayback_SetPlaybackStatus_LeaseMissingReturnsErrPlaybackLeaseLost
+func TestRoomPlayback_SetPlaybackStatus_LeaseMissingReturnsErrPlaybackLeaseLost(t *testing.T) {
+	inter, db, _, cleanup := pgRoomQueueWithDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, "rq-pb-nolease", "PB", 42, testTime()); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	roomID := mustRoomID(t, inter, "rq-pb-nolease")
+	q := entity.NewQueue()
+	q.Songs = []entity.Song{{ID: "x", Title: "X"}}
+	q.CurrentIndex = 0
+	if err := inter.queueRepo.Save(ctx, roomID, q); err != nil {
+		t.Fatalf("seed queue: %v", err)
+	}
+	leaseRepo := persistence.NewPostgresPlayerLeaseRepository(db)
+	leaseInter := room.NewPlayerLeaseInteractor(leaseRepo, inter.roomRepo, db, room.DefaultLeaseDuration, room.DefaultLeaseGrace)
+	inter.SetLeaseAuthorizer(leaseInter)
+
+	_, err := inter.SetPlaybackStatus(ctx, "rq-pb-nolease", 42, entity.StatusPaused)
+	if !errors.Is(err, ErrPlaybackLeaseLost) {
+		t.Fatalf("expected ErrPlaybackLeaseLost, got %v", err)
+	}
+}
+
+// TestRoomPlayback_SetPlaybackStatus_NonHolderReturnsErrPlaybackForbidden
+// builds the fixture manually so we can claim the lease as user 200
+// (the room's host) and then have user 42 (a guest member, not the
+// lease holder) attempt a playback mutation. The unique-host
+// constraint means we create the room with 200 as the host and add 42
+// as a guest afterwards.
+func TestRoomPlayback_SetPlaybackStatus_NonHolderReturnsErrPlaybackForbidden(t *testing.T) {
+	inter, db, _, cleanup := pgRoomQueueWithDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, "rq-pb-nonholder", "PB", 200, testTime()); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	roomID := mustRoomID(t, inter, "rq-pb-nonholder")
+	q := entity.NewQueue()
+	q.Songs = []entity.Song{{ID: "x", Title: "X"}, {ID: "y", Title: "Y"}}
+	q.CurrentIndex = 0
+	if err := inter.queueRepo.Save(ctx, roomID, q); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Add 42 as a guest member so they have access to the room but
+	// cannot hold the lease (which belongs to host 200).
+	if err := inter.roomRepo.AddMember(ctx, roomID, 42, entity.RoomRoleGuest, testTime()); err != nil {
+		t.Fatalf("add guest 42: %v", err)
+	}
+	leaseRepo := persistence.NewPostgresPlayerLeaseRepository(db)
+	leaseInter := room.NewPlayerLeaseInteractor(leaseRepo, inter.roomRepo, db, room.DefaultLeaseDuration, room.DefaultLeaseGrace)
+	if _, err := leaseInter.Claim(ctx, "rq-pb-nonholder", 200); err != nil {
+		t.Fatalf("claim as 200: %v", err)
+	}
+	inter.SetLeaseAuthorizer(leaseInter)
+
+	// 42 is the room host but NOT the lease holder; the call must be rejected.
+	_, err := inter.SetPlaybackStatus(ctx, "rq-pb-nonholder", 42, entity.StatusPaused)
+	if !errors.Is(err, ErrPlaybackForbidden) {
+		t.Fatalf("expected ErrPlaybackForbidden, got %v", err)
+	}
+}
+
+// TestRoomPlayback_SetPlaybackStatus_LeaseGoneReturnsErrPlaybackLeaseGone
+func TestRoomPlayback_SetPlaybackStatus_LeaseGoneReturnsErrPlaybackLeaseGone(t *testing.T) {
+	inter, leaseInter, cleanup := playbackFixture(t, "rq-pb-gone", 42)
+	defer cleanup()
+	ctx := context.Background()
+	// Force the lease interactor's clock forward past expiry + grace.
+	future := testTime().Add(room.DefaultLeaseDuration + room.DefaultLeaseGrace + time.Second)
+	leaseInter.SetClock(func() time.Time { return future })
+
+	_, err := inter.SetPlaybackStatus(ctx, "rq-pb-gone", 42, entity.StatusPaused)
+	if !errors.Is(err, ErrPlaybackLeaseGone) {
+		t.Fatalf("expected ErrPlaybackLeaseGone, got %v", err)
+	}
+}
+
+// TestRoomPlayback_SetPlaybackStatus_ArchivedRoomReturnsErrArchived
+func TestRoomPlayback_SetPlaybackStatus_ArchivedRoomReturnsErrArchived(t *testing.T) {
+	inter, _, cleanup := playbackFixture(t, "rq-pb-archived", 42)
+	defer cleanup()
+	ctx := context.Background()
+	if err := inter.roomRepo.ArchiveRoom(ctx, mustRoomID(t, inter, "rq-pb-archived"), testTime()); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+
+	_, err := inter.SetPlaybackStatus(ctx, "rq-pb-archived", 42, entity.StatusPaused)
+	if !errors.Is(err, room.ErrArchived) {
+		t.Fatalf("expected room.ErrArchived, got %v", err)
+	}
+}
+
+// TestRoomPlayback_SyncPlaybackElapsed_HappyPath
+func TestRoomPlayback_SyncPlaybackElapsed_HappyPath(t *testing.T) {
+	inter, _, cleanup := playbackFixture(t, "rq-pb-sync", 42)
+	defer cleanup()
+	ctx := context.Background()
+
+	q, err := inter.SyncPlaybackElapsed(ctx, "rq-pb-sync", 42, 25)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if q.Elapsed != 25 {
+		t.Errorf("expected returned elapsed=25, got %d", q.Elapsed)
+	}
+	persisted, _ := inter.GetState(ctx, "rq-pb-sync", 42)
+	if persisted.Elapsed != 25 {
+		t.Errorf("expected persisted elapsed=25, got %d", persisted.Elapsed)
+	}
+}
+
+// TestRoomPlayback_SyncPlaybackElapsed_NegativeElapsedReturnsErrInvalidElapsed
+func TestRoomPlayback_SyncPlaybackElapsed_NegativeElapsedReturnsErrInvalidElapsed(t *testing.T) {
+	inter, _, cleanup := playbackFixture(t, "rq-pb-neg", 42)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, err := inter.SyncPlaybackElapsed(ctx, "rq-pb-neg", 42, -1)
+	if !errors.Is(err, ErrInvalidElapsed) {
+		t.Fatalf("expected ErrInvalidElapsed, got %v", err)
+	}
+}
+
+// TestRoomPlayback_SkipPlayback_HappyPath
+func TestRoomPlayback_SkipPlayback_HappyPath(t *testing.T) {
+	inter, _, cleanup := playbackFixture(t, "rq-pb-skip", 42)
+	defer cleanup()
+	ctx := context.Background()
+
+	q, prev, next, song, err := inter.SkipPlayback(ctx, "rq-pb-skip", 42)
+	if err != nil {
+		t.Fatalf("skip: %v", err)
+	}
+	if prev != 0 || next != 1 {
+		t.Errorf("expected prev=0 next=1, got prev=%d next=%d", prev, next)
+	}
+	if q.CurrentIndex != 1 || q.Status != entity.StatusPlaying || q.Elapsed != 0 {
+		t.Errorf("expected post-mutation current=1 playing elapsed=0, got %+v", q)
+	}
+	if song == nil || song.ID != "next" {
+		t.Errorf("expected advanced song id=next, got %+v", song)
+	}
+}
+
+// TestRoomPlayback_SkipPlayback_NoNextSongReturnsErrNoNextSong
+// pins the no-partial-mutation invariant: skip with no next song must
+// leave the queue unchanged.
+func TestRoomPlayback_SkipPlayback_NoNextSongReturnsErrNoNextSong(t *testing.T) {
+	inter, _, cleanup := pgRoomQueue(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, "rq-pb-skipnone", "PB", 42, testTime()); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	roomID := mustRoomID(t, inter, "rq-pb-skipnone")
+	q := entity.NewQueue()
+	q.Songs = []entity.Song{{ID: "only", Title: "Only"}}
+	q.CurrentIndex = 0
+	q.Status = entity.StatusPlaying
+	q.Elapsed = 99
+	if err := inter.queueRepo.Save(ctx, roomID, q); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	inter.SetLeaseAuthorizer(allowAllLeaseAuthorizer{})
+
+	_, _, _, _, err := inter.SkipPlayback(ctx, "rq-pb-skipnone", 42)
+	if !errors.Is(err, ErrNoNextSong) {
+		t.Fatalf("expected ErrNoNextSong, got %v", err)
+	}
+	persisted, _ := inter.GetState(ctx, "rq-pb-skipnone", 42)
+	if persisted.Elapsed != 99 || persisted.Status != entity.StatusPlaying || persisted.CurrentIndex != 0 {
+		t.Errorf("queue was partially mutated on no-next skip: %+v", persisted)
+	}
+}
+
+// TestRoomPlayback_PlaybackEnded_HappyPath_AdvancesWhenNextExists
+func TestRoomPlayback_PlaybackEnded_HappyPath_AdvancesWhenNextExists(t *testing.T) {
+	inter, _, cleanup := playbackFixture(t, "rq-pb-ended", 42)
+	defer cleanup()
+	ctx := context.Background()
+
+	q, prev, next, song, advanced, err := inter.PlaybackEnded(ctx, "rq-pb-ended", 42)
+	if err != nil {
+		t.Fatalf("ended: %v", err)
+	}
+	if !advanced {
+		t.Errorf("expected advanced=true")
+	}
+	if prev != 0 || next != 1 {
+		t.Errorf("expected prev=0 next=1, got prev=%d next=%d", prev, next)
+	}
+	if q.CurrentIndex != 1 || q.Status != entity.StatusPlaying || q.Elapsed != 0 {
+		t.Errorf("expected post-mutation current=1 playing elapsed=0, got %+v", q)
+	}
+	if song == nil || song.ID != "next" {
+		t.Errorf("expected advanced song id=next, got %+v", song)
+	}
+}
+
+// TestRoomPlayback_PlaybackEnded_NoNextSongPausesAndPersists
+func TestRoomPlayback_PlaybackEnded_NoNextSongPausesAndPersists(t *testing.T) {
+	inter, _, cleanup := pgRoomQueue(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, "rq-pb-endnone", "PB", 42, testTime()); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	roomID := mustRoomID(t, inter, "rq-pb-endnone")
+	q := entity.NewQueue()
+	q.Songs = []entity.Song{{ID: "final", Title: "Final"}}
+	q.CurrentIndex = 0
+	q.Status = entity.StatusPlaying
+	q.Elapsed = 77
+	if err := inter.queueRepo.Save(ctx, roomID, q); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	inter.SetLeaseAuthorizer(allowAllLeaseAuthorizer{})
+
+	out, prev, next, song, advanced, err := inter.PlaybackEnded(ctx, "rq-pb-endnone", 42)
+	if err != nil {
+		t.Fatalf("ended: %v", err)
+	}
+	if advanced {
+		t.Errorf("expected advanced=false at end-of-queue")
+	}
+	if prev != 0 || next != 0 {
+		t.Errorf("expected prev=0 next=0 (no advance), got prev=%d next=%d", prev, next)
+	}
+	if out.Status != entity.StatusPaused {
+		t.Errorf("expected status=paused, got %q", out.Status)
+	}
+	if out.Elapsed != 0 {
+		t.Errorf("expected elapsed=0 on end-of-queue pause, got %d", out.Elapsed)
+	}
+	if song == nil || song.ID != "final" {
+		t.Errorf("expected final song in payload, got %+v", song)
 	}
 }

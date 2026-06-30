@@ -611,3 +611,249 @@ func TestRoomHub_InitialSyncOrderedBeforeInterleavedBroadcast(t *testing.T) {
 		t.Fatalf("interleaved broadcast seq (%d) must be strictly greater than initial sync seq (%d) — dispatch() is stamping seq outside the hub loop", secondEnv.SeqNum, firstEnv.SeqNum)
 	}
 }
+
+// --- R09a playback broadcast envelopes ---
+//
+// The three tests below mirror TestRoomHub_BroadcastSongPrioritized_
+// DeliversEnvelopeAndSeq (R07d). They pin the new playback event
+// envelopes (type string + payload field shape + snake_case JSON
+// tags) and the hub-loop seq invariant: every delta carries a strictly
+// greater seq than the initial sync for the same connection.
+
+// TestRoomHub_BroadcastPlaybackStatusChanged_DeliversEnvelopeAndSeq
+// pins the room_playback_status_changed envelope and the post-mutation
+// snapshot delivery.
+func TestRoomHub_BroadcastPlaybackStatusChanged_DeliversEnvelopeAndSeq(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("alpha", &entity.Room{ID: 11, Slug: "alpha", Status: entity.RoomStatusActive})
+	resolver.SetQueue(11, &entity.Queue{
+		Songs:        []entity.Song{{ID: "cur", Title: "Cur"}},
+		CurrentIndex: 0,
+		Status:       entity.StatusPlaying,
+		Elapsed:      42,
+	})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{"valid": {ID: 1, Role: entity.RoleHost, DisplayName: "H"}},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	conn := dialRoomWS(t, server, "alpha", "valid")
+	defer conn.Close()
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, syncData, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read initial sync: %v", err)
+	}
+	var syncEnv struct {
+		Type   string `json:"type"`
+		SeqNum int64  `json:"seq_num"`
+	}
+	if err := json.Unmarshal(syncData, &syncEnv); err != nil {
+		t.Fatalf("unmarshal sync: %v", err)
+	}
+	if syncEnv.Type != EventRoomQueueSync {
+		t.Fatalf("expected first frame %q, got %q", EventRoomQueueSync, syncEnv.Type)
+	}
+
+	state := &entity.Queue{
+		Songs:        []entity.Song{{ID: "cur", Title: "Cur"}},
+		CurrentIndex: 0,
+		Status:       entity.StatusPaused,
+		Elapsed:      42,
+	}
+	hub.BroadcastRoomPlaybackStatusChanged("alpha", entity.StatusPaused, 42, state)
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read status broadcast: %v", err)
+	}
+	var env struct {
+		Type   string                            `json:"type"`
+		SeqNum int64                             `json:"seq_num"`
+		Data   RoomPlaybackStatusChangedData     `json:"data"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal status broadcast: %v", err)
+	}
+	if env.Type != EventRoomPlaybackStatusChanged {
+		t.Fatalf("expected type %q, got %q", EventRoomPlaybackStatusChanged, env.Type)
+	}
+	if env.SeqNum <= syncEnv.SeqNum {
+		t.Fatalf("status broadcast seq (%d) must be strictly greater than sync seq (%d)", env.SeqNum, syncEnv.SeqNum)
+	}
+	if env.Data.RoomSlug != "alpha" {
+		t.Errorf("expected room_slug=alpha, got %q", env.Data.RoomSlug)
+	}
+	if env.Data.Status != entity.StatusPaused {
+		t.Errorf("expected status=paused, got %q", env.Data.Status)
+	}
+	if env.Data.Elapsed != 42 {
+		t.Errorf("expected elapsed=42, got %d", env.Data.Elapsed)
+	}
+	if env.Data.State == nil || env.Data.State.Status != entity.StatusPaused {
+		t.Errorf("expected post-mutation state with status=paused, got %#v", env.Data.State)
+	}
+}
+
+// TestRoomHub_BroadcastPlaybackElapsedSync_DeliversEnvelopeAndSeq
+// pins the room_playback_elapsed_sync envelope.
+func TestRoomHub_BroadcastPlaybackElapsedSync_DeliversEnvelopeAndSeq(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("alpha", &entity.Room{ID: 11, Slug: "alpha", Status: entity.RoomStatusActive})
+	resolver.SetQueue(11, &entity.Queue{
+		Songs:        []entity.Song{{ID: "cur", Title: "Cur"}},
+		CurrentIndex: 0,
+		Status:       entity.StatusPlaying,
+		Elapsed:      0,
+	})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{"valid": {ID: 1, Role: entity.RoleHost, DisplayName: "H"}},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	conn := dialRoomWS(t, server, "alpha", "valid")
+	defer conn.Close()
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, syncData, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read initial sync: %v", err)
+	}
+	var syncEnv struct {
+		Type   string `json:"type"`
+		SeqNum int64  `json:"seq_num"`
+	}
+	json.Unmarshal(syncData, &syncEnv)
+
+	state := &entity.Queue{
+		Songs:        []entity.Song{{ID: "cur", Title: "Cur"}},
+		CurrentIndex: 0,
+		Status:       entity.StatusPlaying,
+		Elapsed:      17,
+	}
+	hub.BroadcastRoomPlaybackElapsedSync("alpha", 17, state)
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read elapsed broadcast: %v", err)
+	}
+	var env struct {
+		Type   string                         `json:"type"`
+		SeqNum int64                          `json:"seq_num"`
+		Data   RoomPlaybackElapsedSyncData    `json:"data"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal elapsed broadcast: %v", err)
+	}
+	if env.Type != EventRoomPlaybackElapsedSync {
+		t.Fatalf("expected type %q, got %q", EventRoomPlaybackElapsedSync, env.Type)
+	}
+	if env.SeqNum <= syncEnv.SeqNum {
+		t.Fatalf("elapsed broadcast seq (%d) must be strictly greater than sync seq (%d)", env.SeqNum, syncEnv.SeqNum)
+	}
+	if env.Data.Elapsed != 17 {
+		t.Errorf("expected elapsed=17, got %d", env.Data.Elapsed)
+	}
+}
+
+// TestRoomHub_BroadcastPlaybackSongAdvanced_DeliversEnvelopeAndSeq
+// pins the room_playback_song_advanced envelope (skip and ended both
+// ride it; the client distinguishes via reason).
+func TestRoomHub_BroadcastPlaybackSongAdvanced_DeliversEnvelopeAndSeq(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("alpha", &entity.Room{ID: 11, Slug: "alpha", Status: entity.RoomStatusActive})
+	resolver.SetQueue(11, &entity.Queue{
+		Songs:        []entity.Song{{ID: "a", Title: "A"}, {ID: "b", Title: "B"}},
+		CurrentIndex: 0,
+		Status:       entity.StatusPlaying,
+	})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{"valid": {ID: 1, Role: entity.RoleHost, DisplayName: "H"}},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	conn := dialRoomWS(t, server, "alpha", "valid")
+	defer conn.Close()
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, syncData, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read initial sync: %v", err)
+	}
+	var syncEnv struct {
+		Type   string `json:"type"`
+		SeqNum int64  `json:"seq_num"`
+	}
+	json.Unmarshal(syncData, &syncEnv)
+
+	state := &entity.Queue{
+		Songs:        []entity.Song{{ID: "a", Title: "A"}, {ID: "b", Title: "B"}},
+		CurrentIndex: 1,
+		Status:       entity.StatusPlaying,
+		Elapsed:      0,
+	}
+	next := entity.Song{ID: "b", Title: "B"}
+	hub.BroadcastRoomPlaybackSongAdvanced("alpha", "skip", 0, 1, &next, entity.StatusPlaying, 0, state)
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read advanced broadcast: %v", err)
+	}
+	var env struct {
+		Type   string                            `json:"type"`
+		SeqNum int64                             `json:"seq_num"`
+		Data   RoomPlaybackSongAdvancedData      `json:"data"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal advanced broadcast: %v", err)
+	}
+	if env.Type != EventRoomPlaybackSongAdvanced {
+		t.Fatalf("expected type %q, got %q", EventRoomPlaybackSongAdvanced, env.Type)
+	}
+	if env.SeqNum <= syncEnv.SeqNum {
+		t.Fatalf("advanced broadcast seq (%d) must be strictly greater than sync seq (%d)", env.SeqNum, syncEnv.SeqNum)
+	}
+	if env.Data.Reason != "skip" {
+		t.Errorf("expected reason=skip, got %q", env.Data.Reason)
+	}
+	if env.Data.PreviousIndex != 0 || env.Data.NewIndex != 1 {
+		t.Errorf("expected prev=0 new=1, got prev=%d new=%d", env.Data.PreviousIndex, env.Data.NewIndex)
+	}
+	if env.Data.CurrentSong == nil || env.Data.CurrentSong.ID != "b" {
+		t.Errorf("expected current_song.id=b, got %+v", env.Data.CurrentSong)
+	}
+	if env.Data.State == nil || env.Data.State.CurrentIndex != 1 {
+		t.Errorf("expected post-mutation state with CurrentIndex=1, got %#v", env.Data.State)
+	}
+}

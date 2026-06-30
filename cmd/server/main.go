@@ -241,6 +241,12 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	// path short-circuits without a broadcast when nil.
 	roomQueueInteractor.SetBroadcaster(roomWSHub)
 
+	// R09a: wire the lease-authorizer seam so direct playback mutations
+	// (status / sync / skip / ended) enforce the player-lease holder rule
+	// at the use-case layer. PlayerLeaseInteractor implements
+	// room.PlaybackLeaseAuthorizer directly.
+	roomQueueInteractor.SetLeaseAuthorizer(playerLeaseInteractor)
+
 	// Wire auto-queue broadcaster to WS hub
 	autoQueueInteractor.SetBroadcaster(hub.Broadcast)
 
@@ -379,6 +385,24 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	}))
 	mux.HandleFunc("POST /api/rooms/{slug}/queue/prioritize", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomQueueHandlers.HandlePrioritizeRoomSong(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	// R09a: lease-aware direct playback controls. All four routes sit
+	// behind roomAuth (bearer token) and additionally enforce
+	// player-lease holder authorization inside roomqueue.Interactor
+	// (not just at the handler boundary). The matching per-room
+	// WebSocket events (room_playback_*) ride /ws/rooms/{slug} only;
+	// the global /ws 16-event inventory is unchanged.
+	mux.HandleFunc("POST /api/rooms/{slug}/playback/status", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomQueueHandlers.HandleSetRoomPlaybackStatus(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("POST /api/rooms/{slug}/playback/sync", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomQueueHandlers.HandleSyncRoomPlayback(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("POST /api/rooms/{slug}/playback/skip", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomQueueHandlers.HandleSkipRoomPlayback(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("POST /api/rooms/{slug}/playback/ended", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomQueueHandlers.HandleRoomSongEnded(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
 
 	// WebSocket

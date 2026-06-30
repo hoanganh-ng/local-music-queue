@@ -72,6 +72,23 @@ type RoomArchivedBroadcaster interface {
 	BroadcastRoomArchived(ev RoomArchivedEvent)
 }
 
+// PlaybackLeaseAuthorizer is the small seam used by R09a playback
+// use cases (roomqueue.Interactor) to verify the caller is the active
+// lease holder for the room before any direct playback mutation
+// (status / sync / skip / ended). The interface lives in usecase/room
+// so the roomqueue interactor can stay free of a concrete dependency
+// on *PlayerLeaseInteractor; the concrete implementation lives in the
+// same package (PlayerLeaseInteractor.RequireActiveLeaseHolder).
+//
+// The seam returns the existing player-lease sentinels
+// (ErrPlayerLeaseNotFound, ErrNotLeaseHolder, ErrPlayerLeaseGone,
+// ErrArchived) which the delivery layer maps to HTTP 404/403/410/409.
+// This keeps authorization decisions identical to the heartbeat path
+// and centralises the lease-holder rule in one place.
+type PlaybackLeaseAuthorizer interface {
+	RequireActiveLeaseHolder(ctx context.Context, slug string, actorUserID int) error
+}
+
 // Interactor owns the room, invite, and membership use cases.
 type Interactor struct {
 	repo repository.RoomRepository

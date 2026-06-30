@@ -151,6 +151,45 @@ func (p *PlayerLeaseInteractor) GetLease(ctx context.Context, slug string, actor
 	return l, nil
 }
 
+// RequireActiveLeaseHolder is the read-only counterpart of Heartbeat
+// used by R09a playback mutations (status / sync / skip / ended). It
+// verifies the caller is the active lease holder without renewing the
+// lease, returning the same sentinels as Heartbeat so the delivery
+// layer can map them identically:
+//
+//	nil                  → caller is the holder and the lease is within grace
+//	ErrInvalidSlug       → slug fails the documented pattern (handler → 400)
+//	ErrRoomNotFound      → no room for the slug (handler → 404)
+//	ErrArchived          → room archived (handler → 409)
+//	ErrPlayerLeaseNotFound → no active lease (handler → 404)
+//	ErrNotLeaseHolder    → lease held by a different user (handler → 403)
+//	ErrPlayerLeaseGone   → lease past grace (handler → 410)
+//
+// The method does NOT call HeartbeatByHolder: a read-only check
+// should not move ExpiresAt, otherwise frequent sync calls would
+// indefinitely extend the lease without an explicit client beat.
+func (p *PlayerLeaseInteractor) RequireActiveLeaseHolder(ctx context.Context, slug string, actorUserID int) error {
+	room, err := p.resolveActiveRoom(ctx, slug)
+	if err != nil {
+		return err
+	}
+	now := p.now()
+	current, err := p.leaseRepo.GetByRoom(ctx, room.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrPlayerLeaseNotFound
+		}
+		return fmt.Errorf("get lease: %w", err)
+	}
+	if current.ClaimedByUserID != actorUserID {
+		return ErrNotLeaseHolder
+	}
+	if !current.IsWithinGrace(now, p.grace) {
+		return ErrPlayerLeaseGone
+	}
+	return nil
+}
+
 // SweepExpired ends leases past grace, archives their rooms exactly once,
 // and returns the resulting archive events for the hub to broadcast.
 func (p *PlayerLeaseInteractor) SweepExpired(ctx context.Context) []RoomArchivedEvent {

@@ -38,6 +38,19 @@ var (
 	// the handler can map it to 400 without switching on the entity
 	// package. Prioritizing the currently-playing song is a client bug.
 	ErrCannotPrioritizeCurrent = errors.New("cannot prioritize the currently playing song")
+	// R09a playback sentinels. The lease sentinels are re-declared as
+	// thin aliases of the room-package sentinels (so handlers can
+	// switch on local symbols without taking a transitive dep on
+	// usecase/room.Err* — they already do for the prior queue ops).
+	// ErrNoCurrentSong and ErrNoNextSong mirror the entity-layer
+	// sentinels for the same reason.
+	ErrNoCurrentSong      = errors.New("no current song")
+	ErrNoNextSong         = errors.New("no next song in queue")
+	ErrInvalidStatus      = errors.New("invalid playback status")
+	ErrInvalidElapsed     = errors.New("invalid elapsed value")
+	ErrPlaybackForbidden  = errors.New("not lease holder")
+	ErrPlaybackLeaseGone  = errors.New("player lease gone (past grace)")
+	ErrPlaybackLeaseLost  = errors.New("player lease not found")
 )
 
 // Interactor owns the room-scoped queue use cases. The mutex serializes
@@ -53,6 +66,13 @@ type Interactor struct {
 	// exists so handlers can invoke Broadcast* after a successful mutation
 	// without the usecase package importing delivery/ws. nil is tolerated.
 	broadcaster Broadcaster
+	// leaseAuthorizer is the R09a seam used to verify the caller is
+	// the active lease holder for direct playback mutations
+	// (status / sync / skip / ended). nil is tolerated for the prior
+	// queue operations; the playback methods return ErrPlaybackLeaseLost
+	// when the seam is unset so the handler can map that to a
+	// misconfigured-server 500 instead of silently dropping auth.
+	leaseAuthorizer room.PlaybackLeaseAuthorizer
 }
 
 // NewInteractor constructs a room queue interactor. youtube may be nil
@@ -78,6 +98,11 @@ type Broadcaster interface {
 	BroadcastRoomQueueSongRemoved(roomSlug string, removedIndex int, state *entity.Queue)
 	BroadcastRoomQueueCleared(roomSlug string, state *entity.Queue)
 	BroadcastRoomQueueSongPrioritized(roomSlug string, fromIndex, toIndex int, song entity.Song, state *entity.Queue)
+	// R09a playback deltas. Additive on top of R07b/R07d; the per-room
+	// hub satisfies the interface implicitly (the method names match).
+	BroadcastRoomPlaybackStatusChanged(roomSlug string, status entity.PlaybackStatus, elapsed int, state *entity.Queue)
+	BroadcastRoomPlaybackElapsedSync(roomSlug string, elapsed int, state *entity.Queue)
+	BroadcastRoomPlaybackSongAdvanced(roomSlug, reason string, previousIndex, newIndex int, currentSong *entity.Song, status entity.PlaybackStatus, elapsed int, state *entity.Queue)
 }
 
 // SetBroadcaster wires the broadcaster used by the delivery layer to
@@ -378,4 +403,252 @@ func (i *Interactor) GetStateByRoomID(ctx context.Context, roomID int64) (*entit
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	return i.loadQueue(ctx, roomID)
+}
+
+// SetLeaseAuthorizer wires the room.PlaybackLeaseAuthorizer used by
+// the R09a playback mutations (SetPlaybackStatus / SyncPlaybackElapsed
+// / SkipPlayback / PlaybackEnded). The concrete implementation lives
+// in usecase/room.PlayerLeaseInteractor; cmd/server wires it via this
+// setter. nil disables playback mutations — the methods return
+// ErrPlaybackLeaseLost to make misconfiguration visible.
+func (i *Interactor) SetLeaseAuthorizer(a room.PlaybackLeaseAuthorizer) { i.leaseAuthorizer = a }
+
+// LeaseAuthorizer returns the wired lease authorizer, or nil when
+// unset. Exposed for tests that need to seed / inspect the seam.
+func (i *Interactor) LeaseAuthorizer() room.PlaybackLeaseAuthorizer { return i.leaseAuthorizer }
+
+// requirePlaybackLease calls the lease authorizer seam and translates
+// the room-package sentinels to the local roomqueue sentinels so the
+// handler layer can switch on local symbols without a transitive
+// usecase/room.Err* dependency. Returns nil when the caller is the
+// active lease holder; otherwise returns a mapped error.
+//
+// Mapping:
+//   room.ErrInvalidSlug        → room.ErrInvalidSlug     (handler → 400)
+//   room.ErrRoomNotFound       → room.ErrRoomNotFound    (handler → 404)
+//   room.ErrArchived           → room.ErrArchived        (handler → 409)
+//   room.ErrPlayerLeaseNotFound → ErrPlaybackLeaseLost   (handler → 404)
+//   room.ErrNotLeaseHolder     → ErrPlaybackForbidden    (handler → 403)
+//   room.ErrPlayerLeaseGone    → ErrPlaybackLeaseGone    (handler → 410)
+//   any other                  → wrapped error           (handler → 500)
+func (i *Interactor) requirePlaybackLease(ctx context.Context, slug string, actorUserID int) error {
+	if i.leaseAuthorizer == nil {
+		return ErrPlaybackLeaseLost
+	}
+	if err := i.leaseAuthorizer.RequireActiveLeaseHolder(ctx, slug, actorUserID); err != nil {
+		switch {
+		case errors.Is(err, room.ErrPlayerLeaseNotFound):
+			return ErrPlaybackLeaseLost
+		case errors.Is(err, room.ErrNotLeaseHolder):
+			return ErrPlaybackForbidden
+		case errors.Is(err, room.ErrPlayerLeaseGone):
+			return ErrPlaybackLeaseGone
+		case errors.Is(err, room.ErrInvalidSlug),
+			errors.Is(err, room.ErrRoomNotFound),
+			errors.Is(err, room.ErrArchived):
+			return err
+		default:
+			return fmt.Errorf("lease check: %w", err)
+		}
+	}
+	return nil
+}
+
+// --- R09a playback use cases ---
+
+// SetPlaybackStatus mutates the room-scoped queue's status field.
+// Lease-holder only. The returned queue is the post-mutation snapshot
+// used by the handler to broadcast room_playback_status_changed.
+//
+// Errors:
+//   ErrInvalidStatus        → status not playing|paused (handler → 400)
+//   ErrNoCurrentSong        → queue has no current song (handler → 400/404 per spec)
+//   ErrInvalidSlug          → malformed slug (handler → 400)
+//   ErrRoomNotFound         → unknown room (handler → 404)
+//   ErrArchived             → room archived (handler → 409)
+//   ErrPlaybackLeaseLost    → no active lease for the room (handler → 404)
+//   ErrPlaybackForbidden    → lease held by another user (handler → 403)
+//   ErrPlaybackLeaseGone    → lease past grace (handler → 410)
+func (i *Interactor) SetPlaybackStatus(ctx context.Context, slug string, actorUserID int, status entity.PlaybackStatus) (*entity.Queue, error) {
+	roomObj, err := i.resolveActiveRoom(ctx, slug)
+	if err != nil {
+		return nil, err
+	}
+	if err := i.requirePlaybackLease(ctx, slug, actorUserID); err != nil {
+		return nil, err
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	queue, err := i.loadQueue(ctx, roomObj.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := queue.SetStatus(status); err != nil {
+		// Translate entity.ErrNoCurrentSong / entity.ErrInvalidStatus
+		// to the local sentinels for handler-side mapping.
+		if errors.Is(err, entity.ErrNoCurrentSong) {
+			return nil, ErrNoCurrentSong
+		}
+		if errors.Is(err, entity.ErrInvalidStatus) {
+			return nil, ErrInvalidStatus
+		}
+		return nil, err
+	}
+	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
+		return nil, fmt.Errorf("save room queue: %w", err)
+	}
+	return queue, nil
+}
+
+// SyncPlaybackElapsed mutates the room-scoped queue's elapsed field.
+// Lease-holder only. The returned queue is the post-mutation snapshot
+// used by the handler to broadcast room_playback_elapsed_sync.
+//
+// Errors:
+//   ErrInvalidElapsed     → elapsed < 0 (handler → 400)
+//   ErrNoCurrentSong      → queue has no current song (handler → 400/404 per spec)
+//   ... lease sentinels (see SetPlaybackStatus)
+func (i *Interactor) SyncPlaybackElapsed(ctx context.Context, slug string, actorUserID int, elapsed int) (*entity.Queue, error) {
+	roomObj, err := i.resolveActiveRoom(ctx, slug)
+	if err != nil {
+		return nil, err
+	}
+	if err := i.requirePlaybackLease(ctx, slug, actorUserID); err != nil {
+		return nil, err
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	queue, err := i.loadQueue(ctx, roomObj.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := queue.SetElapsed(elapsed); err != nil {
+		if errors.Is(err, entity.ErrInvalidElapsed) {
+			return nil, ErrInvalidElapsed
+		}
+		if errors.Is(err, entity.ErrNoCurrentSong) {
+			return nil, ErrNoCurrentSong
+		}
+		return nil, err
+	}
+	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
+		return nil, fmt.Errorf("save room queue: %w", err)
+	}
+	return queue, nil
+}
+
+// SkipPlayback advances the room-scoped queue to the next song.
+// Lease-holder only. Returns the post-mutation queue plus the previous
+// and new indexes; the handler fans these out as
+// room_playback_song_advanced with reason="skip". On no-next-song
+// returns ErrNoNextSong WITHOUT mutating state (the entity helper
+// guards against partial mutation).
+//
+// Errors:
+//   ErrNoNextSong         → no upcoming song (handler → 400/404 per spec)
+//   ErrNoCurrentSong      → empty queue (handler → 400/404 per spec)
+//   ... lease sentinels (see SetPlaybackStatus)
+func (i *Interactor) SkipPlayback(ctx context.Context, slug string, actorUserID int) (*entity.Queue, int, int, *entity.Song, error) {
+	roomObj, err := i.resolveActiveRoom(ctx, slug)
+	if err != nil {
+		return nil, 0, 0, nil, err
+	}
+	if err := i.requirePlaybackLease(ctx, slug, actorUserID); err != nil {
+		return nil, 0, 0, nil, err
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	queue, err := i.loadQueue(ctx, roomObj.ID)
+	if err != nil {
+		return nil, 0, 0, nil, err
+	}
+	prevIdx, newSong, err := queue.AdvanceToNext()
+	if err != nil {
+		if errors.Is(err, entity.ErrNoNextSong) {
+			return nil, 0, 0, nil, ErrNoNextSong
+		}
+		if errors.Is(err, entity.ErrNoCurrentSong) {
+			return nil, 0, 0, nil, ErrNoCurrentSong
+		}
+		return nil, 0, 0, nil, err
+	}
+	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
+		return nil, 0, 0, nil, fmt.Errorf("save room queue: %w", err)
+	}
+	return queue, prevIdx, queue.CurrentIndex, newSong, nil
+}
+
+// PlaybackEnded is the dual of SkipPlayback invoked when the current
+// song finished naturally. It mirrors the global queue.ended path:
+//   - if a next song exists, advance and broadcast
+//     room_playback_song_advanced with reason="ended".
+//   - if no next song exists, persist a paused end-of-queue state
+//     (status=paused, elapsed=0) and broadcast
+//     room_playback_status_changed. The previousIndex in the latter
+//     case is queue.CurrentIndex (no advance happened); newIndex ==
+//     previousIndex; currentSong is the final song's entity.
+//
+// Returns (queue, prevIndex, newIndex, currentSong, advanced, error)
+// where advanced is true when a song advance happened and false when
+// the queue was paused at end-of-queue.
+//
+// Errors:
+//   ErrNoCurrentSong      → empty queue (handler → 400/404 per spec)
+//   ... lease sentinels (see SetPlaybackStatus)
+func (i *Interactor) PlaybackEnded(ctx context.Context, slug string, actorUserID int) (*entity.Queue, int, int, *entity.Song, bool, error) {
+	roomObj, err := i.resolveActiveRoom(ctx, slug)
+	if err != nil {
+		return nil, 0, 0, nil, false, err
+	}
+	if err := i.requirePlaybackLease(ctx, slug, actorUserID); err != nil {
+		return nil, 0, 0, nil, false, err
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	queue, err := i.loadQueue(ctx, roomObj.ID)
+	if err != nil {
+		return nil, 0, 0, nil, false, err
+	}
+
+	// Guard against no-current-song before any mutation (mirrors the
+	// "queue not mutated" invariant from SkipPlayback).
+	if queue.CurrentIndex < 0 || queue.CurrentIndex >= len(queue.Songs) {
+		return nil, 0, 0, nil, false, ErrNoCurrentSong
+	}
+
+	// Capture the (final) current song before any potential mutation so
+	// the end-of-queue broadcast payload can include it.
+	currentSong := queue.Songs[queue.CurrentIndex]
+
+	prevIdx, newSong, advanceErr := queue.AdvanceToNext()
+	if advanceErr == nil {
+		// Advanced — persist and report the advance.
+		if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
+			return nil, 0, 0, nil, false, fmt.Errorf("save room queue: %w", err)
+		}
+		return queue, prevIdx, queue.CurrentIndex, newSong, true, nil
+	}
+	if !errors.Is(advanceErr, entity.ErrNoNextSong) {
+		// Translate entity sentinels to local sentinels.
+		if errors.Is(advanceErr, entity.ErrNoCurrentSong) {
+			return nil, 0, 0, nil, false, ErrNoCurrentSong
+		}
+		return nil, 0, 0, nil, false, advanceErr
+	}
+
+	// No next song. Pause at end-of-queue without mutating CurrentIndex.
+	queue.Status = entity.StatusPaused
+	queue.Elapsed = 0
+	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
+		return nil, 0, 0, nil, false, fmt.Errorf("save room queue: %w", err)
+	}
+	return queue, queue.CurrentIndex, queue.CurrentIndex, &currentSong, false, nil
 }

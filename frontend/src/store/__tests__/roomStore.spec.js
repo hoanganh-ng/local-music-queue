@@ -104,9 +104,56 @@ describe('Room queue store (isolated)', () => {
     globalStore.applyRoomSongAdded('lobby', { id: 'b' }, 1, null)
     globalStore.applyRoomSongRemoved('lobby', 0, null)
     globalStore.applyRoomQueueCleared('lobby')
+    globalStore.applyRoomPlaybackStatusChanged('lobby', { status: 'paused', elapsed: 5, state: null })
+    globalStore.applyRoomPlaybackElapsedSync('lobby', 17)
+    globalStore.applyRoomPlaybackSongAdvanced('lobby', { reason: 'skip', previous_index: 0, new_index: 1, current_song: { id: 'b' }, status: 'playing', elapsed: 0, state: null })
     expect(globalStore.queueState).toEqual(before.queueState)
     expect(globalStore.voteSessions).toEqual(before.voteSessions)
     expect(globalStore.autoQueueConfig).toEqual(before.autoQueueConfig)
     expect(globalStore.currentUser).toBe(before.currentUser)
+  })
+
+  // --- R09a playback mutators ---
+
+  it('applyRoomPlaybackStatusChanged prefers fullState when present', () => {
+    const fullState = { songs: [], current_index: 0, current_song: { id: 'x' }, status: 'paused', elapsed: 9, queue: [], history: [] }
+    globalStore.applyRoomPlaybackStatusChanged('lobby', { status: 'paused', elapsed: 9, state: fullState })
+    expect(globalStore.roomQueues.lobby.state).toEqual(fullState)
+  })
+
+  it('applyRoomPlaybackStatusChanged fallback: stamps status + elapsed', () => {
+    globalStore.setRoomQueueState('lobby', { songs: [{ id: 'a' }], current_index: 0, current_song: { id: 'a' }, status: 'playing', elapsed: 0, queue: [], history: [] })
+    globalStore.applyRoomPlaybackStatusChanged('lobby', { status: 'paused', elapsed: 7 })
+    expect(globalStore.roomQueues.lobby.state.status).toBe('paused')
+    expect(globalStore.roomQueues.lobby.state.elapsed).toBe(7)
+  })
+
+  it('applyRoomPlaybackElapsedSync prefers fullState when present', () => {
+    const fullState = { songs: [], current_index: 0, current_song: { id: 'x' }, status: 'playing', elapsed: 33, queue: [], history: [] }
+    globalStore.applyRoomPlaybackElapsedSync('lobby', { elapsed: 33, state: fullState })
+    expect(globalStore.roomQueues.lobby.state).toEqual(fullState)
+  })
+
+  it('applyRoomPlaybackElapsedSync fallback: stamps elapsed (accepts number or {elapsed} payload)', () => {
+    globalStore.setRoomQueueState('lobby', { songs: [{ id: 'a' }], current_index: 0, current_song: { id: 'a' }, status: 'playing', elapsed: 0, queue: [], history: [] })
+    globalStore.applyRoomPlaybackElapsedSync('lobby', 12)
+    expect(globalStore.roomQueues.lobby.state.elapsed).toBe(12)
+    globalStore.applyRoomPlaybackElapsedSync('lobby', { elapsed: 21 })
+    expect(globalStore.roomQueues.lobby.state.elapsed).toBe(21)
+  })
+
+  it('applyRoomPlaybackSongAdvanced prefers fullState when present', () => {
+    const fullState = { songs: [{ id: 'b' }], current_index: 0, current_song: { id: 'b' }, status: 'playing', elapsed: 0, queue: [], history: [] }
+    globalStore.applyRoomPlaybackSongAdvanced('lobby', { reason: 'skip', previous_index: 0, new_index: 0, current_song: { id: 'b' }, status: 'playing', elapsed: 0, state: fullState })
+    expect(globalStore.roomQueues.lobby.state).toEqual(fullState)
+  })
+
+  it('applyRoomPlaybackSongAdvanced fallback: stamps current_index / current_song / status / elapsed', () => {
+    globalStore.setRoomQueueState('lobby', { songs: [{ id: 'a' }, { id: 'b' }], current_index: 0, current_song: { id: 'a' }, status: 'playing', elapsed: 99, queue: [], history: [] })
+    globalStore.applyRoomPlaybackSongAdvanced('lobby', { reason: 'skip', previous_index: 0, new_index: 1, current_song: { id: 'b' }, status: 'playing', elapsed: 0 })
+    expect(globalStore.roomQueues.lobby.state.current_index).toBe(1)
+    expect(globalStore.roomQueues.lobby.state.current_song).toEqual({ id: 'b' })
+    expect(globalStore.roomQueues.lobby.state.status).toBe('playing')
+    expect(globalStore.roomQueues.lobby.state.elapsed).toBe(0)
   })
 })

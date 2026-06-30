@@ -83,6 +83,52 @@ describe('Room Queue API', () => {
     expect(JSON.stringify(body)).not.toMatch(/(user_id|requested_by|added_by|user_role)/)
   })
 
+  // --- R09a playback API ---
+
+  it('setRoomPlaybackStatus posts ONLY {status} and targets /playback/status', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ status: 204, ok: true, json: async () => '' })
+    global.fetch = mockFetch
+    await api.setRoomPlaybackStatus('lobby', 'paused')
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/playback\/status$/)
+    expect(init.method).toBe('POST')
+    const body = JSON.parse(init.body)
+    expect(body).toEqual({ status: 'paused' })
+    expect(JSON.stringify(body)).not.toMatch(/(user_id|requested_by|added_by|user_role)/)
+  })
+
+  it('syncRoomPlayback posts ONLY {elapsed}', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ status: 204, ok: true, json: async () => '' })
+    global.fetch = mockFetch
+    await api.syncRoomPlayback('lobby', 42)
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/playback\/sync$/)
+    expect(init.method).toBe('POST')
+    const body = JSON.parse(init.body)
+    expect(body).toEqual({ elapsed: 42 })
+    expect(JSON.stringify(body)).not.toMatch(/(user_id|requested_by|added_by|user_role)/)
+  })
+
+  it('skipRoomPlayback posts empty body to /playback/skip', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ status: 204, ok: true, json: async () => '' })
+    global.fetch = mockFetch
+    await api.skipRoomPlayback('lobby')
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/playback\/skip$/)
+    expect(init.method).toBe('POST')
+    expect(init.body === undefined || init.body === '' || init.body === null).toBe(true)
+  })
+
+  it('roomSongEnded posts empty body to /playback/ended', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ status: 204, ok: true, json: async () => '' })
+    global.fetch = mockFetch
+    await api.roomSongEnded('lobby')
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/playback\/ended$/)
+    expect(init.method).toBe('POST')
+    expect(init.body === undefined || init.body === '' || init.body === null).toBe(true)
+  })
+
   it('omits Authorization when session invalid', async () => {
     const mockFetch = mockFetchOk({ songs: [] })
     await api.getRoomQueue('lobby')

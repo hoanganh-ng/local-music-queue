@@ -56,6 +56,23 @@ type roomQueuePrioritizeReq struct {
 	SongIndex *int `json:"song_index"`
 }
 
+// roomQueuePlaybackStatusReq is the body of POST
+// /api/rooms/{slug}/playback/status. R09a: Status must be "playing" or
+// "paused"; "idle" is rejected at the handler layer with 400 so the
+// client cannot drive the queue into the idle state.
+type roomQueuePlaybackStatusReq struct {
+	Status string `json:"status"`
+}
+
+// roomQueuePlaybackElapsedReq is the body of POST
+// /api/rooms/{slug}/playback/sync. Elapsed is *int so the handler can
+// distinguish "field omitted" (nil) from "field present with zero"
+// (e.g. {"elapsed":0}). The raw int form silently coerced missing
+// fields to 0, which used to be treated as a valid elapsed value.
+type roomQueuePlaybackElapsedReq struct {
+	Elapsed *int `json:"elapsed"`
+}
+
 // --- Handlers ---
 
 // HandleGetRoomQueue: GET /api/rooms/{slug}/queue — returns the current
@@ -252,6 +269,127 @@ func (h *RoomQueueHandlers) roleOf(r *http.Request, slug string, actorUserID int
 	return h.inter.MemberRole(r.Context(), slug, actorUserID)
 }
 
+// --- R09a playback handlers ---
+
+// HandleSetRoomPlaybackStatus: POST /api/rooms/{slug}/playback/status
+// — lease-holder only. Body: {"status":"playing"} or
+// {"status":"paused"}. Rejects "idle" with 400. Returns 204 on success
+// and broadcasts room_playback_status_changed.
+func (h *RoomQueueHandlers) HandleSetRoomPlaybackStatus(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
+	if actorUserID == 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req roomQueuePlaybackStatusReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	var status entity.PlaybackStatus
+	switch req.Status {
+	case "playing":
+		status = entity.StatusPlaying
+	case "paused":
+		status = entity.StatusPaused
+	case "idle", "":
+		// Clients cannot drive the queue into idle; that is reserved
+		// for natural end-of-queue paths (PlayBackEnded).
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	default:
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	queue, err := h.inter.SetPlaybackStatus(r.Context(), slug, actorUserID, status)
+	if err != nil {
+		writeRoomQueueError(w, err)
+		return
+	}
+	if bc := h.inter.Broadcaster(); bc != nil {
+		bc.BroadcastRoomPlaybackStatusChanged(slug, queue.Status, queue.Elapsed, queue)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleSyncRoomPlayback: POST /api/rooms/{slug}/playback/sync —
+// lease-holder only. Body: {"elapsed": <non-negative int>}. A missing
+// field (nil) is rejected with 400 so the wire shape distinguishes
+// missing from zero. Returns 204 on success and broadcasts
+// room_playback_elapsed_sync.
+func (h *RoomQueueHandlers) HandleSyncRoomPlayback(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
+	if actorUserID == 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req roomQueuePlaybackElapsedReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.Elapsed == nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if *req.Elapsed < 0 {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	queue, err := h.inter.SyncPlaybackElapsed(r.Context(), slug, actorUserID, *req.Elapsed)
+	if err != nil {
+		writeRoomQueueError(w, err)
+		return
+	}
+	if bc := h.inter.Broadcaster(); bc != nil {
+		bc.BroadcastRoomPlaybackElapsedSync(slug, queue.Elapsed, queue)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleSkipRoomPlayback: POST /api/rooms/{slug}/playback/skip —
+// lease-holder only. Empty body. Requires a current song and a next
+// song; returns 400 when there is no next song. Returns 204 on success
+// and broadcasts room_playback_song_advanced with reason="skip".
+func (h *RoomQueueHandlers) HandleSkipRoomPlayback(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
+	if actorUserID == 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	queue, prevIndex, newIndex, song, err := h.inter.SkipPlayback(r.Context(), slug, actorUserID)
+	if err != nil {
+		writeRoomQueueError(w, err)
+		return
+	}
+	if bc := h.inter.Broadcaster(); bc != nil {
+		bc.BroadcastRoomPlaybackSongAdvanced(slug, "skip", prevIndex, newIndex, song, queue.Status, queue.Elapsed, queue)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleRoomSongEnded: POST /api/rooms/{slug}/playback/ended —
+// lease-holder only. Empty body. If a next song exists, advance and
+// broadcast room_playback_song_advanced with reason="ended". Otherwise
+// pause at end-of-queue and broadcast room_playback_status_changed.
+// Returns 204 on success.
+func (h *RoomQueueHandlers) HandleRoomSongEnded(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
+	if actorUserID == 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	queue, prevIndex, newIndex, song, advanced, err := h.inter.PlaybackEnded(r.Context(), slug, actorUserID)
+	if err != nil {
+		writeRoomQueueError(w, err)
+		return
+	}
+	if bc := h.inter.Broadcaster(); bc != nil {
+		if advanced {
+			bc.BroadcastRoomPlaybackSongAdvanced(slug, "ended", prevIndex, newIndex, song, queue.Status, queue.Elapsed, queue)
+		} else {
+			bc.BroadcastRoomPlaybackStatusChanged(slug, queue.Status, queue.Elapsed, queue)
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // --- error mapping ---
 
 // writeRoomQueueError maps use-case sentinel errors to the documented
@@ -260,21 +398,29 @@ func (h *RoomQueueHandlers) roleOf(r *http.Request, slug string, actorUserID int
 func writeRoomQueueError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, roomqueue.ErrInvalidIndex),
-		errors.Is(err, roomqueue.ErrCannotPrioritizeCurrent):
+		errors.Is(err, roomqueue.ErrCannotPrioritizeCurrent),
+		errors.Is(err, roomqueue.ErrInvalidStatus),
+		errors.Is(err, roomqueue.ErrInvalidElapsed),
+		errors.Is(err, roomqueue.ErrNoCurrentSong),
+		errors.Is(err, roomqueue.ErrNoNextSong):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, roomqueue.ErrNotSongOwner),
-		errors.Is(err, roomqueue.ErrCannotRemoveSong):
+		errors.Is(err, roomqueue.ErrCannotRemoveSong),
+		errors.Is(err, roomqueue.ErrPlaybackForbidden):
 		http.Error(w, err.Error(), http.StatusForbidden)
 	case errors.Is(err, entity.ErrSongAlreadyInQueue):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, room.ErrInvalidSlug):
 		http.Error(w, err.Error(), http.StatusBadRequest)
-	case errors.Is(err, room.ErrRoomNotFound):
+	case errors.Is(err, room.ErrRoomNotFound),
+		errors.Is(err, roomqueue.ErrPlaybackLeaseLost):
 		http.Error(w, "not found", http.StatusNotFound)
 	case errors.Is(err, room.ErrArchived):
 		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, room.ErrForbidden):
 		http.Error(w, "forbidden", http.StatusForbidden)
+	case errors.Is(err, roomqueue.ErrPlaybackLeaseGone):
+		http.Error(w, err.Error(), http.StatusGone)
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}

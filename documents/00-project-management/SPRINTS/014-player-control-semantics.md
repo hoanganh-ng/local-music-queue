@@ -1,6 +1,11 @@
 # R09 – Player control semantics
 
-**Status:** planned (stub – work not yet started)
+**Status:** R09 split into R09a (active / in-progress on `dev`) and
+R09b+ (planned, deferred). R09a is the lease-aware direct-control slice
+described in *Implementation summary (R09a)* below. R09b+ carries the
+remaining player-control semantics: vote-to-skip, volume, prev, room
+auto-queue, and full media-player device integration. The full R09
+sprint closure requires both the R09a slice and the R09b+ slices.
 
 **Sprint name:** Player control semantics
 
@@ -56,3 +61,109 @@ At present, there are no explicit APIs or event types for controlling playback. 
 ## Execution note
 
 This stub serves as a high‑level plan for the **player control semantics** sprint.  When the sprint is taken up, refine the requirements, consult with stakeholders on skip vote thresholds and authorisation rules, and update this document with the final implementation details.  Upon completion, mark the sprint as **closed** in this document and in `ROOM_EPIC_SPRINT_SEQUENCE.md`.
+## Implementation summary (R09a)
+
+R09a is the first narrow slice of R09: lease-aware **direct** playback
+control (status / sync / skip / ended) for the active lease holder
+only. Vote-to-skip, volume, prev, auto-queue, and full device
+integration are deferred to R09b+ slices and intentionally NOT in
+this implementation. R09a follows the same narrow-slice pattern as
+R07a/R07b/R07c/R07d: additive per-room REST mutations + matching
+per-room WebSocket deltas + minimal frontend control, with no changes
+to global queue behavior, global `/ws` contract, auth, Docker, or
+deployment.
+
+**What landed:**
+- `room.PlaybackLeaseAuthorizer` interface in
+  `internal/usecase/room/interactor.go`, implemented by
+  `PlayerLeaseInteractor.RequireActiveLeaseHolder(ctx, slug, actorUserID)`
+  — a read-only counterpart of `Heartbeat` that does NOT renew the
+  lease (a sync call should not indefinitely extend the lease).
+- `internal/domain/entity/queue.go`: additive helpers
+  `(*Queue).SetStatus`, `(*Queue).SetElapsed`, `(*Queue).AdvanceToNext`
+  plus sentinels `ErrNoCurrentSong`, `ErrInvalidStatus`,
+  `ErrInvalidElapsed`. `AdvanceToNext` deliberately checks
+  no-next-song BEFORE mutating so a skip on the last song does not
+  partially mutate state (the global `queue.Next` mutates Status then
+  returns ErrNoNextSong; R09a avoids that footgun).
+- `internal/usecase/roomqueue.Interactor`: four new methods
+  (`SetPlaybackStatus`, `SyncPlaybackElapsed`, `SkipPlayback`,
+  `PlaybackEnded`) plus a `leaseAuthorizer` field wired via
+  `SetLeaseAuthorizer`. The `Broadcaster` interface gains three new
+  methods (`BroadcastRoomPlaybackStatusChanged`,
+  `BroadcastRoomPlaybackElapsedSync`,
+  `BroadcastRoomPlaybackSongAdvanced`).
+- `internal/delivery/ws/events.go`: three new constants
+  (`EventRoomPlaybackStatusChanged`, `EventRoomPlaybackElapsedSync`,
+  `EventRoomPlaybackSongAdvanced`) and three matching payload structs.
+  The 16-event global `/ws` inventory is unchanged.
+- `internal/delivery/ws/room_hub.go`: three new
+  `BroadcastRoomPlayback*` methods on `*RoomWSHub` that follow the
+  exact dispatch pattern as the R07b/R07d broadcasters. The hub loop
+  remains the sole owner of per-room seq allocation (`dispatch` does
+  NOT allocate seq); the R07b interleaving invariant
+  (initial-sync seq < delta seq) is preserved automatically.
+- `internal/delivery/http/room_queue_handlers.go`: four new
+  handlers (`HandleSetRoomPlaybackStatus`, `HandleSyncRoomPlayback`,
+  `HandleSkipRoomPlayback`, `HandleRoomSongEnded`) with the documented
+  status mapping (204 on success; 400/401/403/404/409/410 on
+  validation / auth / archived / lease-gone). `writeRoomQueueError`
+  extended with the R09a sentinels.
+- `cmd/server/main.go`: registers four routes
+  (`POST /api/rooms/{slug}/playback/{status,sync,skip,ended}`) behind
+  `roomAuth`, and wires `roomQueueInteractor.SetLeaseAuthorizer(playerLeaseInteractor)`.
+- `frontend/src/services/api.js`: four new methods
+  (`api.setRoomPlaybackStatus`, `api.syncRoomPlayback`,
+  `api.skipRoomPlayback`, `api.roomSongEnded`).
+- `frontend/src/store/index.js`: three new isolated mutators on
+  `globalStore.roomQueues[slug]` (`applyRoomPlaybackStatusChanged`,
+  `applyRoomPlaybackElapsedSync`, `applyRoomPlaybackSongAdvanced`).
+  Each prefers `payload.state` when present; the fallback path stamps
+  the relevant fields without touching global queueState, currentUser,
+  voteSessions, or autoQueueConfig.
+- `frontend/src/views/RoomView.vue`: handles the three new room WS
+  event types in `applyMessage`; adds a minimal Play/Pause/Skip/Ended
+  control panel with per-status toast mapping (400/401/403/404/409/410)
+  mirroring the R07d prioritize handler. UI gates are convenience
+  only; the backend is authoritative.
+
+**Request shapes:**
+- `POST /api/rooms/{slug}/playback/status` body `{"status":"playing"}`
+  or `{"status":"paused"}`. `idle` / empty / unknown status → 400.
+- `POST /api/rooms/{slug}/playback/sync` body
+  `{"elapsed": <non-negative int>}`. Missing `elapsed` (nil pointer)
+  → 400; negative → 400.
+- `POST /api/rooms/{slug}/playback/skip` empty body. No next song →
+  400, queue is NOT partially mutated.
+- `POST /api/rooms/{slug}/playback/ended` empty body. If next song
+  exists, advance + `room_playback_song_advanced reason="ended"`. If
+  no next song, persist paused end-of-queue state and broadcast
+  `room_playback_status_changed`.
+
+**Authorisation (use-case layer):**
+- Active room (else 409 archived / 404 not-found)
+- Active membership (else 403)
+- Current active player-lease holder (else 404 missing lease / 403
+  non-holder / 410 lease past grace / 409 archived room)
+
+The use-case layer rejects invalid requests / lease failures BEFORE
+the broadcaster fires; no broadcast on failed validation or
+authorisation.
+
+**Verification:**
+- `go test -count=1 ./internal/usecase/roomqueue ./internal/usecase/room ./internal/delivery/http ./internal/delivery/ws ./cmd/server` — PASS
+- `go test -race -count=1 ./internal/usecase/roomqueue ./internal/usecase/room ./internal/delivery/http ./internal/delivery/ws` — PASS
+- `go build ./cmd/... ./internal/...` — PASS
+- `go vet ./cmd/... ./internal/...` — PASS
+- `git diff --check` — PASS
+
+**Closure:** R09a is currently active / in-progress on `dev` and has
+NOT yet been accepted by the Product Owner. The implementation
+follows the R07d narrow-slice contract and explicitly defers
+vote-to-skip, volume, prev, room auto-queue, and full media-player
+device integration to subsequent R09b+ slices. Global
+`/api/queue/...` is untouched, no priority balance spending, no
+relational queue rows, no mutation of the global `queueState` /
+`currentUser` / `voteSessions` / `autoQueueConfig` from room events,
+and per-room seq allocation remains hub-loop owned (`dispatch()` does
+not allocate seq).

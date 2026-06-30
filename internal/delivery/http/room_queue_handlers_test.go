@@ -15,6 +15,7 @@ import (
 	"local-music-queue/internal/domain/entity"
 	"local-music-queue/internal/infrastructure/persistence"
 	"local-music-queue/internal/usecase/auth"
+	"local-music-queue/internal/usecase/room"
 	"local-music-queue/internal/usecase/roomqueue"
 )
 
@@ -222,12 +223,15 @@ func TestRoomQueue_AddSong_RequiresAuthenticatedActor(t *testing.T) {
 // WebSocket. The handler tests assert it was invoked on success and
 // NOT invoked on error paths.
 type recordingRoomBroadcaster struct {
-	mu          sync.Mutex
-	syncCalls   []string
-	addCalls    []string
-	removeCalls []int
-	clearCalls  []string
-	prioCalls   []recordingPrioCall
+	mu            sync.Mutex
+	syncCalls     []string
+	addCalls      []string
+	removeCalls   []int
+	clearCalls    []string
+	prioCalls     []recordingPrioCall
+	statusCalls   []recordingStatusCall
+	elapsedCalls  []recordingElapsedCall
+	advancedCalls []recordingAdvancedCall
 }
 
 type recordingPrioCall struct {
@@ -235,6 +239,27 @@ type recordingPrioCall struct {
 	from int
 	to   int
 	song entity.Song
+}
+
+type recordingStatusCall struct {
+	slug    string
+	status  entity.PlaybackStatus
+	elapsed int
+}
+
+type recordingElapsedCall struct {
+	slug    string
+	elapsed int
+}
+
+type recordingAdvancedCall struct {
+	slug    string
+	reason  string
+	prev    int
+	next    int
+	song    *entity.Song
+	status  entity.PlaybackStatus
+	elapsed int
 }
 
 func (r *recordingRoomBroadcaster) BroadcastRoomQueueSync(slug string, _ *entity.Queue) {
@@ -261,6 +286,21 @@ func (r *recordingRoomBroadcaster) BroadcastRoomQueueSongPrioritized(slug string
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.prioCalls = append(r.prioCalls, recordingPrioCall{slug: slug, from: from, to: to, song: song})
+}
+func (r *recordingRoomBroadcaster) BroadcastRoomPlaybackStatusChanged(slug string, status entity.PlaybackStatus, elapsed int, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.statusCalls = append(r.statusCalls, recordingStatusCall{slug: slug, status: status, elapsed: elapsed})
+}
+func (r *recordingRoomBroadcaster) BroadcastRoomPlaybackElapsedSync(slug string, elapsed int, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.elapsedCalls = append(r.elapsedCalls, recordingElapsedCall{slug: slug, elapsed: elapsed})
+}
+func (r *recordingRoomBroadcaster) BroadcastRoomPlaybackSongAdvanced(slug, reason string, prev, next int, song *entity.Song, status entity.PlaybackStatus, elapsed int, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.advancedCalls = append(r.advancedCalls, recordingAdvancedCall{slug: slug, reason: reason, prev: prev, next: next, song: song, status: status, elapsed: elapsed})
 }
 
 func TestRoomQueue_AddSong_BroadcastsSongAdded(t *testing.T) {
@@ -868,5 +908,309 @@ func TestRoomQueue_AddSong_URLOnly_PersistsServerAttribution(t *testing.T) {
 	}
 	if after.Songs[0].ID != "yt-url-1" {
 		t.Errorf("expected only yt-url-1 to remain, got %s", after.Songs[0].ID)
+	}
+}
+
+// --- R09a playback handler tests ---
+
+// playbackRoomFixture creates a room with a 2-song queue and wires
+// the roomqueue interactor to a player-lease interactor with the
+// given holder as the active lease holder. Returns the handler, the
+// db handle, and the cleanup. The room's host is always user 200;
+// when the holder is a different user (e.g. user 42) we add 42 as a
+// guest so the holder claim can still succeed via the host check
+// (the holder user must be a member of the room).
+func playbackRoomFixture(t *testing.T, slug string, holderID int) (*RoomQueueHandlers, *sql.DB, func()) {
+	t.Helper()
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	seedUserQueue(t, db, 200, "host-rq-pb-"+slug+"@example.com", entity.RoleHost)
+	if holderID != 200 {
+		seedUserQueue(t, db, holderID, fmt.Sprintf("holder-rq-pb-%s@example.com", slug), entity.RoleGuest)
+	}
+	if _, err := roomRepo.CreateRoomAndHost(ctx, slug, "PB-"+slug, 200, time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := mustRoomIDQueue(t, db, slug)
+	if holderID != 200 {
+		if err := roomRepo.AddMember(ctx, roomID, holderID, entity.RoomRoleGuest, time.Now().UTC()); err != nil {
+			t.Fatalf("add holder guest: %v", err)
+		}
+	}
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	seed := entity.NewQueue()
+	seed.Songs = []entity.Song{
+		{ID: "cur", Title: "Cur", URL: "u", AddedBy: "H", AddedByID: 200},
+		{ID: "next", Title: "Next", URL: "u", AddedBy: "H", AddedByID: 200},
+	}
+	seed.CurrentIndex = 0
+	seed.Status = entity.StatusPlaying
+	if err := queueRepo.Save(ctx, roomID, seed); err != nil {
+		t.Fatalf("seed queue: %v", err)
+	}
+	leaseRepo := persistence.NewPostgresPlayerLeaseRepository(db)
+	leaseInter := room.NewPlayerLeaseInteractor(leaseRepo, roomRepo, db, room.DefaultLeaseDuration, room.DefaultLeaseGrace)
+	if _, err := leaseInter.Claim(ctx, slug, holderID); err != nil {
+		t.Fatalf("claim lease for holder %d: %v", holderID, err)
+	}
+	rqh.inter.SetLeaseAuthorizer(leaseInter)
+	return rqh, db, cleanup
+}
+
+// TestRoomQueue_SetPlaybackStatus_HolderReturns204 pins the happy
+// path: holder sends {"status":"paused"} and the handler returns 204
+// with one status broadcast carrying the post-mutation snapshot.
+func TestRoomQueue_SetPlaybackStatus_HolderReturns204(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-h-pb-status", 200)
+	defer cleanup()
+
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	body := []byte(`{"status":"paused"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-pb-status/playback/status", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleSetRoomPlaybackStatus(rr, req, "rq-h-pb-status", 200)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.statusCalls) != 1 || bc.statusCalls[0].status != entity.StatusPaused {
+		t.Fatalf("expected 1 paused status broadcast, got %+v", bc.statusCalls)
+	}
+	if bc.statusCalls[0].slug != "rq-h-pb-status" {
+		t.Errorf("expected slug rq-h-pb-status, got %q", bc.statusCalls[0].slug)
+	}
+}
+
+// TestRoomQueue_SetPlaybackStatus_RejectsIdleWith400 pins the
+// client-supplied idle rejection at the handler layer.
+func TestRoomQueue_SetPlaybackStatus_RejectsIdleWith400(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-h-pb-idle", 200)
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	body := []byte(`{"status":"idle"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-pb-idle/playback/status", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleSetRoomPlaybackStatus(rr, req, "rq-h-pb-idle", 200)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.statusCalls) != 0 {
+		t.Errorf("expected 0 status broadcasts on 400, got %d", len(bc.statusCalls))
+	}
+}
+
+// TestRoomQueue_SetPlaybackStatus_NonHolderReturns403AndNoBroadcast
+// pins the lease-holder gate at the handler level.
+func TestRoomQueue_SetPlaybackStatus_NonHolderReturns403AndNoBroadcast(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-h-pb-nonholder", 200)
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	body := []byte(`{"status":"paused"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-pb-nonholder/playback/status", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	// 42 is a guest member but NOT the lease holder (200 holds it).
+	rqh.HandleSetRoomPlaybackStatus(rr, req, "rq-h-pb-nonholder", 42)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.statusCalls) != 0 {
+		t.Errorf("expected 0 status broadcasts on 403, got %d", len(bc.statusCalls))
+	}
+}
+
+// TestRoomQueue_SyncPlayback_HolderReturns204 pins the happy path
+// for elapsed sync.
+func TestRoomQueue_SyncPlayback_HolderReturns204(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-h-pb-sync", 200)
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	body := []byte(`{"elapsed":17}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-pb-sync/playback/sync", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleSyncRoomPlayback(rr, req, "rq-h-pb-sync", 200)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.elapsedCalls) != 1 || bc.elapsedCalls[0].elapsed != 17 {
+		t.Fatalf("expected 1 elapsed=17 broadcast, got %+v", bc.elapsedCalls)
+	}
+}
+
+// TestRoomQueue_SyncPlayback_MissingElapsedReturns400 pins the
+// *int request shape: missing field → 400, NOT 0.
+func TestRoomQueue_SyncPlayback_MissingElapsedReturns400(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-h-pb-syncmiss", 200)
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	body := []byte(`{}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-pb-syncmiss/playback/sync", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleSyncRoomPlayback(rr, req, "rq-h-pb-syncmiss", 200)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.elapsedCalls) != 0 {
+		t.Errorf("expected 0 elapsed broadcasts on 400, got %d", len(bc.elapsedCalls))
+	}
+}
+
+// TestRoomQueue_SyncPlayback_NegativeElapsedReturns400
+func TestRoomQueue_SyncPlayback_NegativeElapsedReturns400(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-h-pb-syncneg", 200)
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	body := []byte(`{"elapsed":-1}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-pb-syncneg/playback/sync", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleSyncRoomPlayback(rr, req, "rq-h-pb-syncneg", 200)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.elapsedCalls) != 0 {
+		t.Errorf("expected 0 elapsed broadcasts on 400, got %d", len(bc.elapsedCalls))
+	}
+}
+
+// TestRoomQueue_SkipPlayback_HolderAdvancesAndBroadcasts
+func TestRoomQueue_SkipPlayback_HolderAdvancesAndBroadcasts(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-h-pb-skip", 200)
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-pb-skip/playback/skip", nil)
+	rr := httptest.NewRecorder()
+	rqh.HandleSkipRoomPlayback(rr, req, "rq-h-pb-skip", 200)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.advancedCalls) != 1 {
+		t.Fatalf("expected 1 advanced broadcast, got %d", len(bc.advancedCalls))
+	}
+	if bc.advancedCalls[0].reason != "skip" || bc.advancedCalls[0].prev != 0 || bc.advancedCalls[0].next != 1 {
+		t.Errorf("unexpected advanced capture: %+v", bc.advancedCalls[0])
+	}
+}
+
+// TestRoomQueue_SkipPlayback_NoNextSongReturns400 pins the
+// no-partial-mutation invariant at the handler layer.
+func TestRoomQueue_SkipPlayback_NoNextSongReturns400(t *testing.T) {
+	rqh, db, cleanup := playbackRoomFixture(t, "rq-h-pb-skipnone", 200)
+	defer cleanup()
+	roomID := mustRoomIDQueue(t, db, "rq-h-pb-skipnone")
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	seed := entity.NewQueue()
+	seed.Songs = []entity.Song{
+		{ID: "only", Title: "Only", URL: "u", AddedBy: "H", AddedByID: 200},
+	}
+	seed.CurrentIndex = 0
+	seed.Status = entity.StatusPlaying
+	seed.Elapsed = 99
+	if err := queueRepo.Save(context.Background(), roomID, seed); err != nil {
+		t.Fatalf("reseed: %v", err)
+	}
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-pb-skipnone/playback/skip", nil)
+	rr := httptest.NewRecorder()
+	rqh.HandleSkipRoomPlayback(rr, req, "rq-h-pb-skipnone", 200)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.advancedCalls) != 0 {
+		t.Errorf("expected 0 advanced broadcasts on no-next skip, got %d", len(bc.advancedCalls))
+	}
+}
+
+// TestRoomQueue_Ended_AdvancesAndBroadcastsReasonEnded
+func TestRoomQueue_Ended_AdvancesAndBroadcastsReasonEnded(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-h-pb-ended", 200)
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-pb-ended/playback/ended", nil)
+	rr := httptest.NewRecorder()
+	rqh.HandleRoomSongEnded(rr, req, "rq-h-pb-ended", 200)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.advancedCalls) != 1 || bc.advancedCalls[0].reason != "ended" {
+		t.Fatalf("expected 1 ended advanced broadcast, got %+v", bc.advancedCalls)
+	}
+	if len(bc.statusCalls) != 0 {
+		t.Errorf("expected no status broadcast on advance path, got %d", len(bc.statusCalls))
+	}
+}
+
+// TestRoomQueue_Ended_NoNextSongPausesAndBroadcastsStatus
+func TestRoomQueue_Ended_NoNextSongPausesAndBroadcastsStatus(t *testing.T) {
+	rqh, db, cleanup := playbackRoomFixture(t, "rq-h-pb-endnone", 200)
+	defer cleanup()
+	roomID := mustRoomIDQueue(t, db, "rq-h-pb-endnone")
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	seed := entity.NewQueue()
+	seed.Songs = []entity.Song{
+		{ID: "final", Title: "Final", URL: "u", AddedBy: "H", AddedByID: 200},
+	}
+	seed.CurrentIndex = 0
+	seed.Status = entity.StatusPlaying
+	seed.Elapsed = 77
+	if err := queueRepo.Save(context.Background(), roomID, seed); err != nil {
+		t.Fatalf("reseed: %v", err)
+	}
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-pb-endnone/playback/ended", nil)
+	rr := httptest.NewRecorder()
+	rqh.HandleRoomSongEnded(rr, req, "rq-h-pb-endnone", 200)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.statusCalls) != 1 || bc.statusCalls[0].status != entity.StatusPaused {
+		t.Fatalf("expected 1 paused status broadcast, got %+v", bc.statusCalls)
+	}
+	if len(bc.advancedCalls) != 0 {
+		t.Errorf("expected 0 advanced broadcasts at end-of-queue, got %d", len(bc.advancedCalls))
 	}
 }

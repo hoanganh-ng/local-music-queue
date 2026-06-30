@@ -170,6 +170,83 @@ func (q *Queue) IsValidTransition(newStatus PlaybackStatus) bool {
 	return true
 }
 
+// ErrNoCurrentSong is returned by the room playback helpers when a
+// mutation needs a valid current song and the queue does not have one
+// (CurrentIndex == -1 or no songs). Mirrors the global queue's
+// ErrQueueEmpty so the delivery layer can map it consistently.
+var ErrNoCurrentSong = errors.New("no current song")
+
+// ErrInvalidStatus is returned by SetStatus when the supplied
+// PlaybackStatus is not one of the recognized values. Client-driven
+// "idle" is rejected so the API surface cannot transition the queue
+// into the idle state; only natural end-of-queue / clear paths can.
+var ErrInvalidStatus = errors.New("invalid playback status")
+
+// ErrInvalidElapsed is returned by SetElapsed when the supplied
+// elapsed value is negative. The wire shape distinguishes missing
+// from 0; negative is always invalid.
+var ErrInvalidElapsed = errors.New("invalid elapsed value")
+
+// SetStatus mutates the queue to newStatus. It refuses to mutate when
+// the queue has no current song (CurrentIndex == -1 or empty Songs),
+// returning ErrNoCurrentSong without touching state. Refuses the
+// idle status outright (clients cannot request it). When transitioning
+// to playing from a previously paused state the elapsed counter is
+// left untouched; when transitioning to paused, elapsed is left
+// untouched as well. The caller is responsible for serializing the
+// mutation under the queue's lock.
+func (q *Queue) SetStatus(newStatus PlaybackStatus) error {
+	if newStatus != StatusPlaying && newStatus != StatusPaused {
+		return ErrInvalidStatus
+	}
+	if q.CurrentIndex < 0 || q.CurrentIndex >= len(q.Songs) {
+		return ErrNoCurrentSong
+	}
+	q.Status = newStatus
+	return nil
+}
+
+// SetElapsed clamps a non-negative elapsed value into the queue. It
+// refuses negative values (ErrInvalidElapsed) and refuses to mutate
+// when the queue has no current song (ErrNoCurrentSong).
+func (q *Queue) SetElapsed(elapsed int) error {
+	if elapsed < 0 {
+		return ErrInvalidElapsed
+	}
+	if q.CurrentIndex < 0 || q.CurrentIndex >= len(q.Songs) {
+		return ErrNoCurrentSong
+	}
+	q.Elapsed = elapsed
+	return nil
+}
+
+// AdvanceToNext moves the current index to the next song only when a
+// next song exists, resetting elapsed to 0 and forcing status to
+// playing. It deliberately does NOT mutate state when there is no
+// next song (the global queue.Next sets Status = StatusPaused in
+// that branch, which would leave the queue partially mutated on a
+// no-next skip; R09a avoids that by checking before mutating).
+//
+// Returns the previous index, the new (advanced) song pointer (nil
+// when no advance), and a sentinel:
+//   - ErrNoNextSong      → no next song, queue not mutated
+//   - ErrNoCurrentSong   → empty queue, queue not mutated
+//   - nil                → advance succeeded
+func (q *Queue) AdvanceToNext() (prevIndex int, newSong *Song, err error) {
+	if len(q.Songs) == 0 || q.CurrentIndex < 0 {
+		return q.CurrentIndex, nil, ErrNoCurrentSong
+	}
+	if q.CurrentIndex >= len(q.Songs)-1 {
+		return q.CurrentIndex, nil, ErrNoNextSong
+	}
+	prevIndex = q.CurrentIndex
+	q.CurrentIndex++
+	q.Elapsed = 0
+	q.Status = StatusPlaying
+	cs := q.Songs[q.CurrentIndex]
+	return prevIndex, &cs, nil
+}
+
 // Prioritize moves a song to the front of the queue (after current song).
 func (q *Queue) Prioritize(songIndex int) error {
 	// Validate index

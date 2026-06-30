@@ -263,4 +263,83 @@ describe('RoomView', () => {
     errSpy.mockRestore()
     wrapper.unmount()
   })
+
+  // --- R09a playback tests ---
+
+  it('handles room_playback_status_changed / elapsed_sync / song_advanced events', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const inst = wsFactoryMock.lastInstance
+
+    inst.onMessage({
+      type: 'room_playback_status_changed',
+      data: { room_slug: 'lobby', status: 'paused', elapsed: 5, state: { songs: [], current_index: -1, current_song: null, status: 'paused', elapsed: 5, queue: [], history: [] } }
+    })
+    expect(globalStore.roomQueues.lobby.state.status).toBe('paused')
+    expect(globalStore.roomQueues.lobby.state.elapsed).toBe(5)
+
+    inst.onMessage({
+      type: 'room_playback_elapsed_sync',
+      data: { room_slug: 'lobby', elapsed: 11, state: { songs: [], current_index: -1, current_song: null, status: 'paused', elapsed: 11, queue: [], history: [] } }
+    })
+    expect(globalStore.roomQueues.lobby.state.elapsed).toBe(11)
+
+    inst.onMessage({
+      type: 'room_playback_song_advanced',
+      data: {
+        room_slug: 'lobby',
+        reason: 'skip',
+        previous_index: 0,
+        new_index: 1,
+        current_song: { id: 'b' },
+        status: 'playing',
+        elapsed: 0,
+        state: { songs: [{ id: 'a' }, { id: 'b' }], current_index: 1, current_song: { id: 'b' }, status: 'playing', elapsed: 0, queue: [], history: [] }
+      }
+    })
+    expect(globalStore.roomQueues.lobby.state.current_index).toBe(1)
+    expect(globalStore.roomQueues.lobby.state.current_song).toEqual({ id: 'b' })
+
+    wrapper.unmount()
+  })
+
+  it('setPlaybackStatus / skipPlayback / songEnded call the matching api methods', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.setRoomPlaybackStatus.mockResolvedValue(null)
+    apiMock.skipRoomPlayback.mockResolvedValue(null)
+    apiMock.roomSongEnded.mockResolvedValue(null)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const vm = wrapper.vm
+
+    await vm.setPlaybackStatus('playing')
+    expect(apiMock.setRoomPlaybackStatus).toHaveBeenCalledWith('lobby', 'playing')
+
+    await vm.skipPlayback()
+    expect(apiMock.skipRoomPlayback).toHaveBeenCalledWith('lobby')
+
+    await vm.songEnded()
+    expect(apiMock.roomSongEnded).toHaveBeenCalledWith('lobby')
+
+    wrapper.unmount()
+  })
+
+  it('playback toasts surface 400/401/403/404/409/410 without throwing', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const vm = wrapper.vm
+
+    for (const status of [400, 401, 403, 404, 409, 410]) {
+      apiMock.setRoomPlaybackStatus.mockRejectedValueOnce(Object.assign(new Error(`err ${status}`), { status }))
+      await vm.setPlaybackStatus('paused')
+      expect(toastMock.error).toHaveBeenCalled()
+      toastMock.error.mockClear()
+    }
+    wrapper.unmount()
+  })
 })

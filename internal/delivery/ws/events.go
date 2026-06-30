@@ -44,6 +44,13 @@ const (
 	// /api/rooms/{slug}/queue/prioritize. R07d addition; existing R07b
 	// contracts are unchanged.
 	EventRoomQueueSongPrioritized = "room_queue_song_prioritized"
+	// Room playback events (R09a). Purely additive on top of R07b/R07d.
+	// Only the active lease holder may trigger these via REST; the
+	// resulting events ride the per-room WebSocket only — the global
+	// /ws 16-event inventory is unchanged.
+	EventRoomPlaybackStatusChanged = "room_playback_status_changed"
+	EventRoomPlaybackElapsedSync   = "room_playback_elapsed_sync"
+	EventRoomPlaybackSongAdvanced  = "room_playback_song_advanced"
 )
 
 // UserJoinedData contains only the new user info
@@ -252,4 +259,40 @@ type RoomQueueSongPrioritizedData struct {
 	ToIndex   int           `json:"to_index"`
 	Song      entity.Song   `json:"song"`
 	State     *entity.Queue `json:"state"`
+}
+
+// RoomPlaybackStatusChangedData is broadcast after a successful POST
+// /api/rooms/{slug}/playback/status. R09a addition; existing R07
+// contracts and the global 16-event inventory are unchanged. The
+// post-mutation snapshot is authoritative.
+type RoomPlaybackStatusChangedData struct {
+	RoomSlug string                `json:"room_slug"`
+	Status   entity.PlaybackStatus `json:"status"`
+	Elapsed  int                   `json:"elapsed"`
+	State    *entity.Queue         `json:"state"`
+}
+
+// RoomPlaybackElapsedSyncData is broadcast after a successful POST
+// /api/rooms/{slug}/playback/sync. R09a addition; carries the new
+// elapsed value plus the post-mutation snapshot.
+type RoomPlaybackElapsedSyncData struct {
+	RoomSlug string        `json:"room_slug"`
+	Elapsed  int           `json:"elapsed"`
+	State    *entity.Queue `json:"state"`
+}
+
+// RoomPlaybackSongAdvancedData is broadcast after a successful POST
+// /api/rooms/{slug}/playback/{skip,ended}. R09a addition; reason is
+// "skip" or "ended" so clients can render the appropriate UX (skip
+// keeps playing; ended on the last song pauses). The post-mutation
+// snapshot is authoritative.
+type RoomPlaybackSongAdvancedData struct {
+	RoomSlug      string                `json:"room_slug"`
+	Reason        string                `json:"reason"`
+	PreviousIndex int                   `json:"previous_index"`
+	NewIndex      int                   `json:"new_index"`
+	CurrentSong   *entity.Song          `json:"current_song"`
+	Status        entity.PlaybackStatus `json:"status"`
+	Elapsed       int                   `json:"elapsed"`
+	State         *entity.Queue         `json:"state"`
 }

@@ -60,6 +60,37 @@
           Clear queue
         </button>
       </section>
+
+      <section class="playback-panel glass-panel" v-if="hasCurrentSong">
+        <h3>Playback</h3>
+        <p class="now-playing">
+          Now playing: <strong>{{ currentSongTitle }}</strong>
+          <span class="elapsed"> · {{ roomState.state.elapsed ?? 0 }}s</span>
+        </p>
+        <div class="playback-buttons">
+          <button
+            class="play-btn"
+            :disabled="!canMutate || roomState.state.status === 'playing'"
+            @click="setPlaybackStatus('playing')"
+          >Play</button>
+          <button
+            class="pause-btn"
+            :disabled="!canMutate || roomState.state.status === 'paused'"
+            @click="setPlaybackStatus('paused')"
+          >Pause</button>
+          <button
+            class="skip-btn"
+            :disabled="!canMutate"
+            @click="skipPlayback"
+          >Skip</button>
+          <button
+            class="ended-btn"
+            :disabled="!canMutate"
+            @click="songEnded"
+          >Ended</button>
+        </div>
+        <p class="hint">Only the active lease holder may control playback.</p>
+      </section>
     </main>
     <ToastContainer />
   </div>
@@ -113,6 +144,16 @@ function applyMessage(msg) {
       break
     case 'room_queue_cleared':
       globalStore.applyRoomQueueCleared(slug.value, msg.data?.state)
+      break
+    // R09a: lease-aware per-room playback deltas.
+    case 'room_playback_status_changed':
+      globalStore.applyRoomPlaybackStatusChanged(slug.value, msg.data)
+      break
+    case 'room_playback_elapsed_sync':
+      globalStore.applyRoomPlaybackElapsedSync(slug.value, msg.data)
+      break
+    case 'room_playback_song_advanced':
+      globalStore.applyRoomPlaybackSongAdvanced(slug.value, msg.data)
       break
     default:
       // Ignore global / unrelated event types per the R07c contract.
@@ -267,6 +308,58 @@ async function clearQueue() {
     else if (s === 404) toast.error('Room not found.')
     else toast.error('Could not clear room queue.')
   }
+}
+
+// --- R09a playback controls ---
+//
+// UI gates are convenience only. The backend enforces lease-holder
+// authorisation inside roomqueue.Interactor and surfaces 400/401/403/
+// 404/409/410; the toasts below mirror the same status-code mapping
+// as the existing R07d prioritize control.
+
+const hasCurrentSong = computed(() => {
+  const s = roomState.value.state
+  return Array.isArray(s.songs) && typeof s.current_index === 'number' && s.current_index >= 0 && s.current_index < s.songs.length
+})
+const currentSongTitle = computed(() => {
+  const s = roomState.value.state
+  if (!hasCurrentSong.value) return ''
+  return s.songs[s.current_index]?.title || '(untitled)'
+})
+
+async function setPlaybackStatus(status) {
+  try {
+    await api.setRoomPlaybackStatus(slug.value, status)
+  } catch (e) {
+    mapPlaybackToast(e, 'Could not change playback status.')
+  }
+}
+
+async function skipPlayback() {
+  try {
+    await api.skipRoomPlayback(slug.value)
+  } catch (e) {
+    mapPlaybackToast(e, 'Could not skip the current song.')
+  }
+}
+
+async function songEnded() {
+  try {
+    await api.roomSongEnded(slug.value)
+  } catch (e) {
+    mapPlaybackToast(e, 'Could not mark the song as ended.')
+  }
+}
+
+function mapPlaybackToast(e, fallback) {
+  const s = e?.status
+  if (s === 400) toast.error('Playback command is invalid.')
+  else if (s === 401) toast.error('You are signed out. Log in again.')
+  else if (s === 403) toast.error('Only the active lease holder can control playback.')
+  else if (s === 404) toast.error('Room or active lease not found.')
+  else if (s === 409) toast.error('Room is archived or in conflict.')
+  else if (s === 410) toast.error('Player lease has expired — reclaim to continue.')
+  else toast.error(fallback)
 }
 
 function handleBack() {

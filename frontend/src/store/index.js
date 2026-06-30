@@ -344,6 +344,67 @@ export const globalStore = reactive({
       delete this.roomQueues[slug]
     }
   },
+
+  // --- R09a playback mutators ---
+  //
+  // Each mutator only touches globalStore.roomQueues[slug]. They MUST
+  // NOT mutate globalStore.queueState, currentUser, voteSessions, or
+  // autoQueueConfig. Every mutator prefers payload.state when present
+  // (the broadcast's post-mutation snapshot is authoritative); the
+  // fallback path mirrors entity.Queue semantics for the specific
+  // mutation. Tests pin both the prefers-fullState and the fallback
+  // branches, plus the isolation invariant.
+
+  applyRoomPlaybackStatusChanged(slug, payload) {
+    const entry = this._ensureRoomEntry(slug)
+    if (payload && payload.state) {
+      entry.state = payload.state
+      return
+    }
+    const s = entry.state
+    if (payload && typeof payload.status === 'string') {
+      s.status = payload.status
+    }
+    if (payload && typeof payload.elapsed === 'number') {
+      s.elapsed = payload.elapsed
+    }
+  },
+
+  applyRoomPlaybackElapsedSync(slug, payload) {
+    const entry = this._ensureRoomEntry(slug)
+    if (payload && payload.state) {
+      entry.state = payload.state
+      return
+    }
+    const elapsed = typeof payload === 'number'
+      ? payload
+      : (payload && typeof payload.elapsed === 'number' ? payload.elapsed : null)
+    if (elapsed !== null) {
+      entry.state.elapsed = elapsed
+    }
+  },
+
+  applyRoomPlaybackSongAdvanced(slug, payload) {
+    const entry = this._ensureRoomEntry(slug)
+    if (payload && payload.state) {
+      entry.state = payload.state
+      return
+    }
+    const s = entry.state
+    if (!payload) return
+    if (typeof payload.new_index === 'number') {
+      s.current_index = payload.new_index
+    }
+    if (payload.current_song !== undefined) {
+      s.current_song = payload.current_song
+    }
+    if (typeof payload.status === 'string') {
+      s.status = payload.status
+    }
+    if (typeof payload.elapsed === 'number') {
+      s.elapsed = payload.elapsed
+    }
+  },
 })
 
 // Watch for changes to currentUser and persist to localStorage

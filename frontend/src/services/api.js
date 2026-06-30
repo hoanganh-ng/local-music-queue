@@ -226,5 +226,42 @@ export const api = {
       method: 'POST',
       body: { song_index: songIndex }
     })
+  },
+
+  // --- R09a lease-aware room playback controls ---
+  //
+  // Each method targets a per-room endpoint; the backend enforces
+  // active-room + active-membership + active-lease-holder. The
+  // frontend does NOT pre-check the lease holder — the backend is
+  // authoritative and surfaces 401/403/404/409/410 toasts the
+  // RoomView can render verbatim. Body shapes mirror the R07d
+  // pointer/zero-distinguishing convention: sync uses {elapsed}
+  // (caller passes the integer; missing is rejected by the server
+  // with 400) and status uses {status} ("playing" or "paused";
+  // "idle" is rejected with 400).
+  async setRoomPlaybackStatus(slug, status) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}/playback/status`, {
+      method: 'POST',
+      body: { status }
+    })
+  },
+
+  async syncRoomPlayback(slug, elapsed) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}/playback/sync`, {
+      method: 'POST',
+      body: { elapsed }
+    })
+  },
+
+  async skipRoomPlayback(slug) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}/playback/skip`, {
+      method: 'POST'
+    })
+  },
+
+  async roomSongEnded(slug) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}/playback/ended`, {
+      method: 'POST'
+    })
   }
 }
