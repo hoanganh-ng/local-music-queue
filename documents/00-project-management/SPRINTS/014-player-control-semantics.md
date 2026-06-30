@@ -224,12 +224,13 @@ R09c is the **first narrow slice** of the R09c+ bucket (volume, prev, room auto-
 
 **No persistence:** there is no `entity.Queue.Volume` field, no `room_queue_state` schema change, and the command does not call `queueRepo.Save`. The `changePlaybackVolume` method returns immediately after validation + lease check; the broadcaster delivers the event to subscribed room clients.
 
-**Verification:** (filled in by the implementer before committing this summary)
-- `go test -count=1 ./internal/usecase/roomqueue ./internal/delivery/http ./internal/delivery/ws ./cmd/server` — PASS
-- `go test -race -count=1 ./internal/usecase/roomqueue ./internal/delivery/ws` — PASS
-- `go vet ./cmd/... ./internal/...` — PASS
-- `git diff --check` — PASS
-- `cd frontend && npm run test:unit -- --run` — PASS
-- `cd frontend && npm run build` — clean
+**Verification:** (2026-06-30)
+
+- `go test -count=1 ./internal/usecase/roomqueue ./internal/delivery/http ./internal/delivery/ws ./cmd/server` — PASS (roomqueue 6.470s; http 23.836s; ws 4.083s; cmd/server 1.044s). First run reported `TestRoomQueue_ChangePlaybackVolume_MalformedJSONReturns400` failed at migration-init time with `SQLSTATE 53300` ("too many clients already") — pre-existing PostgreSQL connection saturation in the test harness, not R09c-introduced. Isolated retry (`go test -count=1 -run TestRoomQueue_ChangePlaybackVolume ./internal/delivery/http`) passed in 2.115s; full suite passed on the second invocation. Recorded per spec rule on known pre-existing PG flakes.
+- `go test -race -count=1 ./internal/usecase/roomqueue ./internal/delivery/ws` — PASS (roomqueue 8.933s; ws 5.110s).
+- `go vet ./cmd/... ./internal/...` — clean.
+- `git diff --check` — exit 0 (clean).
+- `cd frontend && npm run test:unit -- --run` — 201/201 vitest pass (recorded by Task 5 implementer; npm unavailable in this controller shell, so the implementer-supplied evidence is accepted).
+- `cd frontend && npm run build` — clean vite build (recorded by Task 5 implementer; same npm caveat).
 
 **Closure:** R09c is implemented on `dev` (2026-06-30); full Product Owner acceptance is pending. The implementation follows the R07d/R09a/R09b narrow-slice contract: one additive room-scoped command (`POST /api/rooms/{slug}/playback/volume`), one additive per-room WebSocket delta (`room_playback_volume_changed`), and a minimal frontend Vol± control surface gated on the existing lease-holder UI affordance. Volume is intentionally NOT persisted; the global `/api/queue/volume` contract, global `/ws` 16-event inventory, voting, priority balances, auto-queue, Docker, CORS, and auth/session design are all untouched.
