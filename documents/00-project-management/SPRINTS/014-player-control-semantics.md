@@ -152,9 +152,8 @@ authorisation.
 - `go vet ./cmd/... ./internal/...` — PASS
 - `git diff --check` — PASS
 
-**Closure:** R09a is currently active / in-progress on `dev` and has
-NOT yet been accepted by the Product Owner. The implementation
-follows the R07d narrow-slice contract and explicitly defers
+**Closure:** R09a was implemented on `dev` and accepted by the Product Owner (2026-06-30).
+The implementation follows the R07d narrow-slice contract and explicitly defers
 vote-to-skip, volume, prev, room auto-queue, and full media-player
 device integration to subsequent R09b+ slices. Global
 `/api/queue/...` is untouched, no priority balance spending, no
@@ -175,7 +174,7 @@ R09b is the **backend + WebSocket** slice for room-scoped vote-to-skip (no front
 
 - In-memory map keyed `skip:{roomSlug}:{songID}` lives in `internal/usecase/roomvote.Interactor`.
 - First vote creates a session; subsequent votes within the 30s window add the user to `VotedBy` (`map[int]bool`).
-- Threshold captured at session creation via `(*RoomWSHub).UniqueConnectedUserIDs(slug)` (de-duplicates by `userID`, so multi-conn same user = one vote weight) using `max(2, n/2)` strict majority with 2-voter minimum.
+- Threshold captured at session creation via `(*RoomWSHub).UniqueConnectedUserIDs(slug)` (de-duplicates by `userID`, so multi-conn same user = one vote weight) using `max(2, n/2 + 1)` strict majority with 2-voter minimum.
 - When `vote_count >= threshold`: session is deleted and the queue advances to the next song via `(*roomqueue.Interactor).SkipVote(ctx, slug, expectedSongID)` — a narrow, **lease-bypassing** method that runs under the existing roomqueue mutex, validates `queue.Songs[queue.CurrentIndex].ID == expectedSongID` before any mutation, then calls `entity.Queue.AdvanceToNext` (which itself refuses to mutate when no next song exists).
 - When a 30s session expires without passing, it is deleted and broadcast as `room_vote_resolved outcome="expired"`. Any subsequent vote on the same (room, song) starts a fresh session.
 - Sessions are never persisted to Postgres.
@@ -185,6 +184,8 @@ R09b is the **backend + WebSocket** slice for room-scoped vote-to-skip (no front
 - `room_vote_updated` — broadcast on every successful vote cast. Payload: `{room_slug, session, actor_user_id, state}`.
 - `room_vote_resolved` — broadcast when a session is deleted. Payload: `{room_slug, session_id, outcome ("passed"|"expired"), state}`. `outcome="passed"` is followed by the existing `room_playback_song_advanced` event with `reason="skip"`.
 - The global `/ws` 16-event inventory is unchanged; these events ride `GET /ws/rooms/{slug}` only.
+
+**Payload sanitisation:** The session embedded in the `room_vote_updated` payload is serialised through a `RoomVoteSessionDTO` that omits `voted_by`. The internal `map[int]bool` of voter IDs stays in-memory only and is NEVER broadcast on the wire; clients receive only the aggregate counters (e.g. `vote_count`, `threshold`, session metadata). `voted_by` is never sent to clients.
 
 ### Resolution invariants
 

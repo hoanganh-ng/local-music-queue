@@ -303,18 +303,61 @@ type RoomPlaybackSongAdvancedData struct {
 	State         *entity.Queue         `json:"state"`
 }
 
+// RoomVoteSessionDTO is the wire-shape of an in-memory room vote
+// session for /ws/rooms/{slug} payloads. It deliberately omits
+// entity.VoteSession.VotedBy (the per-user ballot) so the broadcast
+// surface never leaks which userIDs voted. It mirrors the fields
+// clients need to render a live vote pill: id, type, songID,
+// songTitle, songIndex, voteCount, threshold, createdAt, expiresAt,
+// remainingSeconds.
+type RoomVoteSessionDTO struct {
+	ID               string    `json:"id"`
+	Type             string    `json:"type"`
+	SongID           string    `json:"song_id"`
+	SongTitle        string    `json:"song_title"`
+	SongIndex        int       `json:"song_index"`
+	VoteCount        int       `json:"vote_count"`
+	Threshold        int       `json:"threshold"`
+	CreatedAt        time.Time `json:"created_at"`
+	ExpiresAt        time.Time `json:"expires_at"`
+	RemainingSeconds int       `json:"remaining_seconds"`
+}
+
+// newRoomVoteSessionDTO sanitises an entity.VoteSession for wire
+// transmission. Never returns nil; pass-through when the input is nil
+// so the marshaller always emits the field shape consistently.
+func newRoomVoteSessionDTO(s *entity.VoteSession) *RoomVoteSessionDTO {
+	if s == nil {
+		return nil
+	}
+	return &RoomVoteSessionDTO{
+		ID:               s.ID,
+		Type:             string(s.Type),
+		SongID:           s.SongID,
+		SongTitle:        s.SongTitle,
+		SongIndex:        s.SongIndex,
+		VoteCount:        s.VoteCount(),
+		Threshold:        s.Threshold,
+		CreatedAt:        s.CreatedAt,
+		ExpiresAt:        s.ExpiresAt,
+		RemainingSeconds: s.RemainingSeconds(),
+	}
+}
+
 // RoomVoteUpdatedData is broadcast after every successful vote cast at
 // POST /api/rooms/{slug}/vote/skip. R09b addition; carries the
-// post-cast session snapshot so clients can render live vote counts
-// without polling, plus the server-resolved actor_user_id for
-// attribution and the authoritative post-mutation queue state.
+// post-cast session snapshot (sanitised via RoomVoteSessionDTO — note
+// that VotedBy / actor ballots are intentionally NEVER serialised on
+// this surface) so clients can render live vote counts without
+// polling, plus the server-resolved actor_user_id for attribution and
+// the authoritative post-mutation queue state.
 //
-// The session snapshot itself is JSON-serialisable (it already exposes
-// VotedBy / Threshold / Expiry fields). Fields are intentionally kept
-// flat to mirror the global EventVoteUpdated shape.
+// Fields are intentionally kept flat to mirror the global
+// EventVoteUpdated shape, except Session now points at the DTO so
+// the per-user ballot never crosses the wire.
 type RoomVoteUpdatedData struct {
 	RoomSlug    string                `json:"room_slug"`
-	Session     *entity.VoteSession   `json:"session"`
+	Session     *RoomVoteSessionDTO   `json:"session"`
 	ActorUserID int                   `json:"actor_user_id"`
 	State       *entity.Queue         `json:"state"`
 }

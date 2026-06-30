@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -1086,7 +1087,7 @@ func TestRoomHub_BroadcastRoomVoteUpdated_ReachesRoomClients(t *testing.T) {
 	if env.Data.Session.ID != "skip:alpha:s1" {
 		t.Errorf("expected session.id=skip:alpha:s1, got %q", env.Data.Session.ID)
 	}
-	if env.Data.Session.Type != entity.VoteTypeSkip {
+	if env.Data.Session.Type != string(entity.VoteTypeSkip) {
 		t.Errorf("expected session.type=skip, got %q", env.Data.Session.Type)
 	}
 	if env.Data.Session.SongID != "s1" {
@@ -1101,11 +1102,24 @@ func TestRoomHub_BroadcastRoomVoteUpdated_ReachesRoomClients(t *testing.T) {
 	if env.Data.Session.Threshold != 2 {
 		t.Errorf("expected session.threshold=2, got %d", env.Data.Session.Threshold)
 	}
-	if !env.Data.Session.VotedBy[1] {
-		t.Errorf("expected session.voted_by[1]=true, got %v", env.Data.Session.VotedBy)
+	if env.Data.Session.VoteCount != 1 {
+		t.Errorf("expected session.vote_count=1, got %d", env.Data.Session.VoteCount)
 	}
 	if env.Data.State == nil || len(env.Data.State.Songs) != 1 || env.Data.State.Songs[0].ID != "s1" {
 		t.Errorf("expected post-mutation state with s1, got %#v", env.Data.State)
+	}
+
+	// voted_by must NEVER appear in the WS payload. The session is a
+	// DTO that mirrors the sanitised shape; this guard pins the contract.
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	if bytes.Contains(raw, []byte("voted_by")) {
+		t.Fatalf("payload must not contain voted_by, got %s", string(raw))
+	}
+	if bytes.Contains(raw, []byte("VotedBy")) {
+		t.Fatalf("payload must not contain VotedBy, got %s", string(raw))
 	}
 }
 

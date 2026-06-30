@@ -83,7 +83,7 @@ func TestSetupApp_PostgresDBStaysOpen(t *testing.T) {
 
 	t.Setenv("DATABASE_URL", dsn+"&search_path="+schema)
 
-	mux, _, _, cleanup, err := setupApp()
+	mux, _, _, _, _, cleanup, err := setupApp()
 	if err != nil {
 		t.Fatalf("setupApp failed: %v", err)
 	}

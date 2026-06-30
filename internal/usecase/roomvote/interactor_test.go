@@ -209,7 +209,7 @@ func TestRoomVote_PassingVoteCallsSkipVoteAndPopulatesAdvance(t *testing.T) {
 	fq.members[1] = map[int]bool{42: true, 43: true}
 	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 2}}, 30*time.Second)
 
-	// First vote — threshold = max(2, 2/2) = 2; only 1 vote so not passed.
+	// First vote — threshold = max(2, 2/2 + 1) = 2; only 1 vote so not passed.
 	out1, err := inter.CastSkipVote(context.Background(), "alpha", 42)
 	if err != nil {
 		t.Fatalf("cast1: %v", err)
@@ -552,5 +552,28 @@ func TestRoomVote_ExpireSessionsReturnsExpiredOutcomes(t *testing.T) {
 	}
 	if got := inter.ActiveSession("beta", "song1"); got != nil {
 		t.Errorf("beta session not evicted after ExpireSessions")
+	}
+}
+
+// TestRoomVote_Threshold_StrictMajorityMatrix pins the strict-majority
+// rule: threshold(n) = max(2, n/2 + 1) for n = 1,2,3,4,5.
+//
+// The original draft used max(2, n/2); that gave a tie (not a strict
+// majority) and the Product Owner rejected it. The current rule is
+// max(2, n/2 + 1), which is a strict majority with a 2-voter floor.
+func TestRoomVote_Threshold_StrictMajorityMatrix(t *testing.T) {
+	cases := []struct {
+		n, want int
+	}{
+		{1, 2},
+		{2, 2},
+		{3, 2},
+		{4, 3},
+		{5, 3},
+	}
+	for _, tc := range cases {
+		if got := threshold(tc.n); got != tc.want {
+			t.Errorf("threshold(%d) = %d, want %d", tc.n, got, tc.want)
+		}
 	}
 }

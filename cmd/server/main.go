@@ -45,11 +45,21 @@ func envMode(isLocal bool) string {
 }
 
 func main() {
-	mux, cfg, policy, cleanup, err := setupApp()
+	mux, cfg, policy, roomWSHub, roomVoteInteractor, cleanup, err := setupApp()
 	if err != nil {
 		log.Fatalf("Failed to setup application: %v", err)
 	}
 	defer cleanup()
+
+	// R09b: server-owned expiry runner. Fans out RoomVoteResolved{outcome:"expired"}
+	// for any room vote session that exceeded its 30s expiry window without
+	// reaching a threshold. The adapter lives in cmd/server so
+	// internal/usecase/roomvote stays free of any delivery/ws import.
+	go expiryAdapter{
+		broadcaster: roomWSHub,
+		vote:        roomVoteInteractor,
+		interval:    5 * time.Second,
+	}.run(context.Background())
 
 	// Start Server
 	server := &http.Server{
@@ -74,7 +84,7 @@ func main() {
 	}
 }
 
-func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) {
+func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, *usecaseRoomVote.Interactor, func(), error) {
 	// 1. Load configuration
 	cfg := config.Load()
 	log.Printf("Starting Local Music Queue server on port %s", cfg.Port)
@@ -110,7 +120,7 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 
 	// Parse origin policy
@@ -119,7 +129,7 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 		"APP_ENV":         envMode(cfg.IsLocal),
 	})
 	if perr != nil {
-		return nil, nil, nil, nil, perr
+		return nil, nil, nil, nil, nil, nil, perr
 	}
 	log.Printf("Allowed origins: %v (local=%t)", policy.Allowed, policy.IsLocal)
 
@@ -129,13 +139,14 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	// refuses to start without DATABASE_URL.
 	queueRepo, userRepo, autoQueueRepo, dbHandle, err := initRepositories(cfg)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 	pgRoom := persistence.NewPostgresRoomRepository(dbHandle)
 	pgRoomQueue := persistence.NewPostgresRoomQueueRepository(dbHandle)
-	// roomWSHub is declared as nil here so the cleanup closure below can
-	// reference it safely; the real *ws.RoomWSHub is constructed later in
-	// the delivery wiring step (after the auth interactor exists).
+	// roomWSHub is constructed later in the delivery wiring step (after
+	// the auth interactor exists). The cleanup closure below references
+	// it via a separate var so the placeholder stays typed-nil-safe until
+	// the real hub is assigned.
 	var roomWSHub *ws.RoomWSHub
 	// dbHandle is non-nil only for the PostgreSQL path. The *sql.DB must stay
 	// open for the entire server lifetime, so its Close is owned by main via
@@ -155,7 +166,7 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	// `go run ./cmd/server` and CI. ErrNoChange is not an error.
 	if err := persistence.RunEmbeddedMigrationsUp(dbHandle); err != nil {
 		cleanup()
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, err
 	}
 
 	ytService := youtube.NewYTDLPService(cfg.YTDLPPath)
@@ -177,15 +188,6 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	roomInteractor := usecaseRoom.NewInteractor(pgRoom)
 	roomQueueInteractor := usecaseRoomQueue.NewInteractor(pgRoom, pgRoomQueue, ytService)
 	roomQueueHandlers := delivery.NewRoomQueueHandlers(roomQueueInteractor, authInteractor)
-	// R09b: wire the roomvote interactor. The vote interactor does NOT
-	// receive a broadcaster seam — it returns Outcome structs that the
-	// HTTP handler fans out via the existing roomqueue.Broadcaster (which
-	// is wired to the per-room WS hub). The Resolver is the per-room
-	// hub's UniqueConnectedUserIDs(slug) so the threshold is captured
-	// from the live connection set at session creation. 30s expiry mirrors
-	// the global vote package.
-	roomVoteInteractor := usecaseRoomVote.NewInteractor(roomQueueInteractor, roomWSHub, 30*time.Second)
-	roomVoteHandlers := delivery.NewRoomVoteHandlers(roomVoteInteractor, roomQueueInteractor)
 	playerLeaseInteractor := usecaseRoom.NewPlayerLeaseInteractor(persistence.NewPostgresPlayerLeaseRepository(dbHandle), pgRoom, dbHandle, usecaseRoom.DefaultLeaseDuration, usecaseRoom.DefaultLeaseGrace)
 
 	// Wire auto-queue into queue interactor
@@ -257,6 +259,17 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	// at the use-case layer. PlayerLeaseInteractor implements
 	// room.PlaybackLeaseAuthorizer directly.
 	roomQueueInteractor.SetLeaseAuthorizer(playerLeaseInteractor)
+
+	// R09b: wire the roomvote interactor AFTER the real *ws.RoomWSHub is
+	// assigned. The vote interactor does NOT receive a broadcaster seam
+	// — it returns Outcome structs that the HTTP handler fans out via
+	// the existing roomqueue.Broadcaster (which is wired to the per-room
+	// WS hub). The Resolver is the per-room hub's
+	// UniqueConnectedUserIDs(slug) so the threshold is captured from
+	// the live connection set at session creation. 30s expiry mirrors
+	// the global vote package.
+	roomVoteInteractor := usecaseRoomVote.NewInteractor(roomQueueInteractor, roomWSHub, 30*time.Second)
+	roomVoteHandlers := delivery.NewRoomVoteHandlers(roomVoteInteractor, roomQueueInteractor)
 
 	// Wire auto-queue broadcaster to WS hub
 	autoQueueInteractor.SetBroadcaster(hub.Broadcast)
@@ -441,7 +454,7 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	// policy as the global /ws endpoint through roomWSHub.originChecker.
 	mux.HandleFunc("/ws/rooms/{slug}", roomWSHub.RegisterHandler)
 
-	return mux, cfg, policy, cleanup, nil
+	return mux, cfg, policy, roomWSHub, roomVoteInteractor, cleanup, nil
 }
 
 // initRepositories opens the PostgreSQL backend. The R03 migration removed
@@ -547,4 +560,64 @@ func (b hubArchiveBroadcaster) BroadcastRoomArchived(ev usecaseRoom.RoomArchived
 		Reason:     ev.Reason,
 		ArchivedAt: ev.ArchivedAt,
 	})
+}
+
+// expiryAdapter is the server-owned seam that periodically calls
+// (*roomvote.Interactor).ExpireSessions and broadcasts the resulting
+// resolutions on /ws/rooms/{slug}. It is defined here (cmd/server)
+// so internal/usecase/roomvote stays free of any delivery/ws import.
+// The interface contract is a subset of roomvote.Interactor; we
+// accept an interface so tests can inject a stub without booting the
+// real interactor.
+type expiryAdapter struct {
+	broadcaster interface {
+		BroadcastRoomVoteResolved(slug, sessionID, outcome string, state *entity.Queue)
+	}
+	vote     votingExpireRunner
+	interval time.Duration
+}
+
+// runOnce performs a single expiry sweep and fans out the resolved
+// sessions. Failure is logged and ignored — expiry is best-effort.
+func (a expiryAdapter) runOnce(ctx context.Context) {
+	out, err := a.vote.ExpireSessions(ctx)
+	if err != nil {
+		log.Printf("roomvote: ExpireSessions failed: %v", err)
+		return
+	}
+	for _, e := range out {
+		if e.Session == nil {
+			continue
+		}
+		a.broadcaster.BroadcastRoomVoteResolved(e.RoomSlug, e.SessionID, "expired", e.StateQueue)
+	}
+}
+
+// run blocks on the supplied ticker, calling runOnce at every tick
+// until ctx is cancelled. The ticker interval defaults to 5 seconds
+// when zero, which is a defensive bounds for the 30-second expiry
+// window on room vote sessions.
+func (a expiryAdapter) run(ctx context.Context) {
+	interval := a.interval
+	if interval == 0 {
+		interval = 5 * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			a.runOnce(ctx)
+		}
+	}
+}
+
+// votingExpireRunner is the subset of *roomvote.Interactor that the
+// adapter needs. Declared here so the adapter test can inject a
+// fake without booting the real interactor or depending on the
+// internal concrete type beyond its public signature.
+type votingExpireRunner interface {
+	ExpireSessions(ctx context.Context) ([]usecaseRoomVote.ExpiredOutcome, error)
 }

@@ -402,7 +402,7 @@ func (h *RoomWSHub) BroadcastRoomPlaybackSongAdvanced(roomSlug, reason string, p
 
 func (h *RoomWSHub) BroadcastRoomVoteUpdated(roomSlug string, session *entity.VoteSession, actorUserID int, state *entity.Queue) {
 	h.dispatch(roomSlug, EventRoomVoteUpdated, RoomVoteUpdatedData{
-		RoomSlug: roomSlug, Session: session, ActorUserID: actorUserID, State: state,
+		RoomSlug: roomSlug, Session: newRoomVoteSessionDTO(session), ActorUserID: actorUserID, State: state,
 	})
 }
 

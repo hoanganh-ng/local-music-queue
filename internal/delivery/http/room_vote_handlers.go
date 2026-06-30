@@ -58,7 +58,10 @@ func NewRoomVoteHandlers(vote *roomvote.Interactor, queue *roomqueue.Interactor)
 //	400 Bad Request — malformed slug.
 //	401 Unauthorized — defense-in-depth when actorUserID == 0.
 //	403 Forbidden — actor is not an active member of the room.
-//	404 Not Found — room slug unknown OR queue has no current song.
+//	404 Not Found — room slug unknown.
+//	400 Bad Request — malformed slug OR the queue has no current
+//	  song (empty queue). The room itself is valid; the request is
+//	  not actionable until the queue has a current song.
 //	409 Conflict — room archived, duplicate vote, or stale session
 //	  (the queue advanced under the vote).
 //	500 Internal Server Error — anything else.
@@ -128,10 +131,10 @@ func (h *RoomVoteHandlers) HandleCastRoomVoteSkip(w http.ResponseWriter, r *http
 // surface so clients see consistent semantics across the migration.
 func writeRoomVoteError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, room.ErrInvalidSlug):
-		http.Error(w, err.Error(), http.StatusBadRequest)
-	case errors.Is(err, room.ErrRoomNotFound),
+	case errors.Is(err, room.ErrInvalidSlug),
 		errors.Is(err, entity.ErrNoCurrentSong):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, room.ErrRoomNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, room.ErrArchived):
 		http.Error(w, err.Error(), http.StatusConflict)

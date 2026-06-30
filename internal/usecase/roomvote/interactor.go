@@ -3,7 +3,9 @@
 // single-instance only, never persisted. Threshold is captured at
 // session creation via the supplied Resolver (sourced from the per-room
 // WS hub's UniqueConnectedUserIDs) using the strict-majority rule
-// max(2, n/2).
+// max(2, n/2 + 1) — a true majority (n = 3 → 2, n = 4 → 3, n = 5 → 3)
+// with a 2-voter floor so a lone voter in an empty room can never pass
+// alone.
 //
 // The interactor does NOT broadcast — successful vote casts and
 // resolutions return outcome objects that the handler fans out via the
@@ -337,10 +339,13 @@ func hasSlugPrefix(key, slug string) bool {
 }
 
 // threshold returns the strict-majority threshold for a unique
-// connected user count. Falls back to 2 when n <= 2 (server-
-// misconfigured, empty room, or resolver nil).
+// connected user count: max(2, n/2 + 1). The +1 makes the rule a
+// strict majority (a tie is not enough); the 2 floor stops a single
+// voter in an empty room from passing alone. Applied at session
+// creation; flat floor for n <= 2 (server-misconfigured, empty room,
+// or resolver nil).
 func threshold(n int) int {
-	t := n / 2
+	t := n/2 + 1
 	if t < 2 {
 		return 2
 	}

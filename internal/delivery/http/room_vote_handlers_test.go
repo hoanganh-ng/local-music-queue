@@ -84,7 +84,7 @@ func (b *voteTestBroadcaster) BroadcastRoomVoteResolved(slug, sessionID, outcome
 
 // fixedResolver is a deterministic roomvote.Resolver that always
 // returns the supplied unique-user count. Tests use it to pin the
-// threshold (max(2, count/2)) at session creation time.
+// threshold (max(2, count/2 + 1)) at session creation time.
 type fixedResolver struct{ count int }
 
 func (f fixedResolver) UniqueConnectedUserIDs(_ string) int { return f.count }
@@ -109,7 +109,7 @@ func (allowAllLeaseAuthorizer) RequireActiveLeaseHolder(_ context.Context, _ str
 //
 // The first memberID is the host; the rest are guests. The threshold
 // is derived from len(memberIDs) via the fixedResolver; the interactor
-// uses threshold = max(2, n/2).
+// uses threshold = max(2, n/2 + 1).
 func voteRoomFixture(t *testing.T, slug string, memberIDs []int) (*RoomVoteHandlers, *sql.DB, *roomqueue.Interactor, func()) {
 	t.Helper()
 	if len(memberIDs) == 0 {
@@ -392,14 +392,16 @@ func TestRoomVote_ArchivedRoom_Returns409(t *testing.T) {
 	}
 }
 
-// TestRoomVote_NoCurrentSong_Returns404 pins the no-current-song
-// path: an empty queue (CurrentIndex stays at -1) must return 404
-// with entity.ErrNoCurrentSong mapped from the interactor.
+// TestRoomVote_NoCurrentSong_Returns400 pins the no-current-song
+// path: an empty queue (CurrentIndex stays at -1) must return 400
+// Bad Request with entity.ErrNoCurrentSong mapped from the
+// interactor. The room slug itself is valid; the queue state is what
+// makes the request non-actionable.
 //
 // We seed a NEW room with no songs by reusing voteRoomFixture's
 // builder, then overwriting the queue with an empty queue via the
 // repo. We don't use a separate helper to keep the diff small.
-func TestRoomVote_NoCurrentSong_Returns404(t *testing.T) {
+func TestRoomVote_NoCurrentSong_Returns400(t *testing.T) {
 	rvh, db, _, cleanup := voteRoomFixture(t, "rv-nocs", []int{200, 300})
 	defer cleanup()
 	bc := &voteTestBroadcaster{}
@@ -416,13 +418,13 @@ func TestRoomVote_NoCurrentSong_Returns404(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rv-nocs/vote/skip", bytes.NewReader([]byte(`{}`)))
 	rr := httptest.NewRecorder()
 	rvh.HandleCastRoomVoteSkip(rr, req, "rv-nocs", 200)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("no current song: expected 404, got %d body=%s", rr.Code, rr2Body(t, rr))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("no current song: expected 400, got %d body=%s", rr.Code, rr2Body(t, rr))
 	}
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 	if got := len(bc.voteUpdated); got != 0 {
-		t.Errorf("expected 0 broadcasts on 404, got %d", got)
+		t.Errorf("expected 0 broadcasts on 400, got %d", got)
 	}
 }
 
@@ -435,6 +437,9 @@ func TestRoomVote_NoCurrentSong_Returns404(t *testing.T) {
 //   - entity.ErrAlreadyVoted    → 409 (covered inline in the
 //                                  duplicate test, asserted here too).
 //   - room.ErrInvalidSlug       → 400.
+//   - entity.ErrNoCurrentSong   → 400 (empty queue / no current song;
+//                                  covered inline in the no-current-song
+//                                  test, asserted here too).
 //
 // The handler never broadcasts on error paths, so we wire a
 // voteTestBroadcaster to confirm no broadcasts leak.
@@ -450,6 +455,7 @@ func TestRoomVote_WriteRoomVoteError_MapsStaleAndExpired(t *testing.T) {
 		{"expired race", entity.ErrVoteSessionExpired, http.StatusGone},
 		{"already voted", entity.ErrAlreadyVoted, http.StatusConflict},
 		{"invalid slug", room.ErrInvalidSlug, http.StatusBadRequest},
+		{"no current song", entity.ErrNoCurrentSong, http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
