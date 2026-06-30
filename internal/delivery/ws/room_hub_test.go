@@ -857,3 +857,330 @@ func TestRoomHub_BroadcastPlaybackSongAdvanced_DeliversEnvelopeAndSeq(t *testing
 		t.Errorf("expected post-mutation state with CurrentIndex=1, got %#v", env.Data.State)
 	}
 }
+
+// --- R09b hub-observability + vote broadcast envelopes ---
+//
+// The four tests below pin the contracts that the R09b vote-to-skip
+// backend relies on the per-room hub for:
+//
+//   - UniqueConnectedUserIDs: de-duplicates multi-tab users (so the
+//     vote interactor derives threshold from distinct connected users,
+//     not raw connection count).
+//   - BroadcastRoomVoteUpdated: reaches room clients after a vote cast.
+//   - BroadcastRoomVoteResolved: reaches room clients after a vote
+//     session ends (passed or expired).
+//
+// All tests use the same stub resolver / dialRoomWS / session
+// resolver pattern as the existing R07b/R07d/R09a tests.
+
+// waitFor polls fn until it returns true or the deadline elapses.
+// Returns true on success, false on timeout.
+func waitFor(t *testing.T, deadline time.Duration, fn func() bool) bool {
+	t.Helper()
+	timeout := time.Now().Add(deadline)
+	for time.Now().Before(timeout) {
+		if fn() {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fn()
+}
+
+// TestRoomHub_UniqueConnectedUserIDs_DeDuplicatesMultiTabUsers asserts
+// that UniqueConnectedUserIDs counts DISTINCT user ids, not raw
+// connections: a second tab from an already-connected user must NOT
+// bump the count, and closing the original tab while the second tab
+// remains open must NOT drop the count.
+func TestRoomHub_UniqueConnectedUserIDs_DeDuplicatesMultiTabUsers(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("alpha", &entity.Room{ID: 11, Slug: "alpha", Status: entity.RoomStatusActive})
+	resolver.SetQueue(11, &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "T1"}}})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{
+			"u1": {ID: 101, Role: entity.RoleGuest, DisplayName: "U1"},
+			"u2": {ID: 102, Role: entity.RoleGuest, DisplayName: "U2"},
+			"u3": {ID: 103, Role: entity.RoleGuest, DisplayName: "U3"},
+		},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	c1 := dialRoomWS(t, server, "alpha", "u1")
+	defer c1.Close()
+	c2 := dialRoomWS(t, server, "alpha", "u2")
+	defer c2.Close()
+	c3 := dialRoomWS(t, server, "alpha", "u3")
+	defer c3.Close()
+
+	// Drain initial sync frames so the read pumps are unblocked.
+	for _, c := range []*websocket.Conn{c1, c2, c3} {
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, _, err := c.ReadMessage(); err != nil {
+			t.Fatalf("drain initial sync: %v", err)
+		}
+	}
+
+	// Three distinct users connected → count must reach 3.
+	if !waitFor(t, 2*time.Second, func() bool {
+		return hub.UniqueConnectedUserIDs("alpha") == 3
+	}) {
+		t.Fatalf("expected UniqueConnectedUserIDs=3 after 3 distinct users, got %d", hub.UniqueConnectedUserIDs("alpha"))
+	}
+
+	// Second tab from u1 — count MUST stay at 3 (de-duplicated).
+	c1b := dialRoomWS(t, server, "alpha", "u1")
+	defer c1b.Close()
+	c1b.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := c1b.ReadMessage(); err != nil {
+		t.Fatalf("drain initial sync (u1 second tab): %v", err)
+	}
+	if !waitFor(t, 2*time.Second, func() bool {
+		// Wait until both u1 tabs are registered before checking the
+		// de-dup property — otherwise we might observe count==3 because
+		// the second tab hasn't been registered yet, not because of
+		// de-dup. We know it's registered when client count for u1
+		// hits 2.
+		hub.mu.Lock()
+		n := len(hub.clients["alpha"])
+		hub.mu.Unlock()
+		if n != 4 {
+			return false
+		}
+		return hub.UniqueConnectedUserIDs("alpha") == 3
+	}) {
+		hub.mu.Lock()
+		n := len(hub.clients["alpha"])
+		hub.mu.Unlock()
+		t.Fatalf("expected UniqueConnectedUserIDs=3 after second u1 tab (de-dup); got count=%d, raw clients=%d", hub.UniqueConnectedUserIDs("alpha"), n)
+	}
+
+	// Close the original u1 tab — u1 still has c1b connected, so the
+	// distinct user count MUST stay at 3.
+	c1.Close()
+	if !waitFor(t, 2*time.Second, func() bool {
+		hub.mu.Lock()
+		n := len(hub.clients["alpha"])
+		hub.mu.Unlock()
+		if n != 3 {
+			return false
+		}
+		return hub.UniqueConnectedUserIDs("alpha") == 3
+	}) {
+		hub.mu.Lock()
+		n := len(hub.clients["alpha"])
+		hub.mu.Unlock()
+		t.Fatalf("expected UniqueConnectedUserIDs=3 after closing original u1 tab; got count=%d, raw clients=%d", hub.UniqueConnectedUserIDs("alpha"), n)
+	}
+}
+
+// TestRoomHub_UniqueConnectedUserIDs_NoClientsReturnsZero asserts the
+// empty-room floor: a fresh hub with no clients returns 0, and an
+// unknown-slug lookup on a hub with no clients also returns 0.
+func TestRoomHub_UniqueConnectedUserIDs_NoClientsReturnsZero(t *testing.T) {
+	resolver := newStubRoomResolver()
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+
+	if got := hub.UniqueConnectedUserIDs("alpha"); got != 0 {
+		t.Errorf("expected UniqueConnectedUserIDs(alpha)=0 on fresh hub, got %d", got)
+	}
+	if got := hub.UniqueConnectedUserIDs("unknown-slug"); got != 0 {
+		t.Errorf("expected UniqueConnectedUserIDs(unknown-slug)=0 on fresh hub, got %d", got)
+	}
+}
+
+// TestRoomHub_BroadcastRoomVoteUpdated_ReachesRoomClients pins the
+// room_vote_updated envelope: type string, payload field shape, and
+// hub-loop seq invariant (the broadcast's seq is strictly greater than
+// the initial sync's seq for the same connection).
+func TestRoomHub_BroadcastRoomVoteUpdated_ReachesRoomClients(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("alpha", &entity.Room{ID: 11, Slug: "alpha", Status: entity.RoomStatusActive})
+	resolver.SetQueue(11, &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "S1"}}})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{"valid": {ID: 1, Role: entity.RoleHost, DisplayName: "H"}},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	conn := dialRoomWS(t, server, "alpha", "valid")
+	defer conn.Close()
+
+	// Drain the initial sync; remember its seq.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, syncData, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read initial sync: %v", err)
+	}
+	var syncEnv struct {
+		Type   string `json:"type"`
+		SeqNum int64  `json:"seq_num"`
+	}
+	if err := json.Unmarshal(syncData, &syncEnv); err != nil {
+		t.Fatalf("unmarshal sync: %v", err)
+	}
+	if syncEnv.Type != EventRoomQueueSync {
+		t.Fatalf("expected first frame %q, got %q", EventRoomQueueSync, syncEnv.Type)
+	}
+
+	now := time.Now()
+	session := &entity.VoteSession{
+		ID:        "skip:alpha:s1",
+		Type:      entity.VoteTypeSkip,
+		SongID:    "s1",
+		SongTitle: "S1",
+		SongIndex: 0,
+		VotedBy:   map[int]bool{1: true},
+		Threshold: 2,
+		CreatedAt: now,
+		ExpiresAt: now.Add(30 * time.Second),
+	}
+	state := &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "S1"}}}
+	hub.BroadcastRoomVoteUpdated("alpha", session, 1, state)
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read vote-updated broadcast: %v", err)
+	}
+	var env struct {
+		Type   string                 `json:"type"`
+		SeqNum int64                  `json:"seq_num"`
+		Data   RoomVoteUpdatedData    `json:"data"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal vote-updated: %v", err)
+	}
+	if env.Type != EventRoomVoteUpdated {
+		t.Fatalf("expected type %q, got %q", EventRoomVoteUpdated, env.Type)
+	}
+	if env.SeqNum <= syncEnv.SeqNum {
+		t.Fatalf("vote-updated seq (%d) must be strictly greater than sync seq (%d)", env.SeqNum, syncEnv.SeqNum)
+	}
+	if env.Data.RoomSlug != "alpha" {
+		t.Errorf("expected room_slug=alpha, got %q", env.Data.RoomSlug)
+	}
+	if env.Data.ActorUserID != 1 {
+		t.Errorf("expected actor_user_id=1, got %d", env.Data.ActorUserID)
+	}
+	if env.Data.Session == nil {
+		t.Fatalf("expected session to be non-nil, got nil")
+	}
+	if env.Data.Session.ID != "skip:alpha:s1" {
+		t.Errorf("expected session.id=skip:alpha:s1, got %q", env.Data.Session.ID)
+	}
+	if env.Data.Session.Type != entity.VoteTypeSkip {
+		t.Errorf("expected session.type=skip, got %q", env.Data.Session.Type)
+	}
+	if env.Data.Session.SongID != "s1" {
+		t.Errorf("expected session.song_id=s1, got %q", env.Data.Session.SongID)
+	}
+	if env.Data.Session.SongTitle != "S1" {
+		t.Errorf("expected session.song_title=S1, got %q", env.Data.Session.SongTitle)
+	}
+	if env.Data.Session.SongIndex != 0 {
+		t.Errorf("expected session.song_index=0, got %d", env.Data.Session.SongIndex)
+	}
+	if env.Data.Session.Threshold != 2 {
+		t.Errorf("expected session.threshold=2, got %d", env.Data.Session.Threshold)
+	}
+	if !env.Data.Session.VotedBy[1] {
+		t.Errorf("expected session.voted_by[1]=true, got %v", env.Data.Session.VotedBy)
+	}
+	if env.Data.State == nil || len(env.Data.State.Songs) != 1 || env.Data.State.Songs[0].ID != "s1" {
+		t.Errorf("expected post-mutation state with s1, got %#v", env.Data.State)
+	}
+}
+
+// TestRoomHub_BroadcastRoomVoteResolved_ReachesRoomClients pins the
+// room_vote_resolved envelope: type string, payload field shape, and
+// hub-loop seq invariant.
+func TestRoomHub_BroadcastRoomVoteResolved_ReachesRoomClients(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("alpha", &entity.Room{ID: 11, Slug: "alpha", Status: entity.RoomStatusActive})
+	resolver.SetQueue(11, &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "S1"}}})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{"valid": {ID: 1, Role: entity.RoleHost, DisplayName: "H"}},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	conn := dialRoomWS(t, server, "alpha", "valid")
+	defer conn.Close()
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, syncData, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read initial sync: %v", err)
+	}
+	var syncEnv struct {
+		Type   string `json:"type"`
+		SeqNum int64  `json:"seq_num"`
+	}
+	if err := json.Unmarshal(syncData, &syncEnv); err != nil {
+		t.Fatalf("unmarshal sync: %v", err)
+	}
+	if syncEnv.Type != EventRoomQueueSync {
+		t.Fatalf("expected first frame %q, got %q", EventRoomQueueSync, syncEnv.Type)
+	}
+
+	state := &entity.Queue{Songs: []entity.Song{{ID: "s2", Title: "S2"}}}
+	hub.BroadcastRoomVoteResolved("alpha", "skip:alpha:s1", "passed", state)
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read vote-resolved broadcast: %v", err)
+	}
+	var env struct {
+		Type   string                 `json:"type"`
+		SeqNum int64                  `json:"seq_num"`
+		Data   RoomVoteResolvedData   `json:"data"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal vote-resolved: %v", err)
+	}
+	if env.Type != EventRoomVoteResolved {
+		t.Fatalf("expected type %q, got %q", EventRoomVoteResolved, env.Type)
+	}
+	if env.SeqNum <= syncEnv.SeqNum {
+		t.Fatalf("vote-resolved seq (%d) must be strictly greater than sync seq (%d)", env.SeqNum, syncEnv.SeqNum)
+	}
+	if env.Data.RoomSlug != "alpha" {
+		t.Errorf("expected room_slug=alpha, got %q", env.Data.RoomSlug)
+	}
+	if env.Data.SessionID != "skip:alpha:s1" {
+		t.Errorf("expected session_id=skip:alpha:s1, got %q", env.Data.SessionID)
+	}
+	if env.Data.Outcome != "passed" {
+		t.Errorf("expected outcome=passed, got %q", env.Data.Outcome)
+	}
+	if env.Data.State == nil || len(env.Data.State.Songs) != 1 || env.Data.State.Songs[0].ID != "s2" {
+		t.Errorf("expected post-mutation state with s2, got %#v", env.Data.State)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	delivery "local-music-queue/internal/delivery/http"
 	"local-music-queue/internal/delivery/origin"
@@ -27,6 +28,7 @@ import (
 	usecaseQueue "local-music-queue/internal/usecase/queue"
 	usecaseRoom "local-music-queue/internal/usecase/room"
 	usecaseRoomQueue "local-music-queue/internal/usecase/roomqueue"
+	usecaseRoomVote "local-music-queue/internal/usecase/roomvote"
 	usecaseVote "local-music-queue/internal/usecase/vote"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -175,6 +177,15 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	roomInteractor := usecaseRoom.NewInteractor(pgRoom)
 	roomQueueInteractor := usecaseRoomQueue.NewInteractor(pgRoom, pgRoomQueue, ytService)
 	roomQueueHandlers := delivery.NewRoomQueueHandlers(roomQueueInteractor, authInteractor)
+	// R09b: wire the roomvote interactor. The vote interactor does NOT
+	// receive a broadcaster seam — it returns Outcome structs that the
+	// HTTP handler fans out via the existing roomqueue.Broadcaster (which
+	// is wired to the per-room WS hub). The Resolver is the per-room
+	// hub's UniqueConnectedUserIDs(slug) so the threshold is captured
+	// from the live connection set at session creation. 30s expiry mirrors
+	// the global vote package.
+	roomVoteInteractor := usecaseRoomVote.NewInteractor(roomQueueInteractor, roomWSHub, 30*time.Second)
+	roomVoteHandlers := delivery.NewRoomVoteHandlers(roomVoteInteractor, roomQueueInteractor)
 	playerLeaseInteractor := usecaseRoom.NewPlayerLeaseInteractor(persistence.NewPostgresPlayerLeaseRepository(dbHandle), pgRoom, dbHandle, usecaseRoom.DefaultLeaseDuration, usecaseRoom.DefaultLeaseGrace)
 
 	// Wire auto-queue into queue interactor
@@ -392,6 +403,22 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	// (not just at the handler boundary). The matching per-room
 	// WebSocket events (room_playback_*) ride /ws/rooms/{slug} only;
 	// the global /ws 16-event inventory is unchanged.
+	//
+	// R09b: room vote-to-skip. POST /api/rooms/{slug}/vote/skip sits
+	// behind roomAuth (bearer token) and is restricted to active room
+	// members (any role); it BYPASSES the player-lease holder rule by
+	// design. The vote session state lives in a new
+	// internal/usecase/roomvote package: in-memory, room-scoped,
+	// current-song-scoped, 30-second expiry, single-instance only,
+	// never persisted. Threshold is captured at session creation via
+	// (*RoomWSHub).UniqueConnectedUserIDs(slug), which de-duplicates
+	// multi-tab connections by userID. On a passed vote the queue
+	// advances to the next song via the existing roomqueue mutex and
+	// the matching per-room WebSocket events (room_vote_updated +
+	// room_vote_resolved + room_playback_song_advanced with reason
+	// "skip") ride /ws/rooms/{slug} only. The global /ws 16-event
+	// inventory, global /api/vote/..., global /api/queue/...,
+	// priority balances, and auto-queue are all unchanged.
 	mux.HandleFunc("POST /api/rooms/{slug}/playback/status", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomQueueHandlers.HandleSetRoomPlaybackStatus(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
@@ -403,6 +430,9 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	}))
 	mux.HandleFunc("POST /api/rooms/{slug}/playback/ended", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomQueueHandlers.HandleRoomSongEnded(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("POST /api/rooms/{slug}/vote/skip", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomVoteHandlers.HandleCastRoomVoteSkip(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
 
 	// WebSocket

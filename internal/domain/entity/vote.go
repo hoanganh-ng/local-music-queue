@@ -89,6 +89,13 @@ func (v *VoteSession) IsExpired() bool {
 	return time.Now().After(v.ExpiresAt)
 }
 
+// IsExpiredAt reports whether the session expired at the supplied
+// time. Used by packages that drive their own clock (the roomvote
+// interactor). Equivalent semantics to IsExpired() but parameterised.
+func (v *VoteSession) IsExpiredAt(t time.Time) bool {
+	return !t.Before(v.ExpiresAt)
+}
+
 // RemainingSeconds returns the number of seconds until expiry
 func (v *VoteSession) RemainingSeconds() int {
 	remaining := int(time.Until(v.ExpiresAt).Seconds())

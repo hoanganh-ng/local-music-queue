@@ -393,6 +393,25 @@ func (h *RoomWSHub) BroadcastRoomPlaybackSongAdvanced(roomSlug, reason string, p
 	})
 }
 
+// --- R09b vote broadcast methods ---
+//
+// Follow the same dispatch pattern as the R07b/R07d/R09a broadcasters:
+// dispatch() does NOT allocate seq; the hub loop stamps seq on
+// dequeue. Adding them does not change the global /ws 16-event
+// inventory — they ride the per-room endpoint only.
+
+func (h *RoomWSHub) BroadcastRoomVoteUpdated(roomSlug string, session *entity.VoteSession, actorUserID int, state *entity.Queue) {
+	h.dispatch(roomSlug, EventRoomVoteUpdated, RoomVoteUpdatedData{
+		RoomSlug: roomSlug, Session: session, ActorUserID: actorUserID, State: state,
+	})
+}
+
+func (h *RoomWSHub) BroadcastRoomVoteResolved(roomSlug string, sessionID, outcome string, state *entity.Queue) {
+	h.dispatch(roomSlug, EventRoomVoteResolved, RoomVoteResolvedData{
+		RoomSlug: roomSlug, SessionID: sessionID, Outcome: outcome, State: state,
+	})
+}
+
 // --- RegisterHandler ---
 
 // RegisterHandler handles GET /ws/rooms/{slug}?session_token=<opaque>.
@@ -518,6 +537,37 @@ func (h *RoomWSHub) sendToClient(cs *roomClientState, msgType string, data inter
 	if err := cs.writeMessage(websocket.TextMessage, raw); err != nil {
 		log.Printf("room ws: sync write failed: %v", err)
 	}
+}
+
+// UniqueConnectedUserIDs returns the count of distinct user IDs
+// currently connected to the room via the per-room hub. Multiple
+// connections from the same user (e.g. two browser tabs) collapse to
+// one. Used by the R09b vote interactor to derive the strict-majority
+// vote threshold at session creation.
+//
+// Returns 0 when the hub has no clients in the room (or no clients
+// yet). The vote interactor treats a zero unique-user-count as
+// "threshold=2" (so even one connected user can never pass a vote
+// alone, matching the global strict-majority rule with a 2-voter
+// floor).
+//
+// The set is read under h.mu so concurrent register/unregister cases
+// cannot interleave with the snapshot.
+func (h *RoomWSHub) UniqueConnectedUserIDs(roomSlug string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	conns, ok := h.clients[roomSlug]
+	if !ok {
+		return 0
+	}
+	seen := make(map[int]struct{}, len(conns))
+	for _, cs := range conns {
+		if cs == nil || cs.userID == 0 {
+			continue
+		}
+		seen[cs.userID] = struct{}{}
+	}
+	return len(seen)
 }
 
 // readPump detects disconnects. R07b room WS is read-only for clients —

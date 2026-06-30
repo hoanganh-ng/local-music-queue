@@ -1,11 +1,6 @@
 # R09 – Player control semantics
 
-**Status:** R09 split into R09a (active / in-progress on `dev`) and
-R09b+ (planned, deferred). R09a is the lease-aware direct-control slice
-described in *Implementation summary (R09a)* below. R09b+ carries the
-remaining player-control semantics: vote-to-skip, volume, prev, room
-auto-queue, and full media-player device integration. The full R09
-sprint closure requires both the R09a slice and the R09b+ slices.
+**Status:** R09 split into R09a, R09b (vote-to-skip), and R09c+ (volume/prev/room auto-queue/full device integration — still deferred). R09a is implemented on `dev`; closure pass pending Product Owner acceptance (see *Implementation summary (R09a)*). R09b is the active in-progress slice; it adds the room-scoped vote-to-skip backend contract (see *Implementation summary (R09b)*). The remaining slices (volume, prev, room auto-queue, full media-player device integration) are deferred to future sprints.
 
 **Sprint name:** Player control semantics
 
@@ -167,3 +162,40 @@ relational queue rows, no mutation of the global `queueState` /
 `currentUser` / `voteSessions` / `autoQueueConfig` from room events,
 and per-room seq allocation remains hub-loop owned (`dispatch()` does
 not allocate seq).
+
+## Implementation summary (R09b)
+
+R09b is the **backend + WebSocket** slice for room-scoped vote-to-skip (no frontend UI; matches R09a's scope). It adds one HTTP mutation and three additive per-room WebSocket events without changing global queue behavior, global vote thresholds, priority balances, or auto-queue.
+
+### HTTP
+
+- `POST /api/rooms/{slug}/vote/skip` — behind `makeRoomActor` (bearer token). Empty body (or `{}`); server resolves `actor_user_id` from `actorFromCtx`. Any active room member (host / admin / guest) may cast one vote for the current song. Wire shape (e.g. body-supplied `user_id`) is ignored.
+
+### Vote session state machine
+
+- In-memory map keyed `skip:{roomSlug}:{songID}` lives in `internal/usecase/roomvote.Interactor`.
+- First vote creates a session; subsequent votes within the 30s window add the user to `VotedBy` (`map[int]bool`).
+- Threshold captured at session creation via `(*RoomWSHub).UniqueConnectedUserIDs(slug)` (de-duplicates by `userID`, so multi-conn same user = one vote weight) using `max(2, n/2)` strict majority with 2-voter minimum.
+- When `vote_count >= threshold`: session is deleted and the queue advances to the next song via `(*roomqueue.Interactor).SkipVote(ctx, slug, expectedSongID)` — a narrow, **lease-bypassing** method that runs under the existing roomqueue mutex, validates `queue.Songs[queue.CurrentIndex].ID == expectedSongID` before any mutation, then calls `entity.Queue.AdvanceToNext` (which itself refuses to mutate when no next song exists).
+- When a 30s session expires without passing, it is deleted and broadcast as `room_vote_resolved outcome="expired"`. Any subsequent vote on the same (room, song) starts a fresh session.
+- Sessions are never persisted to Postgres.
+
+### Per-room WebSocket events
+
+- `room_vote_updated` — broadcast on every successful vote cast. Payload: `{room_slug, session, actor_user_id, state}`.
+- `room_vote_resolved` — broadcast when a session is deleted. Payload: `{room_slug, session_id, outcome ("passed"|"expired"), state}`. `outcome="passed"` is followed by the existing `room_playback_song_advanced` event with `reason="skip"`.
+- The global `/ws` 16-event inventory is unchanged; these events ride `GET /ws/rooms/{slug}` only.
+
+### Resolution invariants
+
+- `SkipVote` checks `expectedSongID == queue.Songs[queue.CurrentIndex].ID` BEFORE mutating. On mismatch (stale session — song already advanced by another path) the interactor returns `ErrStaleSkipVote` and the queue is NOT mutated, no `room_playback_song_advanced` is broadcast.
+- `entity.Queue.AdvanceToNext` is unchanged; it still refuses to mutate when no next song exists.
+- On resolved-but-no-next-song, `SkipVote` returns `ErrNoNextSong` and broadcasts `room_vote_resolved outcome="passed"` with the unchanged queue state — the existing lease-only skip path already handles no-next-song; the vote path simply surfaces it cleanly.
+
+### Out of scope (explicit non-goals)
+
+- No global `/api/vote/skip` change (R05 contract preserved).
+- No priority-balance spend.
+- No auto-queue trigger.
+- No Docker/CORS/auth/session design changes.
+- No frontend UI; the existing global VoteSkip UI is untouched.

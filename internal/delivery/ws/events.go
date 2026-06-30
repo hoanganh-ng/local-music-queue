@@ -51,6 +51,12 @@ const (
 	EventRoomPlaybackStatusChanged = "room_playback_status_changed"
 	EventRoomPlaybackElapsedSync   = "room_playback_elapsed_sync"
 	EventRoomPlaybackSongAdvanced  = "room_playback_song_advanced"
+	// Room vote events (R09b). Purely additive on top of R07b/R07d/R09a.
+	// Only ride /ws/rooms/{slug}; the global /ws 16-event inventory is
+	// unchanged. Sessions are room-scoped, current-song-scoped, in-memory,
+	// single-instance only, never persisted.
+	EventRoomVoteUpdated  = "room_vote_updated"
+	EventRoomVoteResolved = "room_vote_resolved"
 )
 
 // UserJoinedData contains only the new user info
@@ -295,4 +301,36 @@ type RoomPlaybackSongAdvancedData struct {
 	Status        entity.PlaybackStatus `json:"status"`
 	Elapsed       int                   `json:"elapsed"`
 	State         *entity.Queue         `json:"state"`
+}
+
+// RoomVoteUpdatedData is broadcast after every successful vote cast at
+// POST /api/rooms/{slug}/vote/skip. R09b addition; carries the
+// post-cast session snapshot so clients can render live vote counts
+// without polling, plus the server-resolved actor_user_id for
+// attribution and the authoritative post-mutation queue state.
+//
+// The session snapshot itself is JSON-serialisable (it already exposes
+// VotedBy / Threshold / Expiry fields). Fields are intentionally kept
+// flat to mirror the global EventVoteUpdated shape.
+type RoomVoteUpdatedData struct {
+	RoomSlug    string                `json:"room_slug"`
+	Session     *entity.VoteSession   `json:"session"`
+	ActorUserID int                   `json:"actor_user_id"`
+	State       *entity.Queue         `json:"state"`
+}
+
+// RoomVoteResolvedData is broadcast when a vote session is deleted
+// (either because the threshold was reached and we advanced, or
+// because it expired without passing). R09b addition; carried on
+// /ws/rooms/{slug} only.
+//
+// When Outcome == "passed", the existing room_playback_song_advanced
+// event is also broadcast with reason="skip" and carries the
+// authoritative post-mutation state. When Outcome == "expired", the
+// state is the unchanged queue.
+type RoomVoteResolvedData struct {
+	RoomSlug  string        `json:"room_slug"`
+	SessionID string        `json:"session_id"`
+	Outcome   string        `json:"outcome"` // "passed" | "expired"
+	State     *entity.Queue `json:"state"`
 }

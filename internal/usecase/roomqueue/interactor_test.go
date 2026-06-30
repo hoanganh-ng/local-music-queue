@@ -337,6 +337,8 @@ type recordingBroadcaster struct {
 	statusN int
 	elapsedN int
 	advancedN int
+	voteUpdatedN  int
+	voteResolvedN int
 }
 
 func (r *recordingBroadcaster) BroadcastRoomQueueSync(_ string, _ *entity.Queue) {
@@ -378,6 +380,16 @@ func (r *recordingBroadcaster) BroadcastRoomPlaybackSongAdvanced(_ string, _ str
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.advancedN++
+}
+func (r *recordingBroadcaster) BroadcastRoomVoteUpdated(_ string, _ *entity.VoteSession, _ int, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.voteUpdatedN++
+}
+func (r *recordingBroadcaster) BroadcastRoomVoteResolved(_, _, _ string, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.voteResolvedN++
 }
 
 // --- helpers ---
@@ -439,6 +451,33 @@ func seedPrioritizeQueue(t *testing.T, slug string) (*Interactor, int64) {
 		{ID: "cur", Title: "Cur", URL: "u", AddedBy: "Host U42", AddedByID: 42},
 		{ID: "up1", Title: "Up1", URL: "u", AddedBy: "Host U42", AddedByID: 42},
 		{ID: "up2", Title: "Up2", URL: "u", AddedBy: "Host U42", AddedByID: 42},
+	}
+	seed.CurrentIndex = 0
+	seed.Status = entity.StatusPlaying
+	if err := inter.queueRepo.Save(ctx, roomID, seed); err != nil {
+		t.Fatalf("seed queue: %v", err)
+	}
+	return inter, roomID
+}
+
+// seedVoteQueue creates a room with three songs: current at 0, upcoming
+// at 1 and 2. Songs have IDs "vote-cur", "vote-next", "vote-future" so
+// vote tests can pin expectedSongID without colliding with other
+// fixtures.
+func seedVoteQueue(t *testing.T, slug string) (*Interactor, int64) {
+	t.Helper()
+	inter, _, cleanup := pgRoomQueue(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, slug, "VR-"+slug, 42, testTime()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := mustRoomID(t, inter, slug)
+	seed := entity.NewQueue()
+	seed.Songs = []entity.Song{
+		{ID: "vote-cur", Title: "Cur", URL: "u", AddedBy: "Host U42", AddedByID: 42},
+		{ID: "vote-next", Title: "Next", URL: "u", AddedBy: "Host U42", AddedByID: 42},
+		{ID: "vote-future", Title: "Future", URL: "u", AddedBy: "Host U42", AddedByID: 42},
 	}
 	seed.CurrentIndex = 0
 	seed.Status = entity.StatusPlaying
@@ -916,5 +955,107 @@ func TestRoomPlayback_PlaybackEnded_NoNextSongPausesAndPersists(t *testing.T) {
 	}
 	if song == nil || song.ID != "final" {
 		t.Errorf("expected final song in payload, got %+v", song)
+	}
+}
+
+// --- R09b vote-driven SkipVote tests ---
+
+// TestRoomQueue_SkipVote_HappyPathAdvancesAndPersists pins the lease-
+// bypassing happy path: SkipVote advances 0→1 and persists.
+func TestRoomQueue_SkipVote_HappyPathAdvancesAndPersists(t *testing.T) {
+	inter, roomID := seedVoteQueue(t, "rq-vote-ok")
+	ctx := context.Background()
+
+	queue, prevIdx, newIdx, song, err := inter.SkipVote(ctx, "rq-vote-ok", "vote-cur")
+	if err != nil {
+		t.Fatalf("skip vote: %v", err)
+	}
+	if prevIdx != 0 || newIdx != 1 {
+		t.Errorf("expected prev=0 new=1, got prev=%d new=%d", prevIdx, newIdx)
+	}
+	if song == nil || song.ID != "vote-next" {
+		t.Errorf("expected returned song id=vote-next, got %+v", song)
+	}
+	if queue.CurrentIndex != 1 || queue.Songs[queue.CurrentIndex].ID != "vote-next" {
+		t.Errorf("expected queue advanced to vote-next@1, got %+v", queue)
+	}
+
+	persisted, err := inter.queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if persisted.CurrentIndex != 1 || persisted.Songs[1].ID != "vote-next" {
+		t.Errorf("expected persisted advance to vote-next@1, got %+v", persisted)
+	}
+}
+
+// TestRoomQueue_SkipVote_StaleExpectedSongReturnsErrStaleSkipVoteNoMutation
+// pins the no-partial-mutation invariant: when the queue's current
+// song has moved past expectedSongID, SkipVote refuses without
+// mutating state.
+func TestRoomQueue_SkipVote_StaleExpectedSongReturnsErrStaleSkipVoteNoMutation(t *testing.T) {
+	inter, _ := seedVoteQueue(t, "rq-vote-stale")
+	ctx := context.Background()
+
+	// Force-advance the queue via the lease-only SkipPlayback path so
+	// the persisted current song becomes "vote-next" instead of
+	// "vote-cur".
+	inter.SetLeaseAuthorizer(allowAllLeaseAuthorizer{})
+	if _, _, _, _, err := inter.SkipPlayback(ctx, "rq-vote-stale", 42); err != nil {
+		t.Fatalf("advance via SkipPlayback: %v", err)
+	}
+
+	// Stale expectedSongID — queue is now on "vote-next".
+	_, _, _, _, err := inter.SkipVote(ctx, "rq-vote-stale", "vote-cur")
+	if !errors.Is(err, ErrStaleSkipVote) {
+		t.Fatalf("expected ErrStaleSkipVote, got %v", err)
+	}
+
+	// Reload — queue must NOT have been mutated further.
+	persisted, err := inter.queueRepo.Load(ctx, mustRoomID(t, inter, "rq-vote-stale"))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if persisted.CurrentIndex != 1 || persisted.Songs[1].ID != "vote-next" {
+		t.Errorf("expected queue still on vote-next@1, got current=%d song=%q",
+			persisted.CurrentIndex,
+			func() string {
+				if persisted.CurrentIndex >= 0 && persisted.CurrentIndex < len(persisted.Songs) {
+					return persisted.Songs[persisted.CurrentIndex].ID
+				}
+				return ""
+			}())
+	}
+}
+
+// TestRoomQueue_SkipVote_NoNextSongReturnsErrNoNextSong pins the no-
+// partial-mutation invariant when there's no next song: SkipVote must
+// return ErrNoNextSong without mutating state.
+func TestRoomQueue_SkipVote_NoNextSongReturnsErrNoNextSong(t *testing.T) {
+	inter, _, cleanup := pgRoomQueue(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, "rq-vote-nonext", "VRNonext", 42, testTime()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := mustRoomID(t, inter, "rq-vote-nonext")
+	seed := entity.NewQueue()
+	seed.Songs = []entity.Song{{ID: "vote-only", Title: "Only", URL: "u", AddedBy: "H", AddedByID: 42}}
+	seed.CurrentIndex = 0
+	seed.Status = entity.StatusPlaying
+	if err := inter.queueRepo.Save(ctx, roomID, seed); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	_, _, _, _, err := inter.SkipVote(ctx, "rq-vote-nonext", "vote-only")
+	if !errors.Is(err, ErrNoNextSong) {
+		t.Fatalf("expected ErrNoNextSong, got %v", err)
+	}
+	persisted, err := inter.queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if persisted.CurrentIndex != 0 {
+		t.Errorf("expected current=0 unchanged, got %d", persisted.CurrentIndex)
 	}
 }

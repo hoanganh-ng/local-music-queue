@@ -302,6 +302,8 @@ func (r *recordingRoomBroadcaster) BroadcastRoomPlaybackSongAdvanced(slug, reaso
 	defer r.mu.Unlock()
 	r.advancedCalls = append(r.advancedCalls, recordingAdvancedCall{slug: slug, reason: reason, prev: prev, next: next, song: song, status: status, elapsed: elapsed})
 }
+func (r *recordingRoomBroadcaster) BroadcastRoomVoteUpdated(_ string, _ *entity.VoteSession, _ int, _ *entity.Queue) {}
+func (r *recordingRoomBroadcaster) BroadcastRoomVoteResolved(_, _, _ string, _ *entity.Queue) {}
 
 func TestRoomQueue_AddSong_BroadcastsSongAdded(t *testing.T) {
 	rqh, db, cleanup := newRoomQueueHandlers(t)

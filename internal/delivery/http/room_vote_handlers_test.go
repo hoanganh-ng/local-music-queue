@@ -1,0 +1,539 @@
+package http
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"local-music-queue/internal/domain/entity"
+	"local-music-queue/internal/infrastructure/persistence"
+	"local-music-queue/internal/usecase/room"
+	"local-music-queue/internal/usecase/roomqueue"
+	"local-music-queue/internal/usecase/roomvote"
+)
+
+// --- test broadcaster for the vote handler ---
+//
+// voteTestBroadcaster is a fresh test double (separate from
+// recordingRoomBroadcaster in room_queue_handlers_test.go) that
+// implements the eleven-method roomqueue.Broadcaster interface. The
+// R09b-specific methods capture their arguments verbatim; the rest
+// are no-ops kept solely to satisfy the interface. The handler is
+// the only thing that calls the R09b methods.
+type voteTestBroadcaster struct {
+	mu           sync.Mutex
+	voteUpdated  []voteUpdatedArg
+	voteResolved []voteResolvedArg
+	advanced     []recordingAdvancedCall
+}
+
+type voteUpdatedArg struct {
+	Slug        string
+	ActorUserID int
+	Session     *entity.VoteSession
+	State       *entity.Queue
+}
+
+type voteResolvedArg struct {
+	Slug      string
+	SessionID string
+	Outcome   string
+	State     *entity.Queue
+}
+
+func (b *voteTestBroadcaster) BroadcastRoomQueueSync(_ string, _ *entity.Queue) {}
+func (b *voteTestBroadcaster) BroadcastRoomQueueSongAdded(_ string, _ entity.Song, _ int, _ *entity.Queue) {
+}
+func (b *voteTestBroadcaster) BroadcastRoomQueueSongRemoved(_ string, _ int, _ *entity.Queue) {}
+func (b *voteTestBroadcaster) BroadcastRoomQueueCleared(_ string, _ *entity.Queue)        {}
+func (b *voteTestBroadcaster) BroadcastRoomQueueSongPrioritized(_ string, _, _ int, _ entity.Song, _ *entity.Queue) {
+}
+func (b *voteTestBroadcaster) BroadcastRoomPlaybackStatusChanged(_ string, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {
+}
+func (b *voteTestBroadcaster) BroadcastRoomPlaybackElapsedSync(_ string, _ int, _ *entity.Queue) {
+}
+func (b *voteTestBroadcaster) BroadcastRoomPlaybackSongAdvanced(slug, reason string, prev, next int, song *entity.Song, status entity.PlaybackStatus, elapsed int, state *entity.Queue) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.advanced = append(b.advanced, recordingAdvancedCall{
+		slug: slug, reason: reason, prev: prev, next: next, song: song, status: status, elapsed: elapsed,
+	})
+}
+func (b *voteTestBroadcaster) BroadcastRoomVoteUpdated(slug string, session *entity.VoteSession, actorUserID int, state *entity.Queue) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.voteUpdated = append(b.voteUpdated, voteUpdatedArg{
+		Slug: slug, ActorUserID: actorUserID, Session: session, State: state,
+	})
+}
+func (b *voteTestBroadcaster) BroadcastRoomVoteResolved(slug, sessionID, outcome string, state *entity.Queue) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.voteResolved = append(b.voteResolved, voteResolvedArg{
+		Slug: slug, SessionID: sessionID, Outcome: outcome, State: state,
+	})
+}
+
+// fixedResolver is a deterministic roomvote.Resolver that always
+// returns the supplied unique-user count. Tests use it to pin the
+// threshold (max(2, count/2)) at session creation time.
+type fixedResolver struct{ count int }
+
+func (f fixedResolver) UniqueConnectedUserIDs(_ string) int { return f.count }
+
+// allowAllLeaseAuthorizer is a no-op lease authorizer used by tests
+// that exercise the post-lease code paths (skip-playback to force
+// advance) without claiming a real player lease. The roomqueue test
+// package defines an identical type internally; we keep this one
+// local to room_vote_handlers_test.go to avoid cross-package coupling.
+type allowAllLeaseAuthorizer struct{}
+
+func (allowAllLeaseAuthorizer) RequireActiveLeaseHolder(_ context.Context, _ string, _ int) error {
+	return nil
+}
+
+// --- fixture ---
+//
+// voteRoomFixture creates a room with a 2-song queue ("cur-<slug>" at
+// index 0, "next-<slug>" at index 1), seeded with the given members.
+// Returns the vote handler, the *sql.DB, the underlying roomqueue
+// interactor, and a cleanup.
+//
+// The first memberID is the host; the rest are guests. The threshold
+// is derived from len(memberIDs) via the fixedResolver; the interactor
+// uses threshold = max(2, n/2).
+func voteRoomFixture(t *testing.T, slug string, memberIDs []int) (*RoomVoteHandlers, *sql.DB, *roomqueue.Interactor, func()) {
+	t.Helper()
+	if len(memberIDs) == 0 {
+		t.Fatalf("voteRoomFixture: memberIDs must be non-empty")
+	}
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	seedUserQueue(t, db, memberIDs[0], "host-rv-"+slug+"@example.com", entity.RoleHost)
+	for i, id := range memberIDs[1:] {
+		seedUserQueue(t, db, id, fmt.Sprintf("guest-rv-%d-%s@example.com", i, slug), entity.RoleGuest)
+	}
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, slug, "RV-"+slug, memberIDs[0], time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := mustRoomIDQueue(t, db, slug)
+	for i, id := range memberIDs[1:] {
+		if err := roomRepo.AddMember(ctx, roomID, id, entity.RoomRoleGuest, time.Now().UTC()); err != nil {
+			t.Fatalf("add guest %d: %v", i+1, err)
+		}
+	}
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	q := entity.NewQueue()
+	q.Songs = []entity.Song{
+		{ID: "cur-" + slug, Title: "C", URL: "u", AddedBy: "host", AddedByID: memberIDs[0]},
+		{ID: "next-" + slug, Title: "N", URL: "u", AddedBy: "host", AddedByID: memberIDs[0]},
+	}
+	q.CurrentIndex = 0
+	q.Status = entity.StatusPlaying
+	if err := queueRepo.Save(ctx, roomID, q); err != nil {
+		t.Fatalf("save queue: %v", err)
+	}
+	inter := rqh.inter
+	rvh := NewRoomVoteHandlers(
+		roomvote.NewInteractor(inter, fixedResolver{count: len(memberIDs)}, 30*time.Second),
+		inter,
+	)
+	return rvh, db, inter, cleanup
+}
+
+// castSkip invokes the handler with a fresh POST /api/rooms/{slug}/vote/skip
+// request and an empty JSON body. The body is intentionally
+// non-required by the spec; the handler ignores it.
+func castSkip(t *testing.T, slug string, actorUserID int) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/"+slug+"/vote/skip", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	return rr
+}
+
+// --- Test cases ---
+
+// TestRoomVote_PlainCast_NoPass_Returns204AndBroadcastsUpdated pins the
+// happy no-pass path: 2-member room, threshold 2, first vote does NOT
+// pass → 204, one vote_updated broadcast with actor_user_id, no
+// vote_resolved, no advanced.
+func TestRoomVote_PlainCast_NoPass_Returns204AndBroadcastsUpdated(t *testing.T) {
+	rvh, _, _, cleanup := voteRoomFixture(t, "rv-204", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	rr := castSkip(t, "rv-204", 200)
+	rvh.HandleCastRoomVoteSkip(rr, httptest.NewRequest(http.MethodPost, "/api/rooms/rv-204/vote/skip", bytes.NewReader([]byte(`{}`))), "rv-204", 200)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if got := len(bc.voteUpdated); got != 1 {
+		t.Fatalf("expected 1 vote_updated broadcast, got %d", got)
+	}
+	if bc.voteUpdated[0].ActorUserID != 200 {
+		t.Errorf("expected actor 200, got %d", bc.voteUpdated[0].ActorUserID)
+	}
+	if bc.voteUpdated[0].Session == nil {
+		t.Errorf("expected non-nil session in vote_updated")
+	} else if bc.voteUpdated[0].Session.Threshold != 2 {
+		t.Errorf("expected threshold=2 for 2 members, got %d", bc.voteUpdated[0].Session.Threshold)
+	}
+	if got := len(bc.voteResolved); got != 0 {
+		t.Errorf("expected 0 vote_resolved, got %d", got)
+	}
+	if got := len(bc.advanced); got != 0 {
+		t.Errorf("expected 0 advanced, got %d", got)
+	}
+}
+
+// TestRoomVote_PassingVoteCallsSkipVoteAndBroadcastsResolvedAndAdvanced
+// pins the pass-through: second member's vote hits the threshold and
+// triggers ALL three broadcasts (vote_updated x2, vote_resolved x1,
+// advanced x1 reason=skip) plus the queue advances. Reloading the
+// queue must show CurrentIndex == 1 and the next song's ID.
+func TestRoomVote_PassingVoteCallsSkipVoteAndBroadcastsResolvedAndAdvanced(t *testing.T) {
+	rvh, _, inter, cleanup := voteRoomFixture(t, "rv-pass", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	// First vote: 204.
+	req1 := httptest.NewRequest(http.MethodPost, "/api/rooms/rv-pass/vote/skip", bytes.NewReader([]byte(`{}`)))
+	req1.Header.Set("Content-Type", "application/json")
+	rr1 := httptest.NewRecorder()
+	rvh.HandleCastRoomVoteSkip(rr1, req1, "rv-pass", 200)
+	if rr1.Code != http.StatusNoContent {
+		t.Fatalf("first cast: expected 204, got %d body=%s", rr1.Code, rr1.Body.String())
+	}
+
+	// Second vote: 200 + {"resolution":"passed"}.
+	req2 := httptest.NewRequest(http.MethodPost, "/api/rooms/rv-pass/vote/skip", bytes.NewReader([]byte(`{}`)))
+	req2.Header.Set("Content-Type", "application/json")
+	rr2 := httptest.NewRecorder()
+	rvh.HandleCastRoomVoteSkip(rr2, req2, "rv-pass", 300)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("second cast: expected 200, got %d body=%s", rr2.Code, rr2.Body.String())
+	}
+	var body struct {
+		Resolution string `json:"resolution"`
+	}
+	if err := json.NewDecoder(rr2.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Resolution != "passed" {
+		t.Errorf("expected resolution=passed, got %q", body.Resolution)
+	}
+
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if got := len(bc.voteUpdated); got != 2 {
+		t.Errorf("expected 2 vote_updated broadcasts, got %d", got)
+	}
+	if got := len(bc.voteResolved); got != 1 {
+		t.Fatalf("expected 1 vote_resolved, got %d", got)
+	}
+	if bc.voteResolved[0].Outcome != "passed" {
+		t.Errorf("expected outcome=passed, got %q", bc.voteResolved[0].Outcome)
+	}
+	if bc.voteResolved[0].SessionID == "" {
+		t.Errorf("expected non-empty session_id on vote_resolved")
+	}
+	if bc.voteResolved[0].State == nil {
+		t.Errorf("expected non-nil state on vote_resolved")
+	}
+	if got := len(bc.advanced); got != 1 {
+		t.Fatalf("expected 1 advanced broadcast, got %d", got)
+	}
+	if bc.advanced[0].reason != "skip" || bc.advanced[0].slug != "rv-pass" {
+		t.Errorf("expected advanced reason=skip slug=rv-pass, got %+v", bc.advanced[0])
+	}
+
+	// Reload the queue: must be on next-rv-pass.
+	reloaded, err := inter.GetState(context.Background(), "rv-pass", 200)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.CurrentIndex != 1 {
+		t.Errorf("expected CurrentIndex=1, got %d", reloaded.CurrentIndex)
+	}
+	if len(reloaded.Songs) < 2 || reloaded.Songs[1].ID != "next-rv-pass" {
+		t.Errorf("expected songs[1].ID=next-rv-pass, got %+v", reloaded.Songs)
+	}
+}
+
+// TestRoomVote_DuplicateVoteFromSameUser_Returns409 pins the
+// single-vote-per-user invariant: a second vote from the same user
+// must return 409 and produce only one vote_updated.
+func TestRoomVote_DuplicateVoteFromSameUser_Returns409(t *testing.T) {
+	rvh, _, _, cleanup := voteRoomFixture(t, "rv-dup", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	// First vote from 200 — succeeds.
+	req1 := httptest.NewRequest(http.MethodPost, "/api/rooms/rv-dup/vote/skip", bytes.NewReader([]byte(`{}`)))
+	rr1 := httptest.NewRecorder()
+	rvh.HandleCastRoomVoteSkip(rr1, req1, "rv-dup", 200)
+	if rr1.Code != http.StatusNoContent {
+		t.Fatalf("first cast: expected 204, got %d", rr1.Code)
+	}
+
+	// Second vote from 200 — duplicate, expect 409.
+	req2 := httptest.NewRequest(http.MethodPost, "/api/rooms/rv-dup/vote/skip", bytes.NewReader([]byte(`{}`)))
+	rr2 := httptest.NewRecorder()
+	rvh.HandleCastRoomVoteSkip(rr2, req2, "rv-dup", 200)
+	if rr2.Code != http.StatusConflict {
+		t.Fatalf("duplicate cast: expected 409, got %d body=%s", rr2.Code, rr2.Body.String())
+	}
+	if !strings.Contains(strings.ToLower(rr2.Body.String()), "already") &&
+		!strings.Contains(strings.ToLower(rr2.Body.String()), "vote") {
+		t.Errorf("expected 409 body to mention vote/already, got %q", rr2.Body.String())
+	}
+
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if got := len(bc.voteUpdated); got != 1 {
+		t.Errorf("expected 1 vote_updated total (no broadcast on 409), got %d", got)
+	}
+}
+
+// TestRoomVote_UnauthorizedActor_Returns401 pins the defense-in-depth
+// 401 gate: actorUserID == 0 must short-circuit before any interactor
+// call. No broadcasts.
+func TestRoomVote_UnauthorizedActor_Returns401(t *testing.T) {
+	rvh, _, _, cleanup := voteRoomFixture(t, "rv-401", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rv-401/vote/skip", bytes.NewReader([]byte(`{}`)))
+	rr := httptest.NewRecorder()
+	rvh.HandleCastRoomVoteSkip(rr, req, "rv-401", 0)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if got := len(bc.voteUpdated); got != 0 {
+		t.Errorf("expected 0 broadcasts on 401, got %d", got)
+	}
+}
+
+// TestRoomVote_NonMember_Returns403 pins the membership gate: a user
+// who is not a member of the room is rejected with 403.
+func TestRoomVote_NonMember_Returns403(t *testing.T) {
+	rvh, _, _, cleanup := voteRoomFixture(t, "rv-403", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rv-403/vote/skip", bytes.NewReader([]byte(`{}`)))
+	rr := httptest.NewRecorder()
+	rvh.HandleCastRoomVoteSkip(rr, req, "rv-403", 9999)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("non-member: expected 403, got %d body=%s", rr.Code, rr2Body(t, rr))
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if got := len(bc.voteUpdated); got != 0 {
+		t.Errorf("expected 0 broadcasts on 403, got %d", got)
+	}
+}
+
+// TestRoomVote_UnknownSlug_Returns404 pins the unknown-slug path:
+// voteRoomFixture is NOT called (no fixture); the handler must return
+// 404 because the room does not exist.
+func TestRoomVote_UnknownSlug_Returns404(t *testing.T) {
+	rvh, _, _, cleanup := voteRoomFixture(t, "rv-some", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rv-no-such-room/vote/skip", bytes.NewReader([]byte(`{}`)))
+	rr := httptest.NewRecorder()
+	rvh.HandleCastRoomVoteSkip(rr, req, "rv-no-such-room", 200)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown slug: expected 404, got %d body=%s", rr.Code, rr2Body(t, rr))
+	}
+}
+
+// TestRoomVote_ArchivedRoom_Returns409 pins the archived-room gate:
+// after ArchiveRoomIfActive, the handler must return 409.
+func TestRoomVote_ArchivedRoom_Returns409(t *testing.T) {
+	rvh, db, _, cleanup := voteRoomFixture(t, "rv-arch", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	roomID := mustRoomIDQueue(t, db, "rv-arch")
+	if _, err := roomRepo.ArchiveRoomIfActive(context.Background(), roomID, time.Now().UTC()); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rv-arch/vote/skip", bytes.NewReader([]byte(`{}`)))
+	rr := httptest.NewRecorder()
+	rvh.HandleCastRoomVoteSkip(rr, req, "rv-arch", 200)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("archived: expected 409, got %d body=%s", rr.Code, rr2Body(t, rr))
+	}
+}
+
+// TestRoomVote_NoCurrentSong_Returns404 pins the no-current-song
+// path: an empty queue (CurrentIndex stays at -1) must return 404
+// with entity.ErrNoCurrentSong mapped from the interactor.
+//
+// We seed a NEW room with no songs by reusing voteRoomFixture's
+// builder, then overwriting the queue with an empty queue via the
+// repo. We don't use a separate helper to keep the diff small.
+func TestRoomVote_NoCurrentSong_Returns404(t *testing.T) {
+	rvh, db, _, cleanup := voteRoomFixture(t, "rv-nocs", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	// Overwrite the seeded queue with an empty queue (CurrentIndex = -1).
+	roomID := mustRoomIDQueue(t, db, "rv-nocs")
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	empty := entity.NewQueue() // Songs: nil, CurrentIndex: -1
+	if err := queueRepo.Save(context.Background(), roomID, empty); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rv-nocs/vote/skip", bytes.NewReader([]byte(`{}`)))
+	rr := httptest.NewRecorder()
+	rvh.HandleCastRoomVoteSkip(rr, req, "rv-nocs", 200)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("no current song: expected 404, got %d body=%s", rr.Code, rr2Body(t, rr))
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if got := len(bc.voteUpdated); got != 0 {
+		t.Errorf("expected 0 broadcasts on 404, got %d", got)
+	}
+}
+
+// TestRoomVote_WriteRoomVoteError_MapsStaleAndExpired pins the error
+// mapping for the rare races that the live-handler path cannot reach
+// in a single-threaded test:
+//
+//   - roomvote.ErrStaleSession  → 409 (queue advanced under the vote).
+//   - entity.ErrVoteSessionExpired → 410 (rare race; client can retry).
+//   - entity.ErrAlreadyVoted    → 409 (covered inline in the
+//                                  duplicate test, asserted here too).
+//   - room.ErrInvalidSlug       → 400.
+//
+// The handler never broadcasts on error paths, so we wire a
+// voteTestBroadcaster to confirm no broadcasts leak.
+func TestRoomVote_WriteRoomVoteError_MapsStaleAndExpired(t *testing.T) {
+	bc := &voteTestBroadcaster{}
+
+	cases := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{"stale session", roomvote.ErrStaleSession, http.StatusConflict},
+		{"expired race", entity.ErrVoteSessionExpired, http.StatusGone},
+		{"already voted", entity.ErrAlreadyVoted, http.StatusConflict},
+		{"invalid slug", room.ErrInvalidSlug, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			writeRoomVoteError(rr, tc.err)
+			if rr.Code != tc.wantStatus {
+				t.Errorf("err=%v: expected status %d, got %d body=%s",
+					tc.err, tc.wantStatus, rr.Code, rr.Body.String())
+			}
+			if got := len(bc.voteUpdated); got != 0 {
+				t.Errorf("err=%v: expected 0 vote_updated broadcasts, got %d", tc.err, got)
+			}
+		})
+	}
+}
+
+// TestRoomVote_QueueAdvanceBetweenCastsDoesNotPass pins the invariant
+// that the second cast, after the queue has advanced via the lease
+// path, must NOT fire a vote_resolved{passed} or an
+// room_playback_song_advanced broadcast. (It creates a NEW session
+// against the new current song because the in-memory session is
+// keyed by song ID; the prior cast's session is left alone.)
+//
+// This is the live-handler surface of the plan's "stale" case: the
+// handler still returns 204 for the second cast (a fresh session
+// vote, threshold not yet met for the new song) and broadcasts a
+// single vote_updated — never a passed resolution. The
+// writeRoomVoteError unit test above covers the actual stale-sentinel
+// → 409 mapping.
+func TestRoomVote_QueueAdvanceBetweenCastsDoesNotPass(t *testing.T) {
+	rvh, _, inter, cleanup := voteRoomFixture(t, "rv-adv", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	// First cast (user 200) — 204, threshold 2, not yet passed.
+	req1 := httptest.NewRequest(http.MethodPost, "/api/rooms/rv-adv/vote/skip", bytes.NewReader([]byte(`{}`)))
+	rr1 := httptest.NewRecorder()
+	rvh.HandleCastRoomVoteSkip(rr1, req1, "rv-adv", 200)
+	if rr1.Code != http.StatusNoContent {
+		t.Fatalf("first cast: expected 204, got %d", rr1.Code)
+	}
+
+	// Force-advance the queue via the lease-only SkipPlayback path.
+	inter.SetLeaseAuthorizer(allowAllLeaseAuthorizer{})
+	if _, _, _, _, err := inter.SkipPlayback(context.Background(), "rv-adv", 200); err != nil {
+		t.Fatalf("force advance: %v", err)
+	}
+
+	// Second cast (user 300) — queue is on next-rv-adv now. The
+	// in-memory session is keyed by the OLD song ID, so the interactor
+	// creates a new session for the new song. Threshold=2, 1 vote → 204.
+	req2 := httptest.NewRequest(http.MethodPost, "/api/rooms/rv-adv/vote/skip", bytes.NewReader([]byte(`{}`)))
+	rr2 := httptest.NewRecorder()
+	rvh.HandleCastRoomVoteSkip(rr2, req2, "rv-adv", 300)
+	if rr2.Code != http.StatusNoContent {
+		t.Fatalf("second cast: expected 204, got %d body=%s", rr2.Code, rr2.Body.String())
+	}
+
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if got := len(bc.voteUpdated); got != 2 {
+		t.Errorf("expected 2 vote_updated broadcasts (one per cast), got %d", got)
+	}
+	for _, r := range bc.voteResolved {
+		if r.Outcome == "passed" {
+			t.Errorf("expected NO vote_resolved{passed} after queue advance, got %+v", r)
+		}
+	}
+	if got := len(bc.advanced); got != 0 {
+		t.Errorf("expected 0 advanced broadcasts (queue already advanced), got %d", got)
+	}
+}
+
+// rr2Body is a small helper to read a recorder's body as a string in
+// a single line for error messages.
+func rr2Body(t *testing.T, rr *httptest.ResponseRecorder) string {
+	t.Helper()
+	return rr.Body.String()
+}
+
+// Compile-time assertion: voteTestBroadcaster must satisfy
+// roomqueue.Broadcaster. Keeps the test from silently breaking if the
+// interface grows or shrinks.
+var _ roomqueue.Broadcaster = (*voteTestBroadcaster)(nil)
+var _ roomvote.Resolver = fixedResolver{}
+var _ room.PlaybackLeaseAuthorizer = allowAllLeaseAuthorizer{}

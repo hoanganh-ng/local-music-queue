@@ -51,6 +51,17 @@ var (
 	ErrPlaybackForbidden  = errors.New("not lease holder")
 	ErrPlaybackLeaseGone  = errors.New("player lease gone (past grace)")
 	ErrPlaybackLeaseLost  = errors.New("player lease not found")
+	// R09b: SkipVote is called by the vote interactor only after the
+	// vote session for the current song has been won. The expected
+	// current-song ID comes from the vote session's stored song at
+	// creation time. If the queue has advanced under it (e.g. the lease
+	// holder already skipped, or another path advanced), SkipVote returns
+	// this sentinel WITHOUT mutating state. The interactor translates the
+	// absence of an error into a successful resolution. No broadcast is
+	// emitted on this path; the caller (roomvote) is responsible for
+	// dispatching room_vote_resolved + room_playback_song_advanced only
+	// when SkipVote succeeds.
+	ErrStaleSkipVote = errors.New("queue advanced under the vote session")
 )
 
 // Interactor owns the room-scoped queue use cases. The mutex serializes
@@ -103,6 +114,10 @@ type Broadcaster interface {
 	BroadcastRoomPlaybackStatusChanged(roomSlug string, status entity.PlaybackStatus, elapsed int, state *entity.Queue)
 	BroadcastRoomPlaybackElapsedSync(roomSlug string, elapsed int, state *entity.Queue)
 	BroadcastRoomPlaybackSongAdvanced(roomSlug, reason string, previousIndex, newIndex int, currentSong *entity.Song, status entity.PlaybackStatus, elapsed int, state *entity.Queue)
+	// R09b vote deltas. Additive on top of R07b/R07d/R09a; the per-room
+	// hub satisfies the interface implicitly (the method names match).
+	BroadcastRoomVoteUpdated(roomSlug string, session *entity.VoteSession, actorUserID int, state *entity.Queue)
+	BroadcastRoomVoteResolved(roomSlug string, sessionID, outcome string, state *entity.Queue)
 }
 
 // SetBroadcaster wires the broadcaster used by the delivery layer to
@@ -396,6 +411,22 @@ func (i *Interactor) MemberRole(ctx context.Context, slug string, actorUserID in
 	return member.Role, nil
 }
 
+// RoomBySlug resolves the slug to a room, returning the same sentinels
+// as the rest of the package (ErrInvalidSlug / ErrRoomNotFound /
+// ErrArchived). Exposed so external packages (e.g. roomvote) can
+// resolve a slug to a room id without importing repository.
+func (i *Interactor) RoomBySlug(ctx context.Context, slug string) (*entity.Room, error) {
+	return i.resolveActiveRoom(ctx, slug)
+}
+
+// IsMember reports whether actorUserID is an active member of roomID.
+// Exposed for external packages (roomvote). Returns false on any
+// repository error other than the not-found sentinel.
+func (i *Interactor) IsMember(ctx context.Context, roomID int64, actorUserID int) bool {
+	_, err := i.roomRepo.GetMember(ctx, roomID, actorUserID)
+	return err == nil
+}
+
 // GetStateByRoomID returns the persisted queue for an internal caller
 // (no membership check). Used by the room WS hub's initial sync path;
 // auth/authorization is enforced at the hub upgrade gate, not here.
@@ -651,4 +682,65 @@ func (i *Interactor) PlaybackEnded(ctx context.Context, slug string, actorUserID
 		return nil, 0, 0, nil, false, fmt.Errorf("save room queue: %w", err)
 	}
 	return queue, queue.CurrentIndex, queue.CurrentIndex, &currentSong, false, nil
+}
+
+// --- R09b vote-driven skip ---
+
+// SkipVote advances the room-scoped queue to the next song on behalf
+// of a winning vote session. Lease-bypassing — vote-to-skip is
+// intentionally democratic. The caller (roomvote.Interactor) supplies
+// the expectedSongID, which was captured at the moment the vote
+// session was created. SkipVote refuses to mutate state if the
+// current song has changed (lease-holder skip, PlaybackEnded, etc.),
+// returning ErrStaleSkipVote WITHOUT mutating anything.
+//
+// Returns the post-mutation queue plus the previous and new indexes
+// so the caller can dispatch room_playback_song_advanced with
+// reason="skip".
+//
+// On no-next-song returns ErrNoNextSong without mutation (entity
+// invariant). On no-current-song returns ErrNoCurrentSong without
+// mutation.
+func (i *Interactor) SkipVote(ctx context.Context, slug, expectedSongID string) (*entity.Queue, int, int, *entity.Song, error) {
+	roomObj, err := i.resolveActiveRoom(ctx, slug)
+	if err != nil {
+		return nil, 0, 0, nil, err
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	queue, err := i.loadQueue(ctx, roomObj.ID)
+	if err != nil {
+		return nil, 0, 0, nil, err
+	}
+
+	// No-partial-mutation invariant #1: refuse to advance from an empty
+	// queue. Translate the entity sentinel to the local one.
+	if queue.CurrentIndex < 0 || queue.CurrentIndex >= len(queue.Songs) {
+		return nil, 0, 0, nil, ErrNoCurrentSong
+	}
+
+	// No-partial-mutation invariant #2: refuse to advance if the
+	// current song does not match what the vote session expected. This
+	// prevents a stale session (lease-holder skipped or ended during
+	// voting) from triggering a second advance.
+	if queue.Songs[queue.CurrentIndex].ID != expectedSongID {
+		return nil, 0, 0, nil, ErrStaleSkipVote
+	}
+
+	prevIdx, newSong, err := queue.AdvanceToNext()
+	if err != nil {
+		if errors.Is(err, entity.ErrNoNextSong) {
+			return nil, 0, 0, nil, ErrNoNextSong
+		}
+		if errors.Is(err, entity.ErrNoCurrentSong) {
+			return nil, 0, 0, nil, ErrNoCurrentSong
+		}
+		return nil, 0, 0, nil, err
+	}
+	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
+		return nil, 0, 0, nil, fmt.Errorf("save room queue: %w", err)
+	}
+	return queue, prevIdx, queue.CurrentIndex, newSong, nil
 }
