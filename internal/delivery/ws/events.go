@@ -57,6 +57,11 @@ const (
 	// single-instance only, never persisted.
 	EventRoomVoteUpdated  = "room_vote_updated"
 	EventRoomVoteResolved = "room_vote_resolved"
+	// R09c: additive on top of R07b/R07d/R09a/R09b. Fires on successful
+	// POST /api/rooms/{slug}/playback/volume. Direction is one of
+	// "up" / "down". The global /ws 16-event inventory is unchanged;
+	// this event rides /ws/rooms/{slug} only.
+	EventRoomPlaybackVolumeChanged = "room_playback_volume_changed"
 )
 
 // UserJoinedData contains only the new user info
@@ -376,4 +381,15 @@ type RoomVoteResolvedData struct {
 	SessionID string        `json:"session_id"`
 	Outcome   string        `json:"outcome"` // "passed" | "expired"
 	State     *entity.Queue `json:"state"`
+}
+
+// RoomPlaybackVolumeChangedData is broadcast after a successful
+// POST /api/rooms/{slug}/playback/volume. R09c addition; the global
+// /ws contract is unchanged. The payload carries only the slug and
+// direction — there is no persisted volume state, so no authoritative
+// state snapshot is included. Clients that want a stable UI can
+// optimistically adjust their local display.
+type RoomPlaybackVolumeChangedData struct {
+	RoomSlug  string `json:"room_slug"`
+	Direction string `json:"direction"`
 }

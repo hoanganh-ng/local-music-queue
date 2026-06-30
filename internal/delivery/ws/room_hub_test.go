@@ -1198,3 +1198,79 @@ func TestRoomHub_BroadcastRoomVoteResolved_ReachesRoomClients(t *testing.T) {
 		t.Errorf("expected post-mutation state with s2, got %#v", env.Data.State)
 	}
 }
+
+// --- R09c playback volume broadcast envelope ---
+//
+// Pin the contract that BroadcastRoomPlaybackVolumeChanged fans out
+// to every client connected to the matching room (and only that room)
+// with the right type, room_slug, and direction. Mirrors the R09a
+// playback broadcast tests; does NOT include a per-room sequence
+// invariant because the payload is deliberately stateless (no entity
+// queue volume field exists — see events.go RoomPlaybackVolumeChangedData).
+
+// TestRoomHub_BroadcastRoomPlaybackVolumeChanged_FansOutToRoom verifies
+// that BroadcastRoomPlaybackVolumeChanged delivers a single envelope
+// to every client connected on the per-room hub, with the right type,
+// room slug, and direction. Mirrors the R09a playback broadcast tests
+// but carries the R09c payload shape (no post-mutation snapshot).
+func TestRoomHub_BroadcastRoomPlaybackVolumeChanged_FansOutToRoom(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("r09c-vol", &entity.Room{ID: 71, Slug: "r09c-vol", Status: entity.RoomStatusActive})
+	resolver.SetQueue(71, &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "S1"}}})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{
+			"u1": {ID: 1, Role: entity.RoleHost, DisplayName: "U1"},
+			"u2": {ID: 2, Role: entity.RoleGuest, DisplayName: "U2"},
+		},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	// Two connected clients in the room "r09c-vol".
+	c1 := dialRoomWS(t, server, "r09c-vol", "u1")
+	defer c1.Close()
+	c2 := dialRoomWS(t, server, "r09c-vol", "u2")
+	defer c2.Close()
+
+	// Drain initial sync frames so both read pumps are unblocked.
+	for _, c := range []*websocket.Conn{c1, c2} {
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, _, err := c.ReadMessage(); err != nil {
+			t.Fatalf("drain initial sync: %v", err)
+		}
+	}
+
+	hub.BroadcastRoomPlaybackVolumeChanged("r09c-vol", "up")
+
+	for i, c := range []*websocket.Conn{c1, c2} {
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, raw, err := c.ReadMessage()
+		if err != nil {
+			t.Fatalf("conn %d: read volume broadcast: %v", i, err)
+		}
+		var env struct {
+			Type string                 `json:"type"`
+			Data map[string]interface{} `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &env); err != nil {
+			t.Fatalf("conn %d: unmarshal volume broadcast: %v", i, err)
+		}
+		if env.Type != EventRoomPlaybackVolumeChanged {
+			t.Fatalf("conn %d: type=%q want %q", i, env.Type, EventRoomPlaybackVolumeChanged)
+		}
+		if env.Data["room_slug"] != "r09c-vol" {
+			t.Errorf("conn %d: room_slug=%v want r09c-vol", i, env.Data["room_slug"])
+		}
+		if env.Data["direction"] != "up" {
+			t.Errorf("conn %d: direction=%v want up", i, env.Data["direction"])
+		}
+	}
+}

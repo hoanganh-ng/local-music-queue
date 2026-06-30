@@ -412,6 +412,23 @@ func (h *RoomWSHub) BroadcastRoomVoteResolved(roomSlug string, sessionID, outcom
 	})
 }
 
+// --- R09c playback volume broadcast ---
+//
+// dispatch() does NOT allocate seq; the hub loop stamps seq on
+// dequeue. Adding this method does not change the global /ws
+// 16-event inventory — the event rides the per-room endpoint only.
+//
+// There is no entity.Queue volume field and no persisted volume
+// state, so the broadcast payload intentionally OMITS a state
+// snapshot (R07d/R09a broadcasts include one; R09c does not because
+// nothing changed on the persisted queue).
+
+func (h *RoomWSHub) BroadcastRoomPlaybackVolumeChanged(roomSlug, direction string) {
+	h.dispatch(roomSlug, EventRoomPlaybackVolumeChanged, RoomPlaybackVolumeChangedData{
+		RoomSlug: roomSlug, Direction: direction,
+	})
+}
+
 // --- RegisterHandler ---
 
 // RegisterHandler handles GET /ws/rooms/{slug}?session_token=<opaque>.
