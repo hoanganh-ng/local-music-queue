@@ -783,13 +783,15 @@ func (i *Interactor) ChangePlaybackVolume(ctx context.Context, slug string, acto
 	if direction != "up" && direction != "down" {
 		return ErrInvalidDirection
 	}
-	roomObj, err := i.resolveActiveRoom(ctx, slug)
-	if err != nil {
+	// resolveActiveRoom exists purely to enforce active-room status; its
+	// returned *entity.Room is unused here. The discard form
+	// `_, err :=` makes the dependency obvious without a blank-identifier
+	// assignment after the fact.
+	if _, err := i.resolveActiveRoom(ctx, slug); err != nil {
 		return err
 	}
 	if err := i.requirePlaybackLease(ctx, slug, actorUserID); err != nil {
 		return err
 	}
-	_ = roomObj // room resolved only to enforce active-room status; no state loaded
 	return nil
 }
