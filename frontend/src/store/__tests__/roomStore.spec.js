@@ -67,13 +67,13 @@ describe('Room queue store (isolated)', () => {
   })
 
   it('applyRoomSongPrioritized prefers fullState when provided', () => {
-    const post = { songs: [{ id: 'cur' }, { id: 'moved', IsPrioritized: true }], current_index: 0, current_song: { id: 'cur' }, status: 'playing', queue: [], history: [] }
+    const post = { songs: [{ id: 'cur' }, { id: 'moved', is_prioritized: true }], current_index: 0, current_song: { id: 'cur' }, status: 'playing', queue: [], history: [] }
     globalStore.setRoomQueueState('lobby', { songs: [{ id: 'cur' }, { id: 'moved' }, { id: 'other' }], current_index: 0, current_song: { id: 'cur' }, status: 'playing', queue: [], history: [] })
     globalStore.applyRoomSongPrioritized('lobby', 2, 1, { id: 'moved' }, post)
     expect(globalStore.roomQueues.lobby.state).toMatchObject(post)
   })
 
-  it('applyRoomSongPrioritized fallback: moves song, stamps IsPrioritized, compensates current_index', () => {
+  it('applyRoomSongPrioritized fallback: moves song, stamps is_prioritized, compensates current_index', () => {
     // current at 0; upcoming at 1 and 2. Move idx 2 to idx 1.
     globalStore.setRoomQueueState('lobby', {
       songs: [{ id: 'cur' }, { id: 'a' }, { id: 'b' }],
@@ -86,8 +86,8 @@ describe('Room queue store (isolated)', () => {
     globalStore.applyRoomSongPrioritized('lobby', 2, 1, { id: 'b' }, null)
     const s = globalStore.roomQueues.lobby.state
     expect(s.songs.map(x => x.id)).toEqual(['cur', 'b', 'a'])
-    // moved song carries IsPrioritized=true
-    expect(s.songs[1].IsPrioritized).toBe(true)
+    // moved song carries is_prioritized=true
+    expect(s.songs[1].is_prioritized).toBe(true)
     // current_index unchanged (from 2 to 1 is after current 0)
     expect(s.current_index).toBe(0)
   })

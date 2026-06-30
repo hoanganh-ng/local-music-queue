@@ -47,8 +47,13 @@ type roomQueueRemoveReq struct {
 // roomQueuePrioritizeReq is the body of POST /api/rooms/{slug}/queue/prioritize.
 // R07d: server-resolves identity from the bearer token; identity fields
 // (user_id, requested_by, added_by, etc.) are not honored when present.
+//
+// SongIndex is a pointer so the handler can distinguish "field omitted"
+// (nil) from "field present with zero" (e.g. {"song_index":0}). The
+// raw int form silently coerced missing fields to 0, which used to be
+// treated as a valid index and mutate the first song.
 type roomQueuePrioritizeReq struct {
-	SongIndex int `json:"song_index"`
+	SongIndex *int `json:"song_index"`
 }
 
 // --- Handlers ---
@@ -212,7 +217,15 @@ func (h *RoomQueueHandlers) HandlePrioritizeRoomSong(w http.ResponseWriter, r *h
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if req.SongIndex < 0 {
+	// R07d: SongIndex is *int so we can reject a missing field
+	// (body {} → SongIndex == nil) as 400. The pre-fix int form silently
+	// defaulted missing to 0, which mutated song at index 0 — see
+	// TestRoomQueue_PrioritizeSong_MissingBodyReturns400.
+	if req.SongIndex == nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if *req.SongIndex < 0 {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -221,7 +234,7 @@ func (h *RoomQueueHandlers) HandlePrioritizeRoomSong(w http.ResponseWriter, r *h
 		writeRoomQueueError(w, err)
 		return
 	}
-	queue, fromIndex, toIndex, song, err := h.inter.PrioritizeSong(r.Context(), slug, actorUserID, role, req.SongIndex)
+	queue, fromIndex, toIndex, song, err := h.inter.PrioritizeSong(r.Context(), slug, actorUserID, role, *req.SongIndex)
 	if err != nil {
 		writeRoomQueueError(w, err)
 		return

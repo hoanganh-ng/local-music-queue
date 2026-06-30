@@ -227,7 +227,14 @@ type recordingRoomBroadcaster struct {
 	addCalls    []string
 	removeCalls []int
 	clearCalls  []string
-	prioCalls   []struct{ slug string; from, to int }
+	prioCalls   []recordingPrioCall
+}
+
+type recordingPrioCall struct {
+	slug string
+	from int
+	to   int
+	song entity.Song
 }
 
 func (r *recordingRoomBroadcaster) BroadcastRoomQueueSync(slug string, _ *entity.Queue) {
@@ -250,10 +257,10 @@ func (r *recordingRoomBroadcaster) BroadcastRoomQueueCleared(slug string, _ *ent
 	defer r.mu.Unlock()
 	r.clearCalls = append(r.clearCalls, slug)
 }
-func (r *recordingRoomBroadcaster) BroadcastRoomQueueSongPrioritized(slug string, from, to int, _ entity.Song, _ *entity.Queue) {
+func (r *recordingRoomBroadcaster) BroadcastRoomQueueSongPrioritized(slug string, from, to int, song entity.Song, _ *entity.Queue) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.prioCalls = append(r.prioCalls, struct{ slug string; from, to int }{slug, from, to})
+	r.prioCalls = append(r.prioCalls, recordingPrioCall{slug: slug, from: from, to: to, song: song})
 }
 
 func TestRoomQueue_AddSong_BroadcastsSongAdded(t *testing.T) {
@@ -419,6 +426,38 @@ func seedRoomQueueWithTwoSongs(t *testing.T, slug string) (*RoomQueueHandlers, *
 	return rqh, db, cleanup
 }
 
+// seedRoomQueueWithCurrentNotZero seeds a queue whose CurrentIndex is
+// NOT 0 (e.g. a played song at idx 0, current at idx 1, upcoming at
+// idx 2). Used by the missing-body test so the old bug (missing
+// song_index silently defaulting to 0) would mutate index 0 — the
+// "played" song — and change its IsPrioritized flag. With the fix in
+// place the request is rejected with 400 and the persisted queue is
+// untouched.
+func seedRoomQueueWithCurrentNotZero(t *testing.T, slug string) (*RoomQueueHandlers, *sql.DB, func()) {
+	t.Helper()
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	seedUserQueue(t, db, 42, "host-rq-prio-nz-"+slug+"@example.com", entity.RoleHost)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, slug, "PR-"+slug, 42, time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := mustRoomIDQueue(t, db, slug)
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	seed := entity.NewQueue()
+	seed.Songs = []entity.Song{
+		{ID: "played", Title: "Played", URL: "u", AddedBy: "Host", AddedByID: 42},
+		{ID: "cur", Title: "Cur", URL: "u", AddedBy: "Host", AddedByID: 42},
+		{ID: "up", Title: "Up", URL: "u", AddedBy: "Host", AddedByID: 42},
+	}
+	seed.CurrentIndex = 1
+	seed.Status = entity.StatusPlaying
+	if err := queueRepo.Save(ctx, roomID, seed); err != nil {
+		t.Fatalf("seed queue: %v", err)
+	}
+	return rqh, db, cleanup
+}
+
 func TestRoomQueue_PrioritizeSong_HostReturns204(t *testing.T) {
 	rqh, _, cleanup := seedRoomQueueWithTwoSongs(t, "rq-h-prio-ok")
 	defer cleanup()
@@ -455,6 +494,61 @@ func TestRoomQueue_PrioritizeSong_BroadcastsSongPrioritized(t *testing.T) {
 	}
 	if bc.prioCalls[0].slug != "rq-h-prio-bc" || bc.prioCalls[0].from != 1 || bc.prioCalls[0].to != 1 {
 		t.Errorf("expected prio call slug=rq-h-prio-bc from=1 to=1, got %+v", bc.prioCalls[0])
+	}
+}
+
+// TestRoomQueue_PrioritizeSong_BroadcastSongIsPrioritizedTrue covers
+// the R07d important-fix invariant at the handler/broadcast seam: the
+// song entity the handler hands to BroadcastRoomQueueSongPrioritized
+// must carry IsPrioritized=true so the front-end visual indicator
+// works. The pre-fix interactor returned the pre-mutation snapshot
+// (IsPrioritized=false), so the broadcast payload would not have
+// flipped the indicator even though the authoritative state already
+// had. With the post-mutation fix, the broadcast song matches the
+// authoritative state. Uses a three-song seed so the move actually
+// executes (entity.Prioritize is a no-op when the song is already at
+// the target slot).
+func TestRoomQueue_PrioritizeSong_BroadcastSongIsPrioritizedTrue(t *testing.T) {
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	defer cleanup()
+	seedUserQueue(t, db, 42, "host-rq-prio-bcsong@example.com", entity.RoleHost)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, "rq-h-prio-bc-prio", "PRBcs", 42, time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := mustRoomIDQueue(t, db, "rq-h-prio-bc-prio")
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	seed := entity.NewQueue()
+	seed.Songs = []entity.Song{
+		{ID: "cur", Title: "Cur", URL: "u", AddedBy: "Host", AddedByID: 42},
+		{ID: "up1", Title: "Up1", URL: "u", AddedBy: "Host", AddedByID: 42},
+		{ID: "up2", Title: "Up2", URL: "u", AddedBy: "Host", AddedByID: 42},
+	}
+	seed.CurrentIndex = 0
+	seed.Status = entity.StatusPlaying
+	if err := queueRepo.Save(ctx, roomID, seed); err != nil {
+		t.Fatalf("seed queue: %v", err)
+	}
+
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	body := []byte(`{"song_index":2}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-prio-bc-prio/queue/prioritize", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandlePrioritizeRoomSong(rr, req, "rq-h-prio-bc-prio", 42)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.prioCalls) != 1 {
+		t.Fatalf("expected 1 prioritize broadcast, got %d", len(bc.prioCalls))
+	}
+	if !bc.prioCalls[0].song.IsPrioritized {
+		t.Errorf("expected broadcast song IsPrioritized=true, got %+v", bc.prioCalls[0].song)
 	}
 }
 
@@ -521,6 +615,71 @@ func TestRoomQueue_PrioritizeSong_MalformedJSONReturns400(t *testing.T) {
 	rqh.HandlePrioritizeRoomSong(rr, req, "rq-h-prio-mf", 42)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+}
+
+// TestRoomQueue_PrioritizeSong_MissingBodyReturns400 covers the R07d
+// blocking-fix invariant: POST /api/rooms/{slug}/queue/prioritize with
+// body {} must return 400 (missing song_index) and MUST NOT broadcast
+// or mutate the persisted queue. The seeded queue has current_index=1
+// (not 0) so the pre-fix bug (missing → int default 0) would have
+// mutated the played song at index 0 and stamped IsPrioritized=true on
+// it. With the *int fix the request is rejected and the persisted
+// queue is byte-for-byte unchanged.
+func TestRoomQueue_PrioritizeSong_MissingBodyReturns400(t *testing.T) {
+	rqh, db, cleanup := seedRoomQueueWithCurrentNotZero(t, "rq-h-prio-mb")
+	defer cleanup()
+
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	roomID := mustRoomIDQueue(t, db, "rq-h-prio-mb")
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	before, err := queueRepo.Load(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("load pre: %v", err)
+	}
+	if before.CurrentIndex != 1 {
+		t.Fatalf("precondition: expected CurrentIndex=1, got %d", before.CurrentIndex)
+	}
+	if before.Songs[0].IsPrioritized {
+		t.Fatalf("precondition: expected Songs[0].IsPrioritized=false, got true")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-prio-mb/queue/prioritize", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandlePrioritizeRoomSong(rr, req, "rq-h-prio-mb", 42)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing song_index, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// No broadcast on the error path.
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.prioCalls) != 0 {
+		t.Errorf("expected NO prioritize broadcast on missing song_index, got %d", len(bc.prioCalls))
+	}
+
+	// Persisted queue must be untouched: no song at index 0 got
+	// IsPrioritized=true and the order is preserved.
+	after, err := queueRepo.Load(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("load post: %v", err)
+	}
+	if len(after.Songs) != len(before.Songs) {
+		t.Fatalf("expected %d songs after, got %d", len(before.Songs), len(after.Songs))
+	}
+	if after.CurrentIndex != before.CurrentIndex {
+		t.Errorf("expected CurrentIndex unchanged (%d), got %d", before.CurrentIndex, after.CurrentIndex)
+	}
+	for i := range before.Songs {
+		if after.Songs[i].ID != before.Songs[i].ID {
+			t.Errorf("song at idx %d changed: was %q now %q", i, before.Songs[i].ID, after.Songs[i].ID)
+		}
+		if after.Songs[i].IsPrioritized != before.Songs[i].IsPrioritized {
+			t.Errorf("IsPrioritized at idx %d changed: was %v now %v", i, before.Songs[i].IsPrioritized, after.Songs[i].IsPrioritized)
+		}
 	}
 }
 

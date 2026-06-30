@@ -327,10 +327,9 @@ func (i *Interactor) PrioritizeSong(ctx context.Context, slug string, actorUserI
 		return nil, 0, 0, entity.Song{}, ErrCannotPrioritizeCurrent
 	}
 
-	// Snapshot the song BEFORE the mutation so the broadcaster gets the
-	// post-mutation entity (with IsPrioritized = true) without having to
-	// look it up again.
-	song := queue.Songs[songIndex]
+	// Snapshot the song BEFORE the mutation only for the from-index
+	// lookup; the broadcast payload must come from the post-mutation
+	// slot so IsPrioritized=true is observed by subscribers.
 	if err := queue.Prioritize(songIndex); err != nil {
 		return nil, 0, 0, entity.Song{}, err
 	}
@@ -347,7 +346,12 @@ func (i *Interactor) PrioritizeSong(ctx context.Context, slug string, actorUserI
 	if toIndex >= len(queue.Songs) {
 		toIndex = len(queue.Songs) - 1
 	}
-	return queue, songIndex, toIndex, song, nil
+	// R07d: return the post-mutation song (from queue.Songs[toIndex])
+	// so the broadcaster payload carries IsPrioritized=true. The
+	// pre-mutation snapshot used to leak the un-stamped copy and
+	// tripped the test that asserts the broadcast song has
+	// IsPrioritized=true.
+	return queue, songIndex, toIndex, queue.Songs[toIndex], nil
 }
 
 // MemberRole returns the actor's room-scoped role. Returns ("", nil)

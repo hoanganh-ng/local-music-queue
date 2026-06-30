@@ -525,3 +525,25 @@ func TestRoomQueue_PrioritizeSong_NoBroadcastOnError(t *testing.T) {
 		t.Errorf("expected 0 prioritize broadcasts on error, got %d", bc.prioN)
 	}
 }
+
+// TestRoomQueue_PrioritizeSong_ReturnedSongIsPrioritizedTrue covers the
+// R07d important-fix invariant: the song returned by PrioritizeSong
+// (which the handler forwards to the broadcaster) MUST carry
+// IsPrioritized=true. The pre-fix code returned the pre-mutation
+// snapshot, which leaked the un-stamped copy and broke the front-end
+// visual indicator. This test pins the post-mutation behavior.
+func TestRoomQueue_PrioritizeSong_ReturnedSongIsPrioritizedTrue(t *testing.T) {
+	inter, _ := seedPrioritizeQueue(t, "rq-prio-bc-song")
+	ctx := context.Background()
+
+	_, _, _, song, err := inter.PrioritizeSong(ctx, "rq-prio-bc-song", 42, entity.RoomRoleHost, 2)
+	if err != nil {
+		t.Fatalf("prioritize: %v", err)
+	}
+	if !song.IsPrioritized {
+		t.Errorf("expected returned song IsPrioritized=true, got %+v", song)
+	}
+	if song.ID != "up2" {
+		t.Errorf("expected returned song id up2, got %q", song.ID)
+	}
+}

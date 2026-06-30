@@ -328,7 +328,7 @@ export const globalStore = reactive({
     if (fromIndex < 0 || fromIndex >= songs.length) return
     if (toIndex < 0 || toIndex >= songs.length) return
     const [moved] = songs.splice(fromIndex, 1)
-    songs.splice(toIndex, 0, { ...moved, ...song, IsPrioritized: true })
+    songs.splice(toIndex, 0, { ...moved, ...song, is_prioritized: true })
     s.songs = songs
     if (typeof s.current_index === 'number') {
       if (fromIndex < s.current_index && toIndex >= s.current_index) {
