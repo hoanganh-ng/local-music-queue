@@ -45,6 +45,10 @@ const apiMock = vi.hoisted(() => ({
   removeRoomSong: vi.fn(),
   clearRoomQueue: vi.fn(),
   prioritizeRoomSong: vi.fn(),
+  setRoomPlaybackStatus: vi.fn(),
+  syncRoomPlayback: vi.fn(),
+  skipRoomPlayback: vi.fn(),
+  roomSongEnded: vi.fn(),
 }))
 vi.mock('../../services/api', () => ({ api: apiMock }))
 
