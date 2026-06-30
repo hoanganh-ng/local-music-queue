@@ -16,7 +16,7 @@ Sprint 007 / R01 — PostgreSQL Migration Design is closed. See [007-postgresql-
 
 Sprint 006 / R00 — Room Architecture ADR / R00 is closed. See [006-room-architecture-adr-contract-plan.md](./006-room-architecture-adr-contract-plan.md).
 
-The next sprint to shape after R04 closes is **Sprint R06 — Player Lease and Host Departure Semantics** per [`../ROOM_EPIC_SPRINT_SEQUENCE.md`](../ROOM_EPIC_SPRINT_SEQUENCE.md). R06 implementation is in progress on `dev`; R05 (session token authentication & authorization) and A01 (allowed origins & WebSocket origin policy) were completed out-of-band of the R04 sequence.
+The next sprint to shape after R06 acceptance is **Sprint R09b+ — Remaining player control semantics** (vote-to-skip, volume, previous, room auto-queue, full media-player device integration) per [`../ROOM_EPIC_SPRINT_SEQUENCE.md`](../ROOM_EPIC_SPRINT_SEQUENCE.md). R06 (Player Lease and Host Departure Semantics) is implemented on `dev` with full Product Owner acceptance pending; R07a/R07b/R07c/R07d are all closed and accepted; R05 (session token authentication & authorization) and A01 (allowed origins & WebSocket origin policy) were completed out-of-band of the R04 sequence.
 
 Sprint 012 / R07a — Room-scoped playback queue (narrow first slice) is closed (2026-06-29, accepted by the Product Owner). See [012-room-scoped-playback-queue.md](./012-room-scoped-playback-queue.md).
 
