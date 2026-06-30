@@ -82,6 +82,13 @@ func (b *voteTestBroadcaster) BroadcastRoomVoteResolved(slug, sessionID, outcome
 	})
 }
 
+// BroadcastRoomPlaybackVolumeChanged is a no-op stub kept on
+// voteTestBroadcaster so it continues to satisfy roomqueue.Broadcaster
+// after R09c added the volume method to the interface. The vote
+// handlers never invoke this; the R09c handler is the only caller in
+// the room-queue delivery layer.
+func (b *voteTestBroadcaster) BroadcastRoomPlaybackVolumeChanged(_, _ string) {}
+
 // fixedResolver is a deterministic roomvote.Resolver that always
 // returns the supplied unique-user count. Tests use it to pin the
 // threshold (max(2, count/2 + 1)) at session creation time.

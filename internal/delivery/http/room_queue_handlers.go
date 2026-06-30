@@ -73,6 +73,14 @@ type roomQueuePlaybackElapsedReq struct {
 	Elapsed *int `json:"elapsed"`
 }
 
+// roomQueuePlaybackVolumeReq is the body of POST
+// /api/rooms/{slug}/playback/volume. R09c: Direction must be exactly
+// "up" or "down"; any other value (including empty/missing) returns
+// 400 at the handler layer.
+type roomQueuePlaybackVolumeReq struct {
+	Direction string `json:"direction"`
+}
+
 // --- Handlers ---
 
 // HandleGetRoomQueue: GET /api/rooms/{slug}/queue — returns the current
@@ -390,6 +398,37 @@ func (h *RoomQueueHandlers) HandleRoomSongEnded(w http.ResponseWriter, r *http.R
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// HandleChangeRoomPlaybackVolume: POST /api/rooms/{slug}/playback/volume
+// — lease-holder only. Body: {"direction":"up"} or {"direction":"down"}.
+// Returns 204 on success and broadcasts room_playback_volume_changed.
+// The volume state is intentionally NOT persisted: there is no
+// entity.Queue.Volume field, no room_queue_state column, and the
+// command does not call queueRepo.Save. The event rides
+// /ws/rooms/{slug} only; the global /ws contract is unchanged.
+func (h *RoomQueueHandlers) HandleChangeRoomPlaybackVolume(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
+	if actorUserID == 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req roomQueuePlaybackVolumeReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.Direction != "up" && req.Direction != "down" {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if err := h.inter.ChangePlaybackVolume(r.Context(), slug, actorUserID, req.Direction); err != nil {
+		writeRoomQueueError(w, err)
+		return
+	}
+	if bc := h.inter.Broadcaster(); bc != nil {
+		bc.BroadcastRoomPlaybackVolumeChanged(slug, req.Direction)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // --- error mapping ---
 
 // writeRoomQueueError maps use-case sentinel errors to the documented
@@ -401,6 +440,7 @@ func writeRoomQueueError(w http.ResponseWriter, err error) {
 		errors.Is(err, roomqueue.ErrCannotPrioritizeCurrent),
 		errors.Is(err, roomqueue.ErrInvalidStatus),
 		errors.Is(err, roomqueue.ErrInvalidElapsed),
+		errors.Is(err, roomqueue.ErrInvalidDirection),
 		errors.Is(err, roomqueue.ErrNoCurrentSong),
 		errors.Is(err, roomqueue.ErrNoNextSong):
 		http.Error(w, err.Error(), http.StatusBadRequest)

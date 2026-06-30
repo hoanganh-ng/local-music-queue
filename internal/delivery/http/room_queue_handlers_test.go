@@ -232,6 +232,7 @@ type recordingRoomBroadcaster struct {
 	statusCalls   []recordingStatusCall
 	elapsedCalls  []recordingElapsedCall
 	advancedCalls []recordingAdvancedCall
+	volumeCalls   []recordingVolumeCall
 }
 
 type recordingPrioCall struct {
@@ -260,6 +261,13 @@ type recordingAdvancedCall struct {
 	song    *entity.Song
 	status  entity.PlaybackStatus
 	elapsed int
+}
+
+// recordingVolumeCall: append {slug, direction} whenever
+// BroadcastRoomPlaybackVolumeChanged is invoked.
+type recordingVolumeCall struct {
+	slug      string
+	direction string
 }
 
 func (r *recordingRoomBroadcaster) BroadcastRoomQueueSync(slug string, _ *entity.Queue) {
@@ -304,6 +312,11 @@ func (r *recordingRoomBroadcaster) BroadcastRoomPlaybackSongAdvanced(slug, reaso
 }
 func (r *recordingRoomBroadcaster) BroadcastRoomVoteUpdated(_ string, _ *entity.VoteSession, _ int, _ *entity.Queue) {}
 func (r *recordingRoomBroadcaster) BroadcastRoomVoteResolved(_, _, _ string, _ *entity.Queue) {}
+func (r *recordingRoomBroadcaster) BroadcastRoomPlaybackVolumeChanged(slug, direction string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.volumeCalls = append(r.volumeCalls, recordingVolumeCall{slug: slug, direction: direction})
+}
 
 func TestRoomQueue_AddSong_BroadcastsSongAdded(t *testing.T) {
 	rqh, db, cleanup := newRoomQueueHandlers(t)
@@ -928,14 +941,17 @@ func playbackRoomFixture(t *testing.T, slug string, holderID int) (*RoomQueueHan
 	roomRepo := persistence.NewPostgresRoomRepository(db)
 	ctx := context.Background()
 	seedUserQueue(t, db, 200, "host-rq-pb-"+slug+"@example.com", entity.RoleHost)
-	if holderID != 200 {
+	// holderID == 0 is the "no lease" sentinel: skip seeding the holder
+	// user and guest-membership so the resulting room has no active
+	// lease. Used by TestRoomQueue_ChangePlaybackVolume_MissingLeaseReturns404.
+	if holderID != 200 && holderID != 0 {
 		seedUserQueue(t, db, holderID, fmt.Sprintf("holder-rq-pb-%s@example.com", slug), entity.RoleGuest)
 	}
 	if _, err := roomRepo.CreateRoomAndHost(ctx, slug, "PB-"+slug, 200, time.Now().UTC()); err != nil {
 		t.Fatalf("create room: %v", err)
 	}
 	roomID := mustRoomIDQueue(t, db, slug)
-	if holderID != 200 {
+	if holderID != 200 && holderID != 0 {
 		if err := roomRepo.AddMember(ctx, roomID, holderID, entity.RoomRoleGuest, time.Now().UTC()); err != nil {
 			t.Fatalf("add holder guest: %v", err)
 		}
@@ -953,8 +969,13 @@ func playbackRoomFixture(t *testing.T, slug string, holderID int) (*RoomQueueHan
 	}
 	leaseRepo := persistence.NewPostgresPlayerLeaseRepository(db)
 	leaseInter := room.NewPlayerLeaseInteractor(leaseRepo, roomRepo, db, room.DefaultLeaseDuration, room.DefaultLeaseGrace)
-	if _, err := leaseInter.Claim(ctx, slug, holderID); err != nil {
-		t.Fatalf("claim lease for holder %d: %v", holderID, err)
+	// holderID == 0 is the "no lease" sentinel: skip the Claim so the
+	// resulting room has no active lease. Used by
+	// TestRoomQueue_ChangePlaybackVolume_MissingLeaseReturns404.
+	if holderID != 0 {
+		if _, err := leaseInter.Claim(ctx, slug, holderID); err != nil {
+			t.Fatalf("claim lease for holder %d: %v", holderID, err)
+		}
 	}
 	rqh.inter.SetLeaseAuthorizer(leaseInter)
 	return rqh, db, cleanup
@@ -1214,5 +1235,181 @@ func TestRoomQueue_Ended_NoNextSongPausesAndBroadcastsStatus(t *testing.T) {
 	}
 	if len(bc.advancedCalls) != 0 {
 		t.Errorf("expected 0 advanced broadcasts at end-of-queue, got %d", len(bc.advancedCalls))
+	}
+}
+
+// TestRoomQueue_ChangePlaybackVolume_HolderReturns204 pins the happy
+// path: holder sends {"direction":"up"}, handler returns 204, broadcaster
+// receives exactly one {slug, direction="up"} call. No queue mutation.
+func TestRoomQueue_ChangePlaybackVolume_HolderReturns204(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-c-vol-h-204", 200)
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	body := []byte(`{"direction":"up"}`)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/rooms/rq-c-vol-h-204/playback/volume",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleChangeRoomPlaybackVolume(rr, req, "rq-c-vol-h-204", 200)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.volumeCalls) != 1 || bc.volumeCalls[0].direction != "up" {
+		t.Fatalf("expected 1 up broadcast, got %+v", bc.volumeCalls)
+	}
+	if bc.volumeCalls[0].slug != "rq-c-vol-h-204" {
+		t.Errorf("expected slug rq-c-vol-h-204, got %q", bc.volumeCalls[0].slug)
+	}
+}
+
+// TestRoomQueue_ChangePlaybackVolume_DownAlsoReturns204 pins the
+// other valid direction.
+func TestRoomQueue_ChangePlaybackVolume_DownAlsoReturns204(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-c-vol-h-down", 200)
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	body := []byte(`{"direction":"down"}`)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/rooms/rq-c-vol-h-down/playback/volume",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleChangeRoomPlaybackVolume(rr, req, "rq-c-vol-h-down", 200)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.volumeCalls) != 1 || bc.volumeCalls[0].direction != "down" {
+		t.Fatalf("expected 1 down broadcast, got %+v", bc.volumeCalls)
+	}
+}
+
+// TestRoomQueue_ChangePlaybackVolume_InvalidDirectionReturns400
+func TestRoomQueue_ChangePlaybackVolume_InvalidDirectionReturns400(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-c-vol-bad", 200)
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	for _, dir := range []string{"left", "UP", "increase"} {
+		body := []byte(fmt.Sprintf(`{"direction":%q}`, dir))
+		req := httptest.NewRequest(http.MethodPost,
+			"/api/rooms/rq-c-vol-bad/playback/volume",
+			bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		rqh.HandleChangeRoomPlaybackVolume(rr, req, "rq-c-vol-bad", 200)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("direction=%q: expected 400, got %d", dir, rr.Code)
+		}
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.volumeCalls) != 0 {
+		t.Errorf("expected 0 broadcasts on bad direction, got %d", len(bc.volumeCalls))
+	}
+}
+
+// TestRoomQueue_ChangePlaybackVolume_MissingDirectionReturns400
+func TestRoomQueue_ChangePlaybackVolume_MissingDirectionReturns400(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-c-vol-missing", 200)
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	body := []byte(`{}`)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/rooms/rq-c-vol-missing/playback/volume",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleChangeRoomPlaybackVolume(rr, req, "rq-c-vol-missing", 200)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.volumeCalls) != 0 {
+		t.Errorf("expected 0 broadcasts, got %d", len(bc.volumeCalls))
+	}
+}
+
+// TestRoomQueue_ChangePlaybackVolume_MalformedJSONReturns400
+func TestRoomQueue_ChangePlaybackVolume_MalformedJSONReturns400(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-c-vol-malformed", 200)
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	body := []byte(`{not-json`)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/rooms/rq-c-vol-malformed/playback/volume",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleChangeRoomPlaybackVolume(rr, req, "rq-c-vol-malformed", 200)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.volumeCalls) != 0 {
+		t.Errorf("expected 0 broadcasts, got %d", len(bc.volumeCalls))
+	}
+}
+
+// TestRoomQueue_ChangePlaybackVolume_NonHolderReturns403AndNoBroadcast
+func TestRoomQueue_ChangePlaybackVolume_NonHolderReturns403AndNoBroadcast(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-c-vol-nh", 200)
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	body := []byte(`{"direction":"up"}`)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/rooms/rq-c-vol-nh/playback/volume",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleChangeRoomPlaybackVolume(rr, req, "rq-c-vol-nh", 42) // 42 is guest
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.volumeCalls) != 0 {
+		t.Errorf("expected 0 broadcasts on 403, got %d", len(bc.volumeCalls))
+	}
+}
+
+// TestRoomQueue_ChangePlaybackVolume_MissingLeaseReturns404
+func TestRoomQueue_ChangePlaybackVolume_MissingLeaseReturns404(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-c-vol-ml", 0) // 0 = no lease
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	body := []byte(`{"direction":"up"}`)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/rooms/rq-c-vol-ml/playback/volume",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleChangeRoomPlaybackVolume(rr, req, "rq-c-vol-ml", 200)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.volumeCalls) != 0 {
+		t.Errorf("expected 0 broadcasts on missing lease, got %d", len(bc.volumeCalls))
 	}
 }
