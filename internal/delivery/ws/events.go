@@ -40,6 +40,10 @@ const (
 	EventRoomQueueSongAdded   = "room_queue_song_added"
 	EventRoomQueueSongRemoved = "room_queue_song_removed"
 	EventRoomQueueCleared     = "room_queue_cleared"
+	// EventRoomQueueSongPrioritized is broadcast after a successful POST
+	// /api/rooms/{slug}/queue/prioritize. R07d addition; existing R07b
+	// contracts are unchanged.
+	EventRoomQueueSongPrioritized = "room_queue_song_prioritized"
 )
 
 // UserJoinedData contains only the new user info
@@ -235,4 +239,17 @@ type RoomQueueSongRemovedData struct {
 type RoomQueueClearedData struct {
 	RoomSlug string        `json:"room_slug"`
 	State    *entity.Queue `json:"state"`
+}
+
+// RoomQueueSongPrioritizedData is broadcast after a successful POST
+// /api/rooms/{slug}/queue/prioritize. The post-mutation snapshot is
+// authoritative; clients do not need to re-fetch. from_index is the
+// pre-mutation slot; to_index is the post-mutation slot (always
+// CurrentIndex + 1 per the entity invariant).
+type RoomQueueSongPrioritizedData struct {
+	RoomSlug  string        `json:"room_slug"`
+	FromIndex int           `json:"from_index"`
+	ToIndex   int           `json:"to_index"`
+	Song      entity.Song   `json:"song"`
+	State     *entity.Queue `json:"state"`
 }

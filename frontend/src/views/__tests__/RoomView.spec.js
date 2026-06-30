@@ -44,6 +44,7 @@ const apiMock = vi.hoisted(() => ({
   addRoomSong: vi.fn(),
   removeRoomSong: vi.fn(),
   clearRoomQueue: vi.fn(),
+  prioritizeRoomSong: vi.fn(),
 }))
 vi.mock('../../services/api', () => ({ api: apiMock }))
 
@@ -83,13 +84,45 @@ describe('RoomView', () => {
     inst.onMessage({ type: 'room_queue_sync', data: { room_slug: 'lobby', state: { songs: [{ id: 'a' }], current_index: 0, current_song: { id: 'a' }, status: 'playing', queue: [], history: [] } } })
     inst.onMessage({ type: 'room_queue_song_added', data: { room_slug: 'lobby', song: { id: 'b' }, position: 1, state: { songs: [{ id: 'a' }, { id: 'b' }], current_index: 0, current_song: { id: 'a' }, status: 'playing', queue: [], history: [] } } })
     inst.onMessage({ type: 'room_queue_song_removed', data: { room_slug: 'lobby', removed_index: 0, state: { songs: [{ id: 'b' }], current_index: 0, current_song: { id: 'b' }, status: 'paused', queue: [], history: [] } } })
+    inst.onMessage({ type: 'room_queue_song_prioritized', data: { room_slug: 'lobby', from_index: 1, to_index: 1, song: { id: 'b', IsPrioritized: true }, state: { songs: [{ id: 'a' }, { id: 'b', IsPrioritized: true }], current_index: 0, current_song: { id: 'a' }, status: 'playing', queue: [], history: [] } } })
     inst.onMessage({ type: 'room_queue_cleared', data: { room_slug: 'lobby', state: { songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] } } })
 
     // An unrelated event MUST be ignored.
     inst.onMessage({ type: 'song_added', data: {} })
     inst.onMessage({ type: 'full_sync', data: {} })
 
+    // The prioritized event landed — final state is the cleared state.
     expect(globalStore.roomQueues.lobby.state.songs).toEqual([])
+    wrapper.unmount()
+  })
+
+  it('prioritizeSong calls api.prioritizeRoomSong with (slug, index)', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.prioritizeRoomSong.mockResolvedValue(null)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+
+    // Pull the live component instance and call its prioritizeSong.
+    const vm = wrapper.vm
+    await vm.prioritizeSong(2)
+    expect(apiMock.prioritizeRoomSong).toHaveBeenCalledWith('lobby', 2)
+    wrapper.unmount()
+  })
+
+  it('prioritizeSong surfaces 400/401/403/404/409 via toast without throwing', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const vm = wrapper.vm
+
+    for (const status of [400, 401, 403, 404, 409]) {
+      apiMock.prioritizeRoomSong.mockRejectedValueOnce(Object.assign(new Error(`err ${status}`), { status }))
+      await vm.prioritizeSong(1)
+      expect(toastMock.error).toHaveBeenCalled()
+      toastMock.error.mockClear()
+    }
     wrapper.unmount()
   })
 
@@ -161,11 +194,15 @@ describe('RoomView', () => {
     wrapper.unmount()
   })
 
-  it('does NOT render global playback, vote, priority, auto-queue, invite, or player-lease UI', () => {
+  it('does NOT render global playback, vote, auto-queue, invite, or player-lease UI', () => {
+    // R07d adds a room-scoped Prioritize button; "prioritize" is now
+    // intentionally present in the rendered HTML. The other banned words
+    // still must NOT appear — those are global playback controls that
+    // belong in Dashboard, not in RoomView.
     apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
     const { wrapper } = mountRoomView()
     const html = wrapper.html()
-    for (const banned of ['radio-mode-toggle', 'volume', 'vote', 'prioritize', 'invite', 'lease', 'skip', 'autoplay', 'auto-queue']) {
+    for (const banned of ['radio-mode-toggle', 'volume', 'vote', 'invite', 'lease', 'skip', 'autoplay', 'auto-queue']) {
       expect(html.toLowerCase()).not.toContain(banned)
     }
   })

@@ -353,6 +353,20 @@ func (h *RoomWSHub) BroadcastRoomQueueCleared(roomSlug string, state *entity.Que
 	})
 }
 
+// BroadcastRoomQueueSongPrioritized is fired after a successful
+// POST /api/rooms/{slug}/queue/prioritize. Per R07b invariants it
+// does NOT allocate a seq itself — dispatch() is a goroutine fan-out
+// that enqueues a (roomSlug, msgType, data) tuple onto the hub's
+// broadcast channel, and the hub loop stamps the seq on dequeue.
+// Centralising seq allocation in Run is what guarantees the initial
+// sync (stamp under the register case) is the floor for every
+// subsequent delta on every connected client.
+func (h *RoomWSHub) BroadcastRoomQueueSongPrioritized(roomSlug string, fromIndex, toIndex int, song entity.Song, state *entity.Queue) {
+	h.dispatch(roomSlug, EventRoomQueueSongPrioritized, RoomQueueSongPrioritizedData{
+		RoomSlug: roomSlug, FromIndex: fromIndex, ToIndex: toIndex, Song: song, State: state,
+	})
+}
+
 // --- RegisterHandler ---
 
 // RegisterHandler handles GET /ws/rooms/{slug}?session_token=<opaque>.

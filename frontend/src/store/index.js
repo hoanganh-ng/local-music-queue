@@ -312,6 +312,33 @@ export const globalStore = reactive({
     s.status = 'stopped'
   },
 
+  // R07d: applies a room_queue_song_prioritized event for slug.
+  // Prefers the authoritative payload.state when present (same
+  // contract as the other room mutators). The fallback path mirrors
+  // entity.Queue.Prioritize: remove from fromIndex, insert at toIndex,
+  // adjust current_index when the move crossed it.
+  applyRoomSongPrioritized(slug, fromIndex, toIndex, song, fullState) {
+    const entry = this._ensureRoomEntry(slug)
+    if (fullState) {
+      entry.state = fullState
+      return
+    }
+    const s = entry.state
+    const songs = (s.songs || []).slice()
+    if (fromIndex < 0 || fromIndex >= songs.length) return
+    if (toIndex < 0 || toIndex >= songs.length) return
+    const [moved] = songs.splice(fromIndex, 1)
+    songs.splice(toIndex, 0, { ...moved, ...song, IsPrioritized: true })
+    s.songs = songs
+    if (typeof s.current_index === 'number') {
+      if (fromIndex < s.current_index && toIndex >= s.current_index) {
+        s.current_index--
+      } else if (fromIndex > s.current_index && toIndex <= s.current_index) {
+        s.current_index++
+      }
+    }
+  },
+
   clearRoomQueueState(slug) {
     if (this.roomQueues[slug]) {
       delete this.roomQueues[slug]

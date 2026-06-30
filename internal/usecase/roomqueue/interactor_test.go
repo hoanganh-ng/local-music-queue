@@ -321,6 +321,7 @@ type recordingBroadcaster struct {
 	addN    int
 	removeN int
 	clearN  int
+	prioN   int
 }
 
 func (r *recordingBroadcaster) BroadcastRoomQueueSync(_ string, _ *entity.Queue) {
@@ -342,6 +343,11 @@ func (r *recordingBroadcaster) BroadcastRoomQueueCleared(_ string, _ *entity.Que
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.clearN++
+}
+func (r *recordingBroadcaster) BroadcastRoomQueueSongPrioritized(_ string, _, _ int, _ entity.Song, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prioN++
 }
 
 // --- helpers ---
@@ -384,3 +390,138 @@ var (
 	_ = repository.ErrRoomQueueNotFound
 	_ = service.YouTubeService((*stubYouTube)(nil))
 )
+
+// --- R07d PrioritizeSong tests ---
+
+// seedPrioritizeQueue creates a room with three songs: current at 0,
+// upcoming at 1 and 2. Returns the room id and the interactor.
+func seedPrioritizeQueue(t *testing.T, slug string) (*Interactor, int64) {
+	t.Helper()
+	inter, _, cleanup := pgRoomQueue(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, slug, "PR-"+slug, 42, testTime()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := mustRoomID(t, inter, slug)
+	seed := entity.NewQueue()
+	seed.Songs = []entity.Song{
+		{ID: "cur", Title: "Cur", URL: "u", AddedBy: "Host U42", AddedByID: 42},
+		{ID: "up1", Title: "Up1", URL: "u", AddedBy: "Host U42", AddedByID: 42},
+		{ID: "up2", Title: "Up2", URL: "u", AddedBy: "Host U42", AddedByID: 42},
+	}
+	seed.CurrentIndex = 0
+	seed.Status = entity.StatusPlaying
+	if err := inter.queueRepo.Save(ctx, roomID, seed); err != nil {
+		t.Fatalf("seed queue: %v", err)
+	}
+	return inter, roomID
+}
+
+func TestRoomQueue_PrioritizeSong_HostMovesUpcomingToCurrentPlusOne(t *testing.T) {
+	inter, roomID := seedPrioritizeQueue(t, "rq-prio-ok")
+	ctx := context.Background()
+
+	queue, fromIndex, toIndex, song, err := inter.PrioritizeSong(ctx, "rq-prio-ok", 42, entity.RoomRoleHost, 2)
+	if err != nil {
+		t.Fatalf("prioritize: %v", err)
+	}
+	if fromIndex != 2 || toIndex != 1 {
+		t.Errorf("expected from=2 to=1, got from=%d to=%d", fromIndex, toIndex)
+	}
+	if song.ID != "up2" {
+		t.Errorf("expected moved song id up2, got %q", song.ID)
+	}
+	if len(queue.Songs) != 3 {
+		t.Fatalf("expected 3 songs, got %d", len(queue.Songs))
+	}
+	if queue.Songs[1].ID != "up2" {
+		t.Errorf("expected up2 at index 1 after prioritize, got %q", queue.Songs[1].ID)
+	}
+	if !queue.Songs[1].IsPrioritized {
+		t.Errorf("expected IsPrioritized=true on moved song")
+	}
+
+	// Persisted state must match.
+	persisted, err := inter.queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("load persisted: %v", err)
+	}
+	if persisted.Songs[1].ID != "up2" || !persisted.Songs[1].IsPrioritized {
+		t.Errorf("persisted: expected up2 prioritized at idx 1, got %+v", persisted.Songs[1])
+	}
+}
+
+func TestRoomQueue_PrioritizeSong_InvalidIndexReturnsErrInvalidIndex(t *testing.T) {
+	inter, _ := seedPrioritizeQueue(t, "rq-prio-bad-idx")
+	ctx := context.Background()
+
+	for _, idx := range []int{-1, 3, 99} {
+		_, _, _, _, err := inter.PrioritizeSong(ctx, "rq-prio-bad-idx", 42, entity.RoomRoleHost, idx)
+		if !errors.Is(err, ErrInvalidIndex) {
+			t.Errorf("idx=%d: expected ErrInvalidIndex, got %v", idx, err)
+		}
+	}
+}
+
+func TestRoomQueue_PrioritizeSong_CurrentSongReturnsErrCannotPrioritizeCurrent(t *testing.T) {
+	inter, _ := seedPrioritizeQueue(t, "rq-prio-current")
+	ctx := context.Background()
+
+	_, _, _, _, err := inter.PrioritizeSong(ctx, "rq-prio-current", 42, entity.RoomRoleHost, 0)
+	if !errors.Is(err, ErrCannotPrioritizeCurrent) {
+		t.Fatalf("expected ErrCannotPrioritizeCurrent, got %v", err)
+	}
+}
+
+func TestRoomQueue_PrioritizeSong_GuestForbidden(t *testing.T) {
+	inter, _ := seedPrioritizeQueue(t, "rq-prio-guest")
+	ctx := context.Background()
+
+	if err := inter.roomRepo.AddMember(ctx, mustRoomID(t, inter, "rq-prio-guest"), 200, entity.RoomRoleGuest, testTime()); err != nil {
+		t.Fatalf("add guest: %v", err)
+	}
+	_, _, _, _, err := inter.PrioritizeSong(ctx, "rq-prio-guest", 200, entity.RoomRoleGuest, 1)
+	if !errors.Is(err, room.ErrForbidden) {
+		t.Fatalf("expected ErrForbidden for guest, got %v", err)
+	}
+}
+
+func TestRoomQueue_PrioritizeSong_NonMemberForbidden(t *testing.T) {
+	inter, _ := seedPrioritizeQueue(t, "rq-prio-nm")
+	ctx := context.Background()
+
+	_, _, _, _, err := inter.PrioritizeSong(ctx, "rq-prio-nm", 999, entity.RoomRoleHost, 1)
+	if !errors.Is(err, room.ErrForbidden) {
+		t.Fatalf("expected ErrForbidden for non-member, got %v", err)
+	}
+}
+
+func TestRoomQueue_PrioritizeSong_ArchivedRoomReturnsErrArchived(t *testing.T) {
+	inter, roomID := seedPrioritizeQueue(t, "rq-prio-archived")
+	ctx := context.Background()
+
+	if err := inter.roomRepo.ArchiveRoom(ctx, roomID, testTime()); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	_, _, _, _, err := inter.PrioritizeSong(ctx, "rq-prio-archived", 42, entity.RoomRoleHost, 1)
+	if !errors.Is(err, room.ErrArchived) {
+		t.Fatalf("expected ErrArchived, got %v", err)
+	}
+}
+
+func TestRoomQueue_PrioritizeSong_NoBroadcastOnError(t *testing.T) {
+	inter, _ := seedPrioritizeQueue(t, "rq-prio-nobc")
+	ctx := context.Background()
+
+	bc := &recordingBroadcaster{}
+	inter.SetBroadcaster(bc)
+
+	// Trigger an error (current song) — broadcaster must NOT fire.
+	_, _, _, _, _ = inter.PrioritizeSong(ctx, "rq-prio-nobc", 42, entity.RoomRoleHost, 0)
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if bc.prioN != 0 {
+		t.Errorf("expected 0 prioritize broadcasts on error, got %d", bc.prioN)
+	}
+}

@@ -71,6 +71,18 @@ describe('Room Queue API', () => {
     expect(bodyText).not.toMatch(/(added_by|requested_by|user_id|user_role)/)
   })
 
+  it('prioritizeRoomSong posts ONLY {song_index} — no user_id / requested_by / added_by', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ status: 204, ok: true, json: async () => '' })
+    global.fetch = mockFetch
+    await api.prioritizeRoomSong('lobby', 2)
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/queue\/prioritize$/)
+    expect(init.method).toBe('POST')
+    const body = JSON.parse(init.body)
+    expect(body).toEqual({ song_index: 2 })
+    expect(JSON.stringify(body)).not.toMatch(/(user_id|requested_by|added_by|user_role)/)
+  })
+
   it('omits Authorization when session invalid', async () => {
     const mockFetch = mockFetchOk({ songs: [] })
     await api.getRoomQueue('lobby')

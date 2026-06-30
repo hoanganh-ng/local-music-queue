@@ -215,5 +215,16 @@ export const api = {
       method: 'POST',
       body: {}
     })
+  },
+
+  // R07d: prioritize a non-current room song. Bearer-token auth via
+  // api.request; the body MUST carry only song_index. Identity fields
+  // (user_id, requested_by, etc.) are intentionally NOT honored when
+  // present — backend ignores them. Server returns 204 No Content.
+  async prioritizeRoomSong(slug, songIndex) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}/queue/prioritize`, {
+      method: 'POST',
+      body: { song_index: songIndex }
+    })
   }
 }

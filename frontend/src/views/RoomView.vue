@@ -24,6 +24,14 @@
           >
             <span class="song-title">{{ song.title || '(untitled)' }}</span>
             <button
+              v-if="idx !== (roomState.state.current_index ?? -1)"
+              class="prioritize-btn"
+              :disabled="!canMutate"
+              @click="prioritizeSong(idx)"
+            >
+              Prioritize
+            </button>
+            <button
               class="remove-btn"
               :disabled="!canMutate"
               @click="removeSong(idx)"
@@ -99,6 +107,9 @@ function applyMessage(msg) {
       break
     case 'room_queue_song_removed':
       globalStore.applyRoomSongRemoved(slug.value, msg.data?.removed_index ?? -1, msg.data?.state)
+      break
+    case 'room_queue_song_prioritized':
+      globalStore.applyRoomSongPrioritized(slug.value, msg.data?.from_index ?? -1, msg.data?.to_index ?? -1, msg.data?.song, msg.data?.state)
       break
     case 'room_queue_cleared':
       globalStore.applyRoomQueueCleared(slug.value, msg.data?.state)
@@ -232,6 +243,20 @@ async function removeSong(index) {
   }
 }
 
+async function prioritizeSong(index) {
+  try {
+    await api.prioritizeRoomSong(slug.value, index)
+  } catch (e) {
+    const s = e?.status
+    if (s === 400) toast.error('Cannot prioritize that song.')
+    else if (s === 401) toast.error('You are signed out. Log in again.')
+    else if (s === 403) toast.error('Only the host or an admin can prioritize a song.')
+    else if (s === 404) toast.error('Room not found.')
+    else if (s === 409) toast.error('Room is archived or in conflict.')
+    else toast.error('Could not prioritize song.')
+  }
+}
+
 async function clearQueue() {
   try {
     await api.clearRoomQueue(slug.value)
@@ -300,7 +325,8 @@ function handleBack() {
 }
 .remove-btn,
 .add-btn,
-.clear-btn {
+.clear-btn,
+.prioritize-btn {
   background: var(--accent);
   color: #0a0a0a;
   border: none;
@@ -309,9 +335,13 @@ function handleBack() {
   font-weight: 600;
   cursor: pointer;
 }
+.prioritize-btn {
+  margin-right: 0.4rem;
+}
 .remove-btn:disabled,
 .add-btn:disabled,
-.clear-btn:disabled {
+.clear-btn:disabled,
+.prioritize-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

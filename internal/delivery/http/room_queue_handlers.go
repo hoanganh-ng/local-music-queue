@@ -44,6 +44,13 @@ type roomQueueRemoveReq struct {
 	Index int `json:"index"`
 }
 
+// roomQueuePrioritizeReq is the body of POST /api/rooms/{slug}/queue/prioritize.
+// R07d: server-resolves identity from the bearer token; identity fields
+// (user_id, requested_by, added_by, etc.) are not honored when present.
+type roomQueuePrioritizeReq struct {
+	SongIndex int `json:"song_index"`
+}
+
 // --- Handlers ---
 
 // HandleGetRoomQueue: GET /api/rooms/{slug}/queue — returns the current
@@ -177,6 +184,54 @@ func (h *RoomQueueHandlers) HandleClearRoomQueue(w http.ResponseWriter, r *http.
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// HandlePrioritizeRoomSong: POST /api/rooms/{slug}/queue/prioritize —
+// host/admin only. Moves a non-current song to the slot immediately
+// after the currently-playing song. Reuses entity.Queue.Prioritize.
+//
+// Identity is server-resolved from the bearer token by roomAuth; the
+// body MUST carry only song_index. Body-supplied identity fields
+// (user_id, requested_by, etc.) are ignored if present.
+//
+// Status mapping:
+//   - 204 No Content on success
+//   - 400 Bad Request on malformed JSON, missing/invalid song_index, or
+//     attempting to prioritize the current song
+//   - 401 Unauthorized when the actor is not authenticated
+//     (defense-in-depth: roomAuth already rejects 401, but the handler
+//     double-checks actorUserID before touching the interactor)
+//   - 403 Forbidden for guests / non-privileged members
+//   - 404 Not Found when the room does not exist
+//   - 409 Conflict for archived rooms
+func (h *RoomQueueHandlers) HandlePrioritizeRoomSong(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
+	if actorUserID == 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req roomQueuePrioritizeReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.SongIndex < 0 {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	role, err := h.roleOf(r, slug, actorUserID)
+	if err != nil {
+		writeRoomQueueError(w, err)
+		return
+	}
+	queue, fromIndex, toIndex, song, err := h.inter.PrioritizeSong(r.Context(), slug, actorUserID, role, req.SongIndex)
+	if err != nil {
+		writeRoomQueueError(w, err)
+		return
+	}
+	if bc := h.inter.Broadcaster(); bc != nil {
+		bc.BroadcastRoomQueueSongPrioritized(slug, fromIndex, toIndex, song, queue)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // roleOf fetches the actor's role in the room for handlers that need
 // it (remove / clear). It returns "" when the actor is not a member;
 // the interactor translates that into ErrForbidden downstream.
@@ -191,7 +246,8 @@ func (h *RoomQueueHandlers) roleOf(r *http.Request, slug string, actorUserID int
 // so clients see consistent error semantics across the migration.
 func writeRoomQueueError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, roomqueue.ErrInvalidIndex):
+	case errors.Is(err, roomqueue.ErrInvalidIndex),
+		errors.Is(err, roomqueue.ErrCannotPrioritizeCurrent):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, roomqueue.ErrNotSongOwner),
 		errors.Is(err, roomqueue.ErrCannotRemoveSong):

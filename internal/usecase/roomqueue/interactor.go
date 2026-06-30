@@ -34,6 +34,10 @@ var (
 	ErrInvalidIndex     = errors.New("invalid song index")
 	ErrNotSongOwner     = errors.New("user does not own the song")
 	ErrCannotRemoveSong = errors.New("guest cannot remove current or already-played song")
+	// ErrCannotPrioritizeCurrent mirrors the entity-layer rejection so
+	// the handler can map it to 400 without switching on the entity
+	// package. Prioritizing the currently-playing song is a client bug.
+	ErrCannotPrioritizeCurrent = errors.New("cannot prioritize the currently playing song")
 )
 
 // Interactor owns the room-scoped queue use cases. The mutex serializes
@@ -73,6 +77,7 @@ type Broadcaster interface {
 	BroadcastRoomQueueSongAdded(roomSlug string, song entity.Song, position int, state *entity.Queue)
 	BroadcastRoomQueueSongRemoved(roomSlug string, removedIndex int, state *entity.Queue)
 	BroadcastRoomQueueCleared(roomSlug string, state *entity.Queue)
+	BroadcastRoomQueueSongPrioritized(roomSlug string, fromIndex, toIndex int, song entity.Song, state *entity.Queue)
 }
 
 // SetBroadcaster wires the broadcaster used by the delivery layer to
@@ -282,6 +287,67 @@ func (i *Interactor) ClearQueue(ctx context.Context, slug string, actorUserID in
 		return nil, fmt.Errorf("save room queue: %w", err)
 	}
 	return queue, nil
+}
+
+// PrioritizeSong moves a non-current song to the slot immediately after
+// the currently-playing song. Host/admin only. Reuses entity.Queue.Prioritize
+// for the underlying invariant (IsPrioritized stamp, current-index
+// compensation). The caller (handler) is responsible for mapping errors to
+// HTTP statuses; the use case returns the post-mutation queue plus the
+// (fromIndex, toIndex, song) tuple the broadcaster needs to fan out the
+// room_queue_song_prioritized event.
+//
+// Returns ErrInvalidIndex for out-of-range indexes, ErrCannotPrioritizeCurrent
+// when the index matches the current song, and room.ErrForbidden for guests
+// or non-privileged members. Caller must hold i.mu via the interactor — this
+// method acquires it.
+func (i *Interactor) PrioritizeSong(ctx context.Context, slug string, actorUserID int, actorRoomRole entity.RoomMemberRole, songIndex int) (*entity.Queue, int, int, entity.Song, error) {
+	roomObj, err := i.resolveActiveRoom(ctx, slug)
+	if err != nil {
+		return nil, 0, 0, entity.Song{}, err
+	}
+	if err := i.requireMember(ctx, roomObj.ID, actorUserID); err != nil {
+		return nil, 0, 0, entity.Song{}, err
+	}
+	if actorRoomRole != entity.RoomRoleHost && actorRoomRole != entity.RoomRoleAdmin {
+		return nil, 0, 0, entity.Song{}, room.ErrForbidden
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	queue, err := i.loadQueue(ctx, roomObj.ID)
+	if err != nil {
+		return nil, 0, 0, entity.Song{}, err
+	}
+	if songIndex < 0 || songIndex >= len(queue.Songs) {
+		return nil, 0, 0, entity.Song{}, ErrInvalidIndex
+	}
+	if songIndex == queue.CurrentIndex {
+		return nil, 0, 0, entity.Song{}, ErrCannotPrioritizeCurrent
+	}
+
+	// Snapshot the song BEFORE the mutation so the broadcaster gets the
+	// post-mutation entity (with IsPrioritized = true) without having to
+	// look it up again.
+	song := queue.Songs[songIndex]
+	if err := queue.Prioritize(songIndex); err != nil {
+		return nil, 0, 0, entity.Song{}, err
+	}
+	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
+		return nil, 0, 0, entity.Song{}, fmt.Errorf("save room queue: %w", err)
+	}
+	// The destination is always "immediately after the current song" per
+	// the entity invariant. We recompute the post-mutation slot rather
+	// than relying on a value the entity doesn't expose, so the
+	// broadcaster's to_index is exact.
+	toIndex := queue.CurrentIndex + 1
+	// Defensive clamp: if CurrentIndex advanced past the last song during
+	// the mutation, the slot is the last position in the array.
+	if toIndex >= len(queue.Songs) {
+		toIndex = len(queue.Songs) - 1
+	}
+	return queue, songIndex, toIndex, song, nil
 }
 
 // MemberRole returns the actor's room-scoped role. Returns ("", nil)

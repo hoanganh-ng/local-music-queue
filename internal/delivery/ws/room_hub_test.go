@@ -209,6 +209,92 @@ func TestRoomHub_BroadcastSongAdded_ReachesAllRoomClients(t *testing.T) {
 	}
 }
 
+// TestRoomHub_BroadcastSongPrioritized_DeliversEnvelopeAndSeq asserts
+// the R07d prioritize broadcast reaches the only connected client of the
+// matching room with the expected envelope and a strictly greater seq
+// than the initial sync (R07b hub-loop ownership invariant).
+func TestRoomHub_BroadcastSongPrioritized_DeliversEnvelopeAndSeq(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("alpha", &entity.Room{ID: 11, Slug: "alpha", Status: entity.RoomStatusActive})
+	resolver.SetQueue(11, &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "T1"}}})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{"valid": {ID: 1, Role: entity.RoleHost, DisplayName: "H"}},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	conn := dialRoomWS(t, server, "alpha", "valid")
+	defer conn.Close()
+
+	// Drain the initial sync; remember its seq.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, syncData, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read initial sync: %v", err)
+	}
+	var syncEnv struct {
+		Type   string `json:"type"`
+		SeqNum int64  `json:"seq_num"`
+	}
+	if err := json.Unmarshal(syncData, &syncEnv); err != nil {
+		t.Fatalf("unmarshal sync: %v", err)
+	}
+	if syncEnv.Type != EventRoomQueueSync {
+		t.Fatalf("expected first frame %q, got %q", EventRoomQueueSync, syncEnv.Type)
+	}
+
+	// Fire the R07d prioritize broadcast.
+	state := &entity.Queue{
+		Songs: []entity.Song{
+			{ID: "cur", Title: "Cur"},
+			{ID: "moved", Title: "Moved", IsPrioritized: true},
+		},
+		CurrentIndex: 0,
+		Status:       entity.StatusPlaying,
+	}
+	hub.BroadcastRoomQueueSongPrioritized("alpha", 1, 1, entity.Song{ID: "moved", Title: "Moved", IsPrioritized: true}, state)
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read prioritize broadcast: %v", err)
+	}
+	var env struct {
+		Type   string                      `json:"type"`
+		SeqNum int64                       `json:"seq_num"`
+		Data   RoomQueueSongPrioritizedData `json:"data"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal prioritize: %v", err)
+	}
+	if env.Type != EventRoomQueueSongPrioritized {
+		t.Fatalf("expected type %q, got %q", EventRoomQueueSongPrioritized, env.Type)
+	}
+	if env.SeqNum <= syncEnv.SeqNum {
+		t.Fatalf("prioritize seq (%d) must be strictly greater than sync seq (%d)", env.SeqNum, syncEnv.SeqNum)
+	}
+	if env.Data.RoomSlug != "alpha" {
+		t.Errorf("expected room_slug=alpha, got %q", env.Data.RoomSlug)
+	}
+	if env.Data.FromIndex != 1 || env.Data.ToIndex != 1 {
+		t.Errorf("expected from=1 to=1, got from=%d to=%d", env.Data.FromIndex, env.Data.ToIndex)
+	}
+	if env.Data.Song.ID != "moved" || !env.Data.Song.IsPrioritized {
+		t.Errorf("expected moved prioritized song, got %+v", env.Data.Song)
+	}
+	if env.Data.State == nil || len(env.Data.State.Songs) != 2 {
+		t.Errorf("expected full state with 2 songs, got %+v", env.Data.State)
+	}
+}
+
 // TestRoomHub_RegisterHandler_NonMemberRejected verifies the non-member
 // gate: even with a valid session token, a non-member receives 403 on
 // upgrade and does not appear in the room's client map.

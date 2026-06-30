@@ -377,6 +377,9 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, func(), error) 
 	mux.HandleFunc("POST /api/rooms/{slug}/queue/clear", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomQueueHandlers.HandleClearRoomQueue(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
+	mux.HandleFunc("POST /api/rooms/{slug}/queue/prioritize", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomQueueHandlers.HandlePrioritizeRoomSong(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
 
 	// WebSocket
 	mux.HandleFunc("/ws", hub.RegisterHandler)

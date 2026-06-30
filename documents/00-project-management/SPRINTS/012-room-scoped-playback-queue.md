@@ -1,6 +1,6 @@
 # R07 – Room‑scoped playback queue
 
-**Status:** R07a closed 2026-06-29 (accepted by the Product Owner); R07b closed 2026-06-29 (accepted by the Product Owner); R07c closed 2026-06-29 (accepted by the Product Owner). R07a persisted the room queue. R07b added per-room WebSocket sync/delta broadcasts on top of R07a. R07c (this slice) added a narrow authenticated frontend path against the R07a/R07b contracts without changing any backend behavior. See *Implementation summary (R07a)*, *Implementation summary (R07b)*, and *Implementation summary (R07c)* below. Remaining R07 scope (relational queue rows, room-scoped reorder/vote endpoints, cross-process safety, migration of the legacy global `queue_state` into a room) remains split and deferred to subsequent slices.
+**Status:** R07a closed 2026-06-29 (accepted by the Product Owner); R07b closed 2026-06-29 (accepted by the Product Owner); R07c closed 2026-06-29 (accepted by the Product Owner); R07d in progress (not yet accepted by the Product Owner). R07a persisted the room queue. R07b added per-room WebSocket sync/delta broadcasts on top of R07a. R07c added a narrow authenticated frontend path against the R07a/R07b contracts without changing any backend behavior. R07d (this slice) adds one room-scoped queue mutation — POST /api/rooms/{slug}/queue/prioritize — with the matching per-room WebSocket delta and a minimal RoomView control. See *Implementation summary (R07a)*, *Implementation summary (R07b)*, *Implementation summary (R07c)*, and *Implementation summary (R07d)* below. Remaining R07 scope (relational queue rows, room-scoped arbitrary reorder / drag-and-drop, vote endpoints, cross-process safety, migration of the legacy global `queue_state` into a room) remains split and deferred to subsequent slices.
 
 **Sprint name:** Room‑scoped playback queue
 
@@ -268,3 +268,104 @@ shipped and accepted.
 - `git diff --check` — PASS
 
 **Closure:** R07c closed 2026-06-29 and accepted by the Product Owner. A small follow-up polish pass on the same day (route-param watcher now REST-seeds the new room before opening the new room WebSocket) is included in this acceptance; the polish commit keeps the frontend in sync with the mount path and does not change any backend contract. R07c is the narrow final slice of R07 as currently scoped; the remaining R07 scope above is intentionally deferred to later slices.
+
+## Implementation summary (R07d)
+
+R07d is the first slice of room-scoped queue mutations beyond R07a/R07b
+REST + WS plumbing. It introduces one host/admin mutation — prioritize a
+non-current song so it moves immediately after the currently-playing
+song — and a matching per-room WebSocket delta. No global queue
+behavior, no global `/api/queue/...` route, and no priority balance
+spending are touched. No relational queue rows are introduced. The
+JSONB blob remains the storage shape.
+
+**What landed:**
+* New REST route behind the existing `roomAuth` bearer-token wrapper:
+  * `POST /api/rooms/{slug}/queue/prioritize` with body
+    `{"song_index": <int>}`. Identity is server-resolved from the
+    bearer token; body-supplied identity fields (`user_id`,
+    `requested_by`, `added_by`, `user_role`, etc.) are NOT honored.
+  * Returns `204 No Content` on success.
+  * Status mapping:
+    * `400 Bad Request` — malformed JSON, missing/negative
+      `song_index`, out-of-range index, or attempting to prioritize
+      the currently-playing song.
+    * `401 Unauthorized` — bearer token missing/invalid (existing
+      `roomAuth` path; the handler double-checks `actorUserID == 0`).
+    * `403 Forbidden` — actor is not a member, or actor is a guest.
+    * `404 Not Found` — room slug does not resolve.
+    * `409 Conflict` — room is archived.
+* `usecase/roomqueue.Interactor.PrioritizeSong`:
+  * Requires active room + active membership.
+  * Host/admin only; guests and non-members get `room.ErrForbidden`.
+  * Validates `songIndex` and rejects prioritizing the current song
+    with the new sentinel `ErrCannotPrioritizeCurrent`.
+  * Holds the existing per-interactor mutex for the load + mutate +
+    save sequence.
+  * Reuses `entity.Queue.Prioritize` for the underlying invariant
+    (current-index compensation, `IsPrioritized` stamp).
+  * Persists the post-mutation queue via `RoomQueueRepository.Save`.
+  * Returns `(queue, fromIndex, toIndex, song)` to the handler so the
+    broadcaster can fan out without re-reading the queue.
+* `internal/delivery/ws` — additive room event:
+  * `EventRoomQueueSongPrioritized = "room_queue_song_prioritized"`.
+  * `RoomQueueSongPrioritizedData` carries
+    `{room_slug, from_index, to_index, song, state}` — the
+    post-mutation snapshot is authoritative, matching the other
+    R07b contracts.
+  * `RoomWSHub.BroadcastRoomQueueSongPrioritized` satisfies the
+    existing `roomqueue.Broadcaster` interface.
+  * The hub loop continues to be the single owner of per-room seq
+    allocation (R07b fix is intact); `dispatch()` enqueues
+    `(roomSlug, msgType, data)` and `Run` stamps the seq when the
+    broadcast is dequeued. The new test
+    `TestRoomHub_BroadcastSongPrioritized_DeliversEnvelopeAndSeq`
+    pins this invariant.
+* `frontend/src/services/api.js` — `api.prioritizeRoomSong(slug, songIndex)`
+  posts only `{song_index}` and reuses the bearer-token path.
+* `frontend/src/services/room-websocket.js` — unchanged shape; the
+  client surfaces the new `room_queue_song_prioritized` event via
+  the existing dispatch contract (the client never sends inbound
+  frames; the backend ignores them).
+* `frontend/src/store/index.js` — new isolated mutator
+  `applyRoomSongPrioritized(slug, fromIndex, toIndex, song, fullState)`
+  on `globalStore.roomQueues`. Prefers the authoritative
+  `payload.state` when present; the fallback path mirrors
+  `entity.Queue.Prioritize` (remove from `fromIndex`, insert at
+  `toIndex`, compensate `current_index`). Continues to NOT mutate
+  `globalStore.queueState`, `currentUser`, `voteSessions`, or
+  `autoQueueConfig`.
+* `frontend/src/views/RoomView.vue` — minimal Prioritize control:
+  * A button rendered on every non-current song row, hidden for the
+    currently-playing song (`idx === current_index`).
+  * Disabled when the WS is disconnected (`canMutate` is gated on
+    `roomState.connected`, matching the existing Add/Remove gates).
+  * UI permission checks are convenience only; the backend is the
+    authoritative gate.
+  * Error surfacing matches the existing per-status toast pattern
+    (400/401/403/404/409 → clear message; other → generic).
+* `cmd/server/main.go` — routes the new endpoint alongside the
+  existing room queue routes behind `roomAuth`.
+
+**Out of scope (carried forward to subsequent slices, unchanged):**
+* Relational queue rows (per-song) — JSONB blob remains the storage
+  shape.
+* Room-scoped arbitrary drag-and-drop reorder (only the
+  prioritize-to-next-up slot is supported here).
+* Room-scoped voting / skip voting / priority balances.
+* Migration of the legacy global `queue_state` into a room and the
+  global compatibility shim / `410 Gone` cleanup.
+* Cross-process broadcast safety.
+* Public unauthenticated room API or broad CORS redesign beyond
+  reusing the existing A01 origin policy.
+* Room playback controls.
+* Auto-queue room scoping.
+
+**Verification:**
+* `go test -count=1 ./internal/usecase/roomqueue ./internal/delivery/http ./internal/delivery/ws ./cmd/server` — PASS
+* `go test -race -count=1 ./internal/usecase/roomqueue ./internal/delivery/http ./internal/delivery/ws` — PASS
+* `go build ./cmd/... ./internal/...` — PASS
+* `go vet ./cmd/... ./internal/...` — PASS
+* `cd frontend && npm run test:unit -- --run` — PASS (15 files, 188 tests)
+* `cd frontend && npm run build` — PASS
+* `git diff --check` — PASS

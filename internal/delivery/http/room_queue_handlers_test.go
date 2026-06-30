@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -226,6 +227,7 @@ type recordingRoomBroadcaster struct {
 	addCalls    []string
 	removeCalls []int
 	clearCalls  []string
+	prioCalls   []struct{ slug string; from, to int }
 }
 
 func (r *recordingRoomBroadcaster) BroadcastRoomQueueSync(slug string, _ *entity.Queue) {
@@ -247,6 +249,11 @@ func (r *recordingRoomBroadcaster) BroadcastRoomQueueCleared(slug string, _ *ent
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.clearCalls = append(r.clearCalls, slug)
+}
+func (r *recordingRoomBroadcaster) BroadcastRoomQueueSongPrioritized(slug string, from, to int, _ entity.Song, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prioCalls = append(r.prioCalls, struct{ slug string; from, to int }{slug, from, to})
 }
 
 func TestRoomQueue_AddSong_BroadcastsSongAdded(t *testing.T) {
@@ -380,6 +387,208 @@ func TestRoomQueue_RemoveSong_NoBroadcastOnForbidden(t *testing.T) {
 	defer bc.mu.Unlock()
 	if len(bc.removeCalls) != 0 {
 		t.Errorf("expected NO remove broadcast on forbidden, got %d", len(bc.removeCalls))
+	}
+}
+
+// --- R07d Prioritize handler tests ---
+
+// seedRoomQueueWithTwoSongs adds a host (42), creates a room, and seeds a
+// queue with current at 0 and one upcoming song at 1. Returns the
+// RoomQueueHandlers + db + slug for assertion.
+func seedRoomQueueWithTwoSongs(t *testing.T, slug string) (*RoomQueueHandlers, *sql.DB, func()) {
+	t.Helper()
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	seedUserQueue(t, db, 42, "host-rq-prio-"+slug+"@example.com", entity.RoleHost)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, slug, "PR-"+slug, 42, time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := mustRoomIDQueue(t, db, slug)
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	seed := entity.NewQueue()
+	seed.Songs = []entity.Song{
+		{ID: "cur", Title: "Cur", URL: "u", AddedBy: "Host", AddedByID: 42},
+		{ID: "up1", Title: "Up1", URL: "u", AddedBy: "Host", AddedByID: 42},
+	}
+	seed.CurrentIndex = 0
+	seed.Status = entity.StatusPlaying
+	if err := queueRepo.Save(ctx, roomID, seed); err != nil {
+		t.Fatalf("seed queue: %v", err)
+	}
+	return rqh, db, cleanup
+}
+
+func TestRoomQueue_PrioritizeSong_HostReturns204(t *testing.T) {
+	rqh, _, cleanup := seedRoomQueueWithTwoSongs(t, "rq-h-prio-ok")
+	defer cleanup()
+
+	body := []byte(`{"song_index":1}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-prio-ok/queue/prioritize", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandlePrioritizeRoomSong(rr, req, "rq-h-prio-ok", 42)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRoomQueue_PrioritizeSong_BroadcastsSongPrioritized(t *testing.T) {
+	rqh, _, cleanup := seedRoomQueueWithTwoSongs(t, "rq-h-prio-bc")
+	defer cleanup()
+
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	body := []byte(`{"song_index":1}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-prio-bc/queue/prioritize", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandlePrioritizeRoomSong(rr, req, "rq-h-prio-bc", 42)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.prioCalls) != 1 {
+		t.Fatalf("expected 1 prioritize broadcast, got %d", len(bc.prioCalls))
+	}
+	if bc.prioCalls[0].slug != "rq-h-prio-bc" || bc.prioCalls[0].from != 1 || bc.prioCalls[0].to != 1 {
+		t.Errorf("expected prio call slug=rq-h-prio-bc from=1 to=1, got %+v", bc.prioCalls[0])
+	}
+}
+
+func TestRoomQueue_PrioritizeSong_NoBroadcastOnError(t *testing.T) {
+	rqh, _, cleanup := seedRoomQueueWithTwoSongs(t, "rq-h-prio-eb")
+	defer cleanup()
+
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	// Current song → 400 + no broadcast.
+	body := []byte(`{"song_index":0}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-prio-eb/queue/prioritize", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandlePrioritizeRoomSong(rr, req, "rq-h-prio-eb", 42)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.prioCalls) != 0 {
+		t.Errorf("expected NO prio broadcast on error, got %d", len(bc.prioCalls))
+	}
+}
+
+func TestRoomQueue_PrioritizeSong_InvalidIndexReturns400(t *testing.T) {
+	rqh, _, cleanup := seedRoomQueueWithTwoSongs(t, "rq-h-prio-bad")
+	defer cleanup()
+
+	for _, idx := range []int{-1, 99} {
+		body := []byte(fmt.Sprintf(`{"song_index":%d}`, idx))
+		req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-prio-bad/queue/prioritize", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		rqh.HandlePrioritizeRoomSong(rr, req, "rq-h-prio-bad", 42)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("idx=%d: expected 400, got %d", idx, rr.Code)
+		}
+	}
+}
+
+func TestRoomQueue_PrioritizeSong_CurrentSongReturns400(t *testing.T) {
+	rqh, _, cleanup := seedRoomQueueWithTwoSongs(t, "rq-h-prio-cur")
+	defer cleanup()
+
+	body := []byte(`{"song_index":0}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-prio-cur/queue/prioritize", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandlePrioritizeRoomSong(rr, req, "rq-h-prio-cur", 42)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for current song, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRoomQueue_PrioritizeSong_MalformedJSONReturns400(t *testing.T) {
+	rqh, _, cleanup := seedRoomQueueWithTwoSongs(t, "rq-h-prio-mf")
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-prio-mf/queue/prioritize", bytes.NewReader([]byte(`{not json`)))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandlePrioritizeRoomSong(rr, req, "rq-h-prio-mf", 42)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+}
+
+func TestRoomQueue_PrioritizeSong_GuestReturns403(t *testing.T) {
+	rqh, db, cleanup := seedRoomQueueWithTwoSongs(t, "rq-h-prio-g")
+	defer cleanup()
+
+	seedUserQueue(t, db, 200, "guest-rq-prio@example.com", entity.RoleGuest)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if err := roomRepo.AddMember(ctx, mustRoomIDQueue(t, db, "rq-h-prio-g"), 200, entity.RoomRoleGuest, time.Now().UTC()); err != nil {
+		t.Fatalf("add guest: %v", err)
+	}
+
+	body := []byte(`{"song_index":1}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-prio-g/queue/prioritize", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandlePrioritizeRoomSong(rr, req, "rq-h-prio-g", 200)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for guest, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRoomQueue_PrioritizeSong_NonMemberReturns403(t *testing.T) {
+	rqh, _, cleanup := seedRoomQueueWithTwoSongs(t, "rq-h-prio-nm")
+	defer cleanup()
+
+	body := []byte(`{"song_index":1}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-prio-nm/queue/prioritize", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandlePrioritizeRoomSong(rr, req, "rq-h-prio-nm", 999)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-member, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRoomQueue_PrioritizeSong_ArchivedRoomReturns409(t *testing.T) {
+	rqh, db, cleanup := seedRoomQueueWithTwoSongs(t, "rq-h-prio-ar")
+	defer cleanup()
+
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	if err := roomRepo.ArchiveRoom(context.Background(), mustRoomIDQueue(t, db, "rq-h-prio-ar"), time.Now().UTC()); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+
+	body := []byte(`{"song_index":1}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-h-prio-ar/queue/prioritize", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandlePrioritizeRoomSong(rr, req, "rq-h-prio-ar", 42)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for archived room, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRoomQueue_PrioritizeSong_RequiresAuthenticatedActor(t *testing.T) {
+	rqh, _, cleanup := newRoomQueueHandlers(t)
+	defer cleanup()
+
+	body := []byte(`{"song_index":0}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/any/queue/prioritize", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandlePrioritizeRoomSong(rr, req, "any", 0)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
 	}
 }
 
