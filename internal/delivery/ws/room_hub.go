@@ -451,6 +451,41 @@ func (h *RoomWSHub) BroadcastRoomPlaybackSongPrevious(roomSlug string, previousI
 	})
 }
 
+// --- R09f per-room auto-queue broadcast methods ---
+//
+// dispatch() does NOT allocate seq; the hub loop stamps seq on
+// dequeue. Adding these methods does not change the global /ws
+// 16-event inventory — both events ride the per-room endpoint only.
+// The roomautoqueue use case invokes these via the roomqueue
+// .Broadcaster seam after a successful AddRoomAutoQueueSong (room
+// auto-add) or SetEnabled (room auto-config-changed).
+
+// BroadcastRoomAutoQueueAdded emits room_auto_queue_added. The
+// payload carries the auto-added song, its source song title, and
+// the post-mutation queue state. Stale candidates never reach this
+// call site — the roomautoqueue use case only invokes the seam on a
+// successful insertion.
+func (h *RoomWSHub) BroadcastRoomAutoQueueAdded(roomSlug string, song entity.Song, sourceSongTitle string, state *entity.Queue) {
+	h.dispatch(roomSlug, EventRoomAutoQueueAdded, RoomAutoQueueAddedData{
+		RoomSlug:        roomSlug,
+		Song:            song,
+		SourceSongTitle: sourceSongTitle,
+		State:           state,
+	})
+}
+
+// BroadcastRoomAutoQueueConfigChanged emits room_auto_queue_config_changed.
+// The HTTP toggle handler invokes this after a successful SetEnabled
+// so per-room WebSocket subscribers observe the new config without a
+// follow-up fetch.
+func (h *RoomWSHub) BroadcastRoomAutoQueueConfigChanged(roomSlug string, enabled bool, strategy string) {
+	h.dispatch(roomSlug, EventRoomAutoQueueConfigChanged, RoomAutoQueueConfigChangedData{
+		RoomSlug: roomSlug,
+		Enabled:  enabled,
+		Strategy: strategy,
+	})
+}
+
 // --- RegisterHandler ---
 
 // RegisterHandler handles GET /ws/rooms/{slug}?session_token=<opaque>.

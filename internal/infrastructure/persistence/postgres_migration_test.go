@@ -18,7 +18,7 @@ func TestPostgresMigration_CleanSchema(t *testing.T) {
 		t.Fatalf("second migrate up should be no-op: %v", err)
 	}
 
-	// Version subcommand must report 6 (0001_initial + 0002_legacy_id + 0003_migration_marker + 0004_rooms + 0005_player_leases + 0006_room_queue_state).
+	// Version subcommand must report 7 (0001_initial + 0002_legacy_id + 0003_migration_marker + 0004_rooms + 0005_player_leases + 0006_room_queue_state + 0007_room_auto_queue).
 	v, dirty, err := EmbeddedMigrationsVersion(db)
 	if err != nil {
 		t.Fatalf("read version: %v", err)
@@ -26,11 +26,11 @@ func TestPostgresMigration_CleanSchema(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema unexpectedly dirty")
 	}
-	if v != 6 {
-		t.Fatalf("expected version=6 after first migration, got %d", v)
+	if v != 7 {
+		t.Fatalf("expected version=7 after first migration, got %d", v)
 	}
 
-	// Verify all twelve tables exist.
+	// Verify all fourteen tables exist.
 	want := []string{
 		"queue_state",
 		"activities",
@@ -44,6 +44,8 @@ func TestPostgresMigration_CleanSchema(t *testing.T) {
 		"room_invites",
 		"player_leases",
 		"room_queue_state",
+		"room_auto_queue_config",
+		"room_play_history",
 	}
 	for _, table := range want {
 		var exists bool
@@ -102,8 +104,8 @@ func TestPostgresMigration_DownThenUp(t *testing.T) {
 		t.Fatalf("migrate up: %v", err)
 	}
 
-	// Step down two versions. We are now at v6 (0001..0006); stepping down 2
-	// reverses 0006 + 0005, landing at v4.
+	// Step down two versions. We are now at v7 (0001..0007); stepping down 2
+	// reverses 0007 + 0006, landing at v5.
 	if err := RunEmbeddedMigrationsDown(db, 2); err != nil {
 		t.Fatalf("migrate down 2: %v", err)
 	}
@@ -112,21 +114,21 @@ func TestPostgresMigration_DownThenUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if v != 4 {
-		t.Errorf("expected version=4 after down 2, got %d", v)
+	if v != 5 {
+		t.Errorf("expected version=5 after down 2, got %d", v)
 	}
 
-	// Step down four more to fully revert all six migrations. queue_state
+	// Step down five more to fully revert all seven migrations. queue_state
 	// is dropped by 0001_initial.down.sql.
-	if err := RunEmbeddedMigrationsDown(db, 4); err != nil {
-		t.Fatalf("migrate down 4 (final): %v", err)
+	if err := RunEmbeddedMigrationsDown(db, 5); err != nil {
+		t.Fatalf("migrate down 5 (final): %v", err)
 	}
 	v, _, err = EmbeddedMigrationsVersion(db)
 	if err != nil {
 		t.Fatalf("read version: %v", err)
 	}
 	if v != 0 {
-		t.Errorf("expected version=0 after down 6, got %d", v)
+		t.Errorf("expected version=0 after down 7, got %d", v)
 	}
 
 	// queue_state should be gone. Scoped to the test schema so the query
@@ -153,8 +155,8 @@ func TestPostgresMigration_DownThenUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if v != 6 {
-		t.Errorf("expected version=6 after re-up, got %d", v)
+	if v != 7 {
+		t.Errorf("expected version=7 after re-up, got %d", v)
 	}
 }
 
@@ -168,12 +170,12 @@ func TestPostgresMigration_DownThenUp_Rooms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if v != 6 {
-		t.Fatalf("expected version=6, got %d", v)
+	if v != 7 {
+		t.Fatalf("expected version=7, got %d", v)
 	}
 
-	// Step down 3 — 0006_room_queue_state + 0005_player_leases + 0004_rooms
-	// reverse together, leaving v3.
+	// Step down 3 — 0007_room_auto_queue + 0006_room_queue_state + 0005_player_leases
+	// reverse together, leaving v4.
 	if err := RunEmbeddedMigrationsDown(db, 3); err != nil {
 		t.Fatalf("migrate down 3: %v", err)
 	}
@@ -181,12 +183,14 @@ func TestPostgresMigration_DownThenUp_Rooms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read version after down: %v", err)
 	}
-	if v != 3 {
-		t.Fatalf("expected version=3 after stepping down 0006+0005+0004, got %d", v)
+	if v != 4 {
+		t.Fatalf("expected version=4 after stepping down 0007+0006+0005, got %d", v)
 	}
 
-	// Verify the four room tables + room_queue_state are gone.
-	for _, table := range []string{"rooms", "room_members", "room_invites", "player_leases", "room_queue_state"} {
+	// Verify the per-room queue + auto-queue tables are gone. The
+	// rooms / room_members / room_invites tables persist because
+	// 0004 is not yet reverted.
+	for _, table := range []string{"player_leases", "room_queue_state", "room_auto_queue_config", "room_play_history"} {
 		var exists bool
 		if err := db.QueryRow(`SELECT EXISTS (
 			SELECT 1 FROM information_schema.tables
@@ -195,11 +199,11 @@ func TestPostgresMigration_DownThenUp_Rooms(t *testing.T) {
 			t.Fatalf("query %s: %v", table, err)
 		}
 		if exists {
-			t.Errorf("expected table %q to be dropped after 0006+0005+0004 down", table)
+			t.Errorf("expected table %q to be dropped after 0007+0006+0005 down", table)
 		}
 	}
 
-	// Re-apply — must come back to v6.
+	// Re-apply — must come back to v7.
 	if err := RunEmbeddedMigrationsUp(db); err != nil {
 		t.Fatalf("re-migrate up: %v", err)
 	}
@@ -207,7 +211,7 @@ func TestPostgresMigration_DownThenUp_Rooms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read version after re-up: %v", err)
 	}
-	if v != 6 {
-		t.Fatalf("expected version=6 after re-up, got %d", v)
+	if v != 7 {
+		t.Fatalf("expected version=7 after re-up, got %d", v)
 	}
 }

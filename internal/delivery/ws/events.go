@@ -69,6 +69,14 @@ const (
 	// state snapshot. The global /ws 16-event inventory is unchanged;
 	// this event rides /ws/rooms/{slug} only.
 	EventRoomPlaybackSongPrevious = "room_playback_song_previous"
+	// R09f: additive on top of R07b/R07d/R09a/R09b/R09c/R09d. Both
+	// events ride /ws/rooms/{slug} ONLY. The global /ws 16-event
+	// inventory is unchanged — these never appear on the global /ws
+	// endpoint. EventRoomAutoQueueAdded fires after a successful
+	// per-room auto-queue insertion; EventRoomAutoQueueConfigChanged
+	// fires after a successful per-room toggle (host/admin only).
+	EventRoomAutoQueueAdded         = "room_auto_queue_added"
+	EventRoomAutoQueueConfigChanged = "room_auto_queue_config_changed"
 )
 
 // UserJoinedData contains only the new user info
@@ -415,4 +423,30 @@ type RoomPlaybackSongPreviousData struct {
 	Status        entity.PlaybackStatus `json:"status"`
 	Elapsed       int                   `json:"elapsed"`
 	State         *entity.Queue         `json:"state"`
+}
+
+// RoomAutoQueueAddedData is broadcast after a successful per-room
+// auto-queue insertion. R09f addition; rides /ws/rooms/{slug} only.
+// The payload carries the auto-added song, the source song's title,
+// and the authoritative post-mutation queue state so clients do not
+// need a follow-up sync. The 16-event global /ws inventory is
+// unchanged — the global auto_queue_added event continues to live
+// solely on the global /ws endpoint and is never reused here.
+type RoomAutoQueueAddedData struct {
+	RoomSlug        string        `json:"room_slug"`
+	Song            entity.Song   `json:"song"`
+	SourceSongTitle string        `json:"source_song_title"`
+	State           *entity.Queue `json:"state"`
+}
+
+// RoomAutoQueueConfigChangedData is broadcast after a successful
+// per-room auto-queue toggle. R09f addition; rides /ws/rooms/{slug}
+// only. The envelope mirrors the global AutoQueueConfigChangedData
+// shape but carries room_slug so subscribers can route the event to
+// the correct per-room store slice. The 16-event global /ws inventory
+// is unchanged — this event is purely additive.
+type RoomAutoQueueConfigChangedData struct {
+	RoomSlug string `json:"room_slug"`
+	Enabled  bool   `json:"enabled"`
+	Strategy string `json:"strategy"`
 }

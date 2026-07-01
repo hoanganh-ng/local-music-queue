@@ -1371,3 +1371,197 @@ func TestRoomHub_BroadcastRoomPlaybackSongPrevious_FansOutToRoom(t *testing.T) {
 		}
 	}
 }
+
+// --- R09f auto-queue broadcast envelopes ---
+//
+// Tests pin the per-room auto-queue broadcast envelopes — both
+// ride /ws/rooms/{slug} only and use the hub-loop seq allocation.
+
+// TestRoomHub_BroadcastRoomAutoQueueAdded_DeliversEnvelopeAndSeq pins
+// the room_auto_queue_added envelope + payload shape + hub-loop seq
+// invariant (broadcast seq > sync seq).
+func TestRoomHub_BroadcastRoomAutoQueueAdded_DeliversEnvelopeAndSeq(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("r09f-add", &entity.Room{ID: 91, Slug: "r09f-add", Status: entity.RoomStatusActive})
+	resolver.SetQueue(91, &entity.Queue{
+		Songs:        []entity.Song{{ID: "cur", Title: "Cur"}},
+		CurrentIndex: 0,
+		Status:       entity.StatusPlaying,
+	})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{"valid": {ID: 1, Role: entity.RoleHost, DisplayName: "H"}},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	conn := dialRoomWS(t, server, "r09f-add", "valid")
+	defer conn.Close()
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, syncData, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read initial sync: %v", err)
+	}
+	var syncEnv struct {
+		Type   string `json:"type"`
+		SeqNum int64  `json:"seq_num"`
+	}
+	if err := json.Unmarshal(syncData, &syncEnv); err != nil {
+		t.Fatalf("unmarshal sync: %v", err)
+	}
+
+	state := &entity.Queue{
+		Songs:        []entity.Song{{ID: "cur", Title: "Cur"}, {ID: "auto", Title: "AutoSong", AddedBy: entity.SystemUserID}},
+		CurrentIndex: 0,
+		Status:       entity.StatusPlaying,
+	}
+	hub.BroadcastRoomAutoQueueAdded("r09f-add", entity.Song{
+		ID: "auto", Title: "AutoSong", AddedBy: entity.SystemUserID, AddedByID: 0,
+	}, "Cur", state)
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read auto-queue-added broadcast: %v", err)
+	}
+	var env struct {
+		Type   string                 `json:"type"`
+		SeqNum int64                  `json:"seq_num"`
+		Data   RoomAutoQueueAddedData `json:"data"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal auto-queue-added: %v", err)
+	}
+	if env.Type != EventRoomAutoQueueAdded {
+		t.Fatalf("expected type %q, got %q", EventRoomAutoQueueAdded, env.Type)
+	}
+	if env.SeqNum <= syncEnv.SeqNum {
+		t.Fatalf("auto-queue-added seq (%d) must be strictly greater than sync seq (%d)", env.SeqNum, syncEnv.SeqNum)
+	}
+	if env.Data.RoomSlug != "r09f-add" {
+		t.Errorf("expected room_slug=r09f-add, got %q", env.Data.RoomSlug)
+	}
+	if env.Data.Song.ID != "auto" {
+		t.Errorf("expected song.id=auto, got %q", env.Data.Song.ID)
+	}
+	if env.Data.SourceSongTitle != "Cur" {
+		t.Errorf("expected source_song_title=Cur, got %q", env.Data.SourceSongTitle)
+	}
+	if env.Data.State == nil || len(env.Data.State.Songs) != 2 {
+		t.Errorf("expected post-mutation state with 2 songs, got %+v", env.Data.State)
+	}
+}
+
+// TestRoomHub_BroadcastRoomAutoQueueConfigChanged_DeliversEnvelope
+// pins the room_auto_queue_config_changed envelope type + payload
+// shape + room_slug field.
+func TestRoomHub_BroadcastRoomAutoQueueConfigChanged_DeliversEnvelope(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("r09f-cfg", &entity.Room{ID: 92, Slug: "r09f-cfg", Status: entity.RoomStatusActive})
+	resolver.SetQueue(92, &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "S1"}}})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{"valid": {ID: 1, Role: entity.RoleHost, DisplayName: "H"}},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	conn := dialRoomWS(t, server, "r09f-cfg", "valid")
+	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("drain initial sync: %v", err)
+	}
+
+	hub.BroadcastRoomAutoQueueConfigChanged("r09f-cfg", true, "related")
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read auto-queue-config-changed broadcast: %v", err)
+	}
+	var env struct {
+		Type string                            `json:"type"`
+		Data RoomAutoQueueConfigChangedData    `json:"data"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal auto-queue-config-changed: %v", err)
+	}
+	if env.Type != EventRoomAutoQueueConfigChanged {
+		t.Fatalf("expected type %q, got %q", EventRoomAutoQueueConfigChanged, env.Type)
+	}
+	if env.Data.RoomSlug != "r09f-cfg" {
+		t.Errorf("expected room_slug=r09f-cfg, got %q", env.Data.RoomSlug)
+	}
+	if !env.Data.Enabled || env.Data.Strategy != "related" {
+		t.Errorf("expected enabled=true strategy=related, got %+v", env.Data)
+	}
+}
+
+// TestRoomHub_BroadcastRoomAutoQueueAdded_DoesNotLeakToGlobal pins
+// the contract that per-room auto-queue broadcasts must NOT cross to
+// the global /ws endpoint. The hub only carries clients of the
+// matching room; clients of an unrelated room do not receive the
+// envelope. (Cross-room isolation is also asserted at the repo layer
+// for persisted state.)
+func TestRoomHub_BroadcastRoomAutoQueueAdded_DoesNotLeakToGlobal(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("r09f-iso-a", &entity.Room{ID: 93, Slug: "r09f-iso-a", Status: entity.RoomStatusActive})
+	resolver.SetRoom("r09f-iso-b", &entity.Room{ID: 94, Slug: "r09f-iso-b", Status: entity.RoomStatusActive})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{
+			"a": {ID: 1, Role: entity.RoleHost, DisplayName: "A"},
+			"b": {ID: 2, Role: entity.RoleHost, DisplayName: "B"},
+		},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	cA := dialRoomWS(t, server, "r09f-iso-a", "a")
+	defer cA.Close()
+	cA.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := cA.ReadMessage(); err != nil {
+		t.Fatalf("a drain: %v", err)
+	}
+	cB := dialRoomWS(t, server, "r09f-iso-b", "b")
+	defer cB.Close()
+	cB.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := cB.ReadMessage(); err != nil {
+		t.Fatalf("b drain: %v", err)
+	}
+
+	state := &entity.Queue{Songs: []entity.Song{{ID: "auto", Title: "Auto", AddedBy: entity.SystemUserID}}}
+	hub.BroadcastRoomAutoQueueAdded("r09f-iso-a", entity.Song{ID: "auto", Title: "Auto", AddedBy: entity.SystemUserID}, "src", state)
+
+	cA.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := cA.ReadMessage(); err != nil {
+		t.Fatalf("a should receive broadcast: %v", err)
+	}
+	cB.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, _, err := cB.ReadMessage(); err == nil {
+		t.Error("b unexpectedly received auto-queue broadcast for room a")
+	}
+}

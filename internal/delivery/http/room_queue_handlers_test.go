@@ -223,17 +223,19 @@ func TestRoomQueue_AddSong_RequiresAuthenticatedActor(t *testing.T) {
 // WebSocket. The handler tests assert it was invoked on success and
 // NOT invoked on error paths.
 type recordingRoomBroadcaster struct {
-	mu            sync.Mutex
-	syncCalls     []string
-	addCalls      []string
-	removeCalls   []int
-	clearCalls    []string
-	prioCalls     []recordingPrioCall
-	statusCalls   []recordingStatusCall
-	elapsedCalls  []recordingElapsedCall
-	advancedCalls []recordingAdvancedCall
-	volumeCalls   []recordingVolumeCall
-	previousCalls []recordingPreviousCall
+	mu                     sync.Mutex
+	syncCalls              []string
+	addCalls               []string
+	removeCalls            []int
+	clearCalls             []string
+	prioCalls              []recordingPrioCall
+	statusCalls            []recordingStatusCall
+	elapsedCalls           []recordingElapsedCall
+	advancedCalls          []recordingAdvancedCall
+	volumeCalls            []recordingVolumeCall
+	previousCalls          []recordingPreviousCall
+	autoQueueAddedCalls    []recordingAutoQueueAddedCall
+	autoQueueConfigChangedCalls []recordingAutoQueueConfigChangedCall
 }
 
 type recordingPrioCall struct {
@@ -280,6 +282,22 @@ type recordingPreviousCall struct {
 	song    *entity.Song
 	status  entity.PlaybackStatus
 	elapsed int
+}
+
+// recordingAutoQueueAddedCall: append {slug, song, sourceTitle}
+// whenever BroadcastRoomAutoQueueAdded is invoked. R09f.
+type recordingAutoQueueAddedCall struct {
+	slug        string
+	song        entity.Song
+	sourceTitle string
+}
+
+// recordingAutoQueueConfigChangedCall: append {slug, enabled, strategy}
+// whenever BroadcastRoomAutoQueueConfigChanged is invoked. R09f.
+type recordingAutoQueueConfigChangedCall struct {
+	slug     string
+	enabled  bool
+	strategy string
 }
 
 func (r *recordingRoomBroadcaster) BroadcastRoomQueueSync(slug string, _ *entity.Queue) {
@@ -333,6 +351,16 @@ func (r *recordingRoomBroadcaster) BroadcastRoomPlaybackSongPrevious(slug string
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.previousCalls = append(r.previousCalls, recordingPreviousCall{slug: slug, prev: prev, next: next, song: song, status: status, elapsed: elapsed})
+}
+func (r *recordingRoomBroadcaster) BroadcastRoomAutoQueueAdded(slug string, song entity.Song, sourceTitle string, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.autoQueueAddedCalls = append(r.autoQueueAddedCalls, recordingAutoQueueAddedCall{slug: slug, song: song, sourceTitle: sourceTitle})
+}
+func (r *recordingRoomBroadcaster) BroadcastRoomAutoQueueConfigChanged(slug string, enabled bool, strategy string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.autoQueueConfigChangedCalls = append(r.autoQueueConfigChangedCalls, recordingAutoQueueConfigChangedCall{slug: slug, enabled: enabled, strategy: strategy})
 }
 
 func TestRoomQueue_AddSong_BroadcastsSongAdded(t *testing.T) {

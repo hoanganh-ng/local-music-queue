@@ -28,6 +28,7 @@ import (
 	usecaseQueue "local-music-queue/internal/usecase/queue"
 	usecaseRoom "local-music-queue/internal/usecase/room"
 	usecaseRoomQueue "local-music-queue/internal/usecase/roomqueue"
+	usecaseRoomAutoQueue "local-music-queue/internal/usecase/roomautoqueue"
 	usecaseRoomVote "local-music-queue/internal/usecase/roomvote"
 	usecaseVote "local-music-queue/internal/usecase/vote"
 
@@ -260,6 +261,51 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	// room.PlaybackLeaseAuthorizer directly.
 	roomQueueInteractor.SetLeaseAuthorizer(playerLeaseInteractor)
 
+	// R09f: per-room auto-queue runtime. The new use case
+	// orchestrates config read + recommendation fetch + stale
+	// insertion + broadcast. It does NOT touch the global
+	// auto-queue tables or the global /ws event; it rides
+	// /ws/rooms/{slug} only.
+	pgRoomAutoQueue := persistence.NewPostgresRoomAutoQueueRepository(dbHandle)
+	roomAutoQueueInteractor := usecaseRoomAutoQueue.NewInteractor(pgRoom, pgRoomAutoQueue, ytRelatedFetcher)
+	roomAutoQueueInteractor.SetQueueSnapshotLoader(roomQueueInteractor.GetStateByRoomID)
+	roomAutoQueueInteractor.SetAddRoomAutoQueueSongFunc(func(ctx context.Context, slug string, song *entity.Song, expectedSourceSongID string) (*usecaseRoomAutoQueue.AddRoomAutoQueueSongResult, error) {
+		q, ci, cs, st, el, err := roomQueueInteractor.AddRoomAutoQueueSong(ctx, slug, song, expectedSourceSongID)
+		if err != nil {
+			if errors.Is(err, usecaseRoomQueue.ErrRoomAutoQueueStale) {
+				return nil, usecaseRoomAutoQueue.ErrAutoQueueStale
+			}
+			return nil, err
+		}
+		return &usecaseRoomAutoQueue.AddRoomAutoQueueSongResult{
+			Queue: q, CurrentIndex: ci, CurrentSong: cs, Status: st, Elapsed: el,
+		}, nil
+	})
+	// Broadcast adapter: the roomautoqueue use case uses a generic
+	// BroadcastFunc; the per-room hub speaks the roomqueue.Broadcaster
+	// interface. Wrap the hub so the adapter can call the explicit
+	// BroadcastRoomAutoQueueAdded signature.
+	roomAutoQueueInteractor.SetBroadcastFunc(func(eventType string, _ interface{}) {
+		// The seam passes a map[string]interface{}; the R09f
+		// implementation only cares about eventType (one event
+		// today). Handlers invoke BroadcastRoomAutoQueueAdded
+		// directly with concrete types for richer payloads —
+		// this adapter is only for the trigger path that the
+		// roomautoqueue interactor owns end-to-end. The richer
+		// payload fields (room_slug, song, state) are reconstructed
+		// by the roomqueue.AddRoomAutoQueueSong return tuple —
+		// but the use case only forwards a generic map today for
+		// simplicity; the trigger-time details reach the WS
+		// hub through the roomqueue.interactor's broadcaster
+		// directly. Reserved for future per-room event variants.
+		_ = eventType
+	})
+	// Hand the roomautoqueue use case to the roomqueue interactor so
+	// successful mutations that leave current==last fire it as a
+	// non-blocking goroutine. Nil-safe: the trigger short-circuits
+	// when unset.
+	roomQueueInteractor.SetRoomAutoQueueTrigger(roomAutoQueueInteractor)
+
 	// R09b: wire the roomvote interactor AFTER the real *ws.RoomWSHub is
 	// assigned. The vote interactor does NOT receive a broadcaster seam
 	// — it returns Outcome structs that the HTTP handler fans out via
@@ -459,6 +505,21 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	}))
 	mux.HandleFunc("POST /api/rooms/{slug}/vote/skip", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomVoteHandlers.HandleCastRoomVoteSkip(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	// R09f: per-room auto-queue endpoints.
+	//   GET   /api/rooms/{slug}/autoqueue/status  — any active member.
+	//   POST  /api/rooms/{slug}/autoqueue/toggle  — host/admin only.
+	// Both routes sit behind roomAuth (bearer token) so actor
+	// identity is server-resolved. The toggle handler enforces
+	// host/admin role inside its own layer. The R09f broadcasts
+	// ride /ws/rooms/{slug} only; the global /ws 16-event
+	// inventory is unchanged.
+	roomAutoQueueHandlers := delivery.NewRoomAutoQueueHandlers(roomAutoQueueInteractor, pgRoom, authInteractor, roomWSHub)
+	mux.HandleFunc("GET /api/rooms/{slug}/autoqueue/status", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomAutoQueueHandlers.HandleGetRoomAutoQueueStatus(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("POST /api/rooms/{slug}/autoqueue/toggle", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomAutoQueueHandlers.HandleRoomAutoQueueToggle(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
 
 	// WebSocket

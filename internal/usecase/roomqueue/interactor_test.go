@@ -341,6 +341,8 @@ type recordingBroadcaster struct {
 	voteUpdatedN  int
 	voteResolvedN int
 	volumeN       int
+	autoQueueAddedN        int
+	autoQueueConfigChangedN int
 }
 
 func (r *recordingBroadcaster) BroadcastRoomQueueSync(_ string, _ *entity.Queue) {
@@ -399,6 +401,289 @@ func (r *recordingBroadcaster) BroadcastRoomPlaybackVolumeChanged(_ string, _ st
 	r.volumeN++
 }
 func (r *recordingBroadcaster) BroadcastRoomPlaybackSongPrevious(_ string, _, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {}
+func (r *recordingBroadcaster) BroadcastRoomAutoQueueAdded(_ string, _ entity.Song, _ string, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.autoQueueAddedN++
+}
+func (r *recordingBroadcaster) BroadcastRoomAutoQueueConfigChanged(_ string, _ bool, _ string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.autoQueueConfigChangedN++
+}
+
+// --- R09f AddRoomAutoQueueSong tests ---
+//
+// Pins the queue-owned conditional insertion contract:
+//   - happy path: candidate inserted when predicates pass
+//   - source mismatch: ErrRoomAutoQueueStale, no save, no broadcast
+//   - upcoming song already exists: ErrRoomAutoQueueStale, no save
+//   - duplicate-of-queued candidate: ErrRoomAutoQueueStale, no save
+
+// seedQueueWithThree returns a room + queue with one current song
+// (id="cur") and one upcoming song (id="up"). Used as a base for
+// the stale-revalidation tests.
+func seedQueueWithThree(t *testing.T, slug string) (*Interactor, *persistence.PostgresRoomQueueRepository, int64) {
+	t.Helper()
+	inter, db, _, cleanup := pgRoomQueueWithDB(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, slug, "TR-"+slug, 42, testTime()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := mustRoomID(t, inter, slug)
+	seed := entity.NewQueue()
+	seed.Songs = []entity.Song{
+		{ID: "cur", Title: "Current", URL: "u", AddedBy: "Host", AddedByID: 42},
+		{ID: "up", Title: "Upcoming", URL: "u", AddedBy: "Host", AddedByID: 42},
+	}
+	seed.CurrentIndex = 0
+	seed.Status = entity.StatusPlaying
+	if err := inter.queueRepo.Save(ctx, roomID, seed); err != nil {
+		t.Fatalf("seed queue: %v", err)
+	}
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	return inter, queueRepo, roomID
+}
+
+// seedQueueLastSong returns a room + queue with a single song (current
+// is also the last). Used for the happy-path AddRoomAutoQueueSong
+// test so the post-mutation queue has 2 songs.
+func seedQueueLastSong(t *testing.T, slug string) (*Interactor, *persistence.PostgresRoomQueueRepository, int64) {
+	t.Helper()
+	inter, queueRepo, roomID := seedQueueWithThree(t, slug) //nolint:staticcheck // uses three-slot seed
+	ctx := context.Background()
+	// Reset queue to one song so current == last.
+	if err := queueRepo.Save(ctx, roomID, &entity.Queue{
+		Songs:        []entity.Song{{ID: "src", Title: "Source", URL: "u", AddedBy: "Host", AddedByID: 42}},
+		CurrentIndex: 0,
+		Status:       entity.StatusPlaying,
+	}); err != nil {
+		t.Fatalf("reset single song: %v", err)
+	}
+	return inter, queueRepo, roomID
+}
+
+// TestRoomQueue_AddRoomAutoQueueSong_HappyPath pins the success path:
+// source song still current, no upcoming song, candidate is fresh.
+// Returns the post-mutation snapshot; persisted queue has the new
+// song appended.
+func TestRoomQueue_AddRoomAutoQueueSong_HappyPath(t *testing.T) {
+	inter, queueRepo, roomID := seedQueueLastSong(t, "rq-f-aq-ok")
+
+	queue, currentIndex, currentSong, status, elapsed, err := inter.AddRoomAutoQueueSong(context.Background(), "rq-f-aq-ok",
+		&entity.Song{ID: "auto1", Title: "Auto 1", URL: "u", AddedBy: entity.SystemUserID, AddedByID: 0},
+		"src",
+	)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if len(queue.Songs) != 2 {
+		t.Fatalf("expected 2 songs after insert, got %d", len(queue.Songs))
+	}
+	if queue.Songs[1].ID != "auto1" {
+		t.Errorf("expected auto1 at idx 1, got %q", queue.Songs[1].ID)
+	}
+	if currentIndex != 0 {
+		t.Errorf("expected currentIndex=0 (unchanged), got %d", currentIndex)
+	}
+	if status != entity.StatusPlaying {
+		t.Errorf("expected status=playing, got %q", status)
+	}
+	if elapsed != 0 {
+		t.Errorf("expected elapsed=0, got %d", elapsed)
+	}
+	if currentSong == nil || currentSong.ID != "src" {
+		t.Errorf("expected currentSong.id=src, got %+v", currentSong)
+	}
+
+	persisted, err := queueRepo.Load(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("load persisted: %v", err)
+	}
+	if len(persisted.Songs) != 2 || persisted.Songs[1].ID != "auto1" {
+		t.Errorf("expected persisted queue with auto1 at idx 1, got %+v", persisted)
+	}
+}
+
+// TestRoomQueue_AddRoomAutoQueueSong_SourceMismatchStale pins the
+// stale invariant: the source song's ID has changed; the insertion
+// returns ErrRoomAutoQueueStale with zero side effects.
+func TestRoomQueue_AddRoomAutoQueueSong_SourceMismatchStale(t *testing.T) {
+	inter, queueRepo, roomID := seedQueueLastSong(t, "rq-f-aq-sm")
+	pre, err := queueRepo.Load(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("pre-load: %v", err)
+	}
+	preLen := len(pre.Songs)
+
+	_, _, _, _, _, err = inter.AddRoomAutoQueueSong(context.Background(), "rq-f-aq-sm",
+		&entity.Song{ID: "auto1", Title: "Auto 1", URL: "u", AddedBy: entity.SystemUserID, AddedByID: 0},
+		"WRONG-SOURCE-ID",
+	)
+	if !errors.Is(err, ErrRoomAutoQueueStale) {
+		t.Fatalf("expected ErrRoomAutoQueueStale, got %v", err)
+	}
+
+	post, err := queueRepo.Load(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("post-load: %v", err)
+	}
+	if len(post.Songs) != preLen {
+		t.Errorf("queue mutated on stale source mismatch: %d vs %d songs", len(post.Songs), preLen)
+	}
+}
+
+// TestRoomQueue_AddRoomAutoQueueSong_UpcomingExistsStale pins the
+// second stale invariant: an upcoming song already exists (queue has
+// 2+ songs); insertion returns ErrRoomAutoQueueStale with no save.
+func TestRoomQueue_AddRoomAutoQueueSong_UpcomingExistsStale(t *testing.T) {
+	inter, queueRepo, roomID := seedQueueWithThree(t, "rq-f-aq-up")
+	pre, err := queueRepo.Load(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("pre-load: %v", err)
+	}
+	preLen := len(pre.Songs)
+
+	_, _, _, _, _, err = inter.AddRoomAutoQueueSong(context.Background(), "rq-f-aq-up",
+		&entity.Song{ID: "auto1", Title: "Auto 1", URL: "u", AddedBy: entity.SystemUserID, AddedByID: 0},
+		pre.Songs[pre.CurrentIndex].ID,
+	)
+	if !errors.Is(err, ErrRoomAutoQueueStale) {
+		t.Fatalf("expected ErrRoomAutoQueueStale, got %v", err)
+	}
+
+	post, err := queueRepo.Load(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("post-load: %v", err)
+	}
+	if len(post.Songs) != preLen {
+		t.Errorf("queue mutated when upcoming song already exists")
+	}
+}
+
+// TestRoomQueue_AddRoomAutoQueueSong_DuplicateStale pins the third
+// stale invariant: the candidate is already in the upcoming queue;
+// insertion returns ErrRoomAutoQueueStale with no save.
+func TestRoomQueue_AddRoomAutoQueueSong_DuplicateStale(t *testing.T) {
+	inter, queueRepo, roomID := seedQueueLastSong(t, "rq-f-aq-dup")
+	// Insert candidate as a normal future song first.
+	ctx := context.Background()
+	if _, _, err := inter.AddSong(ctx, "rq-f-aq-dup", 42, "Host U42", "",
+		&entity.SearchResult{ID: "dup", Title: "Dup", URL: "u"}); err != nil {
+		t.Fatalf("seed add: %v", err)
+	}
+	pre, err := queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("pre-load: %v", err)
+	}
+	preLen := len(pre.Songs)
+
+	// Now try to auto-queue the SAME id — must return stale.
+	_, _, _, _, _, err = inter.AddRoomAutoQueueSong(ctx, "rq-f-aq-dup",
+		&entity.Song{ID: "dup", Title: "Dup", URL: "u", AddedBy: entity.SystemUserID, AddedByID: 0},
+		pre.Songs[pre.CurrentIndex].ID,
+	)
+	if !errors.Is(err, ErrRoomAutoQueueStale) {
+		t.Fatalf("expected ErrRoomAutoQueueStale on duplicate, got %v", err)
+	}
+
+	post, err := queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("post-load: %v", err)
+	}
+	if len(post.Songs) != preLen {
+		t.Errorf("queue mutated on duplicate auto-queue: %d vs %d songs", len(post.Songs), preLen)
+	}
+}
+
+// --- R09f auto-queue trigger wiring tests ---
+//
+// Pins the trigger ownership contract: a successful queue mutation
+// that ends with current == last fires a non-blocking
+// CheckAndTrigger on the wired RoomAutoQueueTrigger. Mutations that
+// do not end at current == last do NOT fire.
+
+// stubRoomAutoQueueTrigger captures CheckAndTrigger invocations and
+// returns immediately. Used to assert when the roomqueue interactor
+// fires the auto-queue trigger.
+type stubRoomAutoQueueTrigger struct {
+	mu        sync.Mutex
+	calls     []string
+	queueLive *entity.Queue
+}
+
+func (s *stubRoomAutoQueueTrigger) CheckAndTrigger(_ context.Context, slug string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, slug)
+	return nil
+}
+
+// TestRoomQueue_TriggerFiresAfterSuccessfulMutation_OnCurrentIsLast:
+// with a stub trigger wired and the post-mutation queue at
+// current == last, a non-blocking CheckAndTrigger is fired for the
+// room slug. The trigger argument resolves to the expected slug.
+func TestRoomQueue_TriggerFiresAfterSuccessfulMutation_OnCurrentIsLast(t *testing.T) {
+	inter, _, cleanup := playbackFixture(t, "rq-f-trig-last", 42)
+	defer cleanup()
+	trig := &stubRoomAutoQueueTrigger{}
+	inter.SetRoomAutoQueueTrigger(trig)
+	ctx := context.Background()
+
+	// Drive a SkipPlayback so the queue advances to 1 (the only
+	// remaining song), leaving current==last. SkipPlayback's
+	// post-mutation check then fires the trigger.
+	// pre-load: 2 songs at current=0 → not last (current != 1).
+	q, err := inter.GetStateByRoomID(ctx, mustRoomID(t, inter, "rq-f-trig-last"))
+	if err != nil {
+		t.Fatalf("get state: %v", err)
+	}
+	if q.CurrentIndex == len(q.Songs)-1 && len(q.Songs) >= 2 {
+		// The fixture already pre-advanced — drop a song instead so
+		// we still end with current==last (last==last after remove).
+		// Skip the SkipPlayback branch in that case.
+	} else {
+		if _, _, _, _, err := inter.SkipPlayback(ctx, "rq-f-trig-last", 42); err != nil {
+			t.Fatalf("seed-skip: %v", err)
+		}
+	}
+
+	// Verify current == last now.
+	q, err = inter.GetStateByRoomID(ctx, mustRoomID(t, inter, "rq-f-trig-last"))
+	if err != nil {
+		t.Fatalf("re-get: %v", err)
+	}
+	if q.CurrentIndex != len(q.Songs)-1 {
+		t.Fatalf("seed-precondition: current=%d != last=%d", q.CurrentIndex, len(q.Songs)-1)
+	}
+
+	// Drive ClearQueue (host/admin path) — clear leaves current at
+	// the kept song, still current==last.
+	if _, err := inter.ClearQueue(ctx, "rq-f-trig-last", 42, entity.RoomRoleHost); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+
+	// Wait briefly for the goroutine to land.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		trig.mu.Lock()
+		n := len(trig.calls)
+		trig.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	trig.mu.Lock()
+	defer trig.mu.Unlock()
+	if len(trig.calls) == 0 {
+		t.Fatalf("expected CheckAndTrigger to fire after ClearQueue (current==last), got no calls")
+	}
+	if trig.calls[0] != "rq-f-trig-last" {
+		t.Errorf("expected trigger slug=rq-f-trig-last, got %q", trig.calls[0])
+	}
+}
 
 // --- helpers ---
 

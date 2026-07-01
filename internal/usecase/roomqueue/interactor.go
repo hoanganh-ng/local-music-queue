@@ -18,6 +18,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 
 	"local-music-queue/internal/domain/entity"
@@ -75,6 +76,17 @@ var (
 	// interactor validates the move BEFORE any mutation so a failed
 	// PrevPlayback leaves the persisted queue byte-for-byte unchanged.
 	ErrNoPreviousSong = errors.New("no previous song in queue")
+	// R09f: ErrRoomAutoQueueStale is returned by AddRoomAutoQueueSong
+	// when the candidate fails any of the stale-revalidation
+	// predicates against a successfully-loaded queue (source song no
+	// longer current, an upcoming song now exists, or the candidate
+	// is already queued). Mirrors the global queue.ErrAutoQueueStale
+	// so the future roomautoqueue use case can map it to its own
+	// ErrAutoQueueStale sentinel at the wiring boundary without
+	// string matching the error text. The interactor surfaces this
+	// sentinel with zero side effects — no queue save, no history
+	// append, no broadcast.
+	ErrRoomAutoQueueStale = errors.New("room auto-queue candidate is stale")
 )
 
 // Interactor owns the room-scoped queue use cases. The mutex serializes
@@ -97,6 +109,10 @@ type Interactor struct {
 	// when the seam is unset so the handler can map that to a
 	// misconfigured-server 500 instead of silently dropping auth.
 	leaseAuthorizer room.PlaybackLeaseAuthorizer
+	// autoQueueUC is the R09f roomautoqueue use-case seam. nil is
+	// tolerated (no per-room triggers fire when unset — mirrors the
+	// global queue.AutoQueueTrigger seam).
+	autoQueueUC RoomAutoQueueTrigger
 }
 
 // NewInteractor constructs a room queue interactor. youtube may be nil
@@ -142,6 +158,29 @@ type Broadcaster interface {
 	// does NOT call this; the handler invokes it after a successful
 	// PrevPlayback.
 	BroadcastRoomPlaybackSongPrevious(roomSlug string, previousIndex, newIndex int, currentSong *entity.Song, status entity.PlaybackStatus, elapsed int, state *entity.Queue)
+	// R09f: the per-room auto-queue trigger fires these two events
+	// on /ws/rooms/{slug} only. The global /ws 16-event inventory is
+	// unchanged; the trigger path does NOT call the global
+	// auto_queue_added / auto_queue_config_changed broadcasters. The
+	// roomautoqueue use case invokes these via the seam after a
+	// successful AddRoomAutoQueueSong / SetEnabled. The handler
+	// for toggle also invokes BroadcastRoomAutoQueueConfigChanged
+	// after a successful SetEnabled so the per-room WebSocket
+	// subscribers observe the new config without a follow-up fetch.
+	BroadcastRoomAutoQueueAdded(roomSlug string, song entity.Song, sourceSongTitle string, state *entity.Queue)
+	BroadcastRoomAutoQueueConfigChanged(roomSlug string, enabled bool, strategy string)
+}
+
+// RoomAutoQueueTrigger is the seam the future roomautoqueue package
+// implements. CheckAndTrigger runs asynchronously on the use-case
+// goroutine; the interactor fires it as a non-blocking goroutine so
+// slow yt-dlp fetches NEVER stall a successful queue mutation.
+//
+// nil is tolerated: when no trigger is wired the post-mutation
+// goroutine short-circuits silently. This mirrors the global
+// queue.AutoQueueTrigger seam.
+type RoomAutoQueueTrigger interface {
+	CheckAndTrigger(ctx context.Context, slug string) error
 }
 
 // SetBroadcaster wires the broadcaster used by the delivery layer to
@@ -322,6 +361,8 @@ func (i *Interactor) RemoveSong(ctx context.Context, slug string, actorUserID in
 	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 		return nil, fmt.Errorf("save room queue: %w", err)
 	}
+	// R09f: trigger auto-queue when the removal leaves current==last.
+	defer i.maybeCheckRoomAutoQueue(ctx, slug, queue)
 	return queue, nil
 }
 
@@ -350,6 +391,9 @@ func (i *Interactor) ClearQueue(ctx context.Context, slug string, actorUserID in
 	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 		return nil, fmt.Errorf("save room queue: %w", err)
 	}
+	// R09f: trigger auto-queue when the clear leaves current==last
+	// (only-one-song-remaining case).
+	defer i.maybeCheckRoomAutoQueue(ctx, slug, queue)
 	return queue, nil
 }
 
@@ -471,6 +515,42 @@ func (i *Interactor) SetLeaseAuthorizer(a room.PlaybackLeaseAuthorizer) { i.leas
 // LeaseAuthorizer returns the wired lease authorizer, or nil when
 // unset. Exposed for tests that need to seed / inspect the seam.
 func (i *Interactor) LeaseAuthorizer() room.PlaybackLeaseAuthorizer { return i.leaseAuthorizer }
+
+// SetRoomAutoQueueTrigger wires the per-room auto-queue trigger
+// invoked after successful room queue mutations that leave
+// "current is last" (R09f). nil disables the trigger path.
+func (i *Interactor) SetRoomAutoQueueTrigger(t RoomAutoQueueTrigger) { i.autoQueueUC = t }
+
+// maybeCheckRoomAutoQueue fires a non-blocking CheckAndTrigger when
+// the post-mutation queue ends up at "current is last" and the seam
+// is wired. Used after PlaybackEnded / SkipPlayback / SkipVote /
+// RemoveSong / ClearQueue per the R09f trigger-point contract.
+//
+// The goroutine is intentionally fire-and-forget so the slow
+// yt-dlp fetch inside CheckAndTrigger NEVER stalls the queue
+// mutation's return path. Errors are logged at the trigger seam.
+func (i *Interactor) maybeCheckRoomAutoQueue(ctx context.Context, slug string, q *entity.Queue) {
+	if i.autoQueueUC == nil {
+		return
+	}
+	if q == nil {
+		return
+	}
+	if q.CurrentIndex < 0 || q.CurrentIndex >= len(q.Songs) {
+		return
+	}
+	if q.CurrentIndex != len(q.Songs)-1 {
+		return
+	}
+	// Snapshot slug defensively in case the caller's context carries a
+	// tenant that differs from the wire slug we were given.
+	go func() {
+		if err := i.autoQueueUC.CheckAndTrigger(context.Background(), slug); err != nil {
+			log.Printf("room auto-queue: CheckAndTrigger(%s): %v", slug, err)
+		}
+	}()
+	_ = ctx
+}
 
 // requirePlaybackLease calls the lease authorizer seam and translates
 // the room-package sentinels to the local roomqueue sentinels so the
@@ -636,6 +716,8 @@ func (i *Interactor) SkipPlayback(ctx context.Context, slug string, actorUserID 
 	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 		return nil, 0, 0, nil, fmt.Errorf("save room queue: %w", err)
 	}
+	// R09f: trigger auto-queue only when the advance leaves current==last.
+	defer i.maybeCheckRoomAutoQueue(ctx, slug, queue)
 	return queue, prevIdx, queue.CurrentIndex, newSong, nil
 }
 
@@ -689,6 +771,8 @@ func (i *Interactor) PlaybackEnded(ctx context.Context, slug string, actorUserID
 		if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 			return nil, 0, 0, nil, false, fmt.Errorf("save room queue: %w", err)
 		}
+		// R09f: trigger auto-queue when the advance leaves current==last.
+		defer i.maybeCheckRoomAutoQueue(ctx, slug, queue)
 		return queue, prevIdx, queue.CurrentIndex, newSong, true, nil
 	}
 	if !errors.Is(advanceErr, entity.ErrNoNextSong) {
@@ -705,6 +789,8 @@ func (i *Interactor) PlaybackEnded(ctx context.Context, slug string, actorUserID
 	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 		return nil, 0, 0, nil, false, fmt.Errorf("save room queue: %w", err)
 	}
+	// R09f: end-of-queue pause leaves current==last; trigger auto-queue.
+	defer i.maybeCheckRoomAutoQueue(ctx, slug, queue)
 	return queue, queue.CurrentIndex, queue.CurrentIndex, &currentSong, false, nil
 }
 
@@ -768,7 +854,87 @@ func (i *Interactor) SkipVote(ctx context.Context, slug, expectedSongID string) 
 	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 		return nil, 0, 0, nil, fmt.Errorf("save room queue: %w", err)
 	}
+	// R09f: trigger auto-queue when the vote-driven advance leaves
+	// current==last.
+	defer i.maybeCheckRoomAutoQueue(ctx, slug, queue)
 	return queue, prevIdx, queue.CurrentIndex, newSong, nil
+}
+
+// --- R09f per-room auto-queue ---
+
+// AddRoomAutoQueueSong atomically revalidates an auto-queue candidate
+// and inserts it only when:
+//   - The current song's ID matches expectedSourceSongID (the song
+//     whose play triggered the per-room radio fetch), AND
+//   - No upcoming song exists (current is still the last in the
+//     queue), AND
+//   - The candidate is not already in the upcoming queue.
+//
+// When any of those predicates fails against a successfully-loaded
+// queue, ErrRoomAutoQueueStale is returned with zero side effects
+// (no save, no history append, no broadcast, no config touch). The
+// caller (roomautoqueue.CheckAndTrigger) maps the sentinel to its
+// own ErrAutoQueueStale at the wiring boundary.
+//
+// Repository load failures are surfaced as wrapped operational errors
+// (NOT the stale sentinel) so the future roomautoqueue use case can
+// distinguish a stale-but-valid state from a database failure.
+//
+// Mirrors the global queue.AddAutoQueueSong contract byte-for-byte
+// (R04 / Sprint 004). Called by the roomautoqueue use case's
+// AddRoomAutoQueueSongFunc seam so the insertion takes place under
+// the roomqueue mutex — the slow yt-dlp fetch happens upstream
+// OUTSIDE this lock.
+//
+// Returns the post-mutation snapshot tuple (queue, currentIndex,
+// currentSong, status, elapsed, activity) — the broadcaster
+// constructs the room_auto_queue_added event from this snapshot
+// OUTSIDE the roomqueue mutex.
+func (i *Interactor) AddRoomAutoQueueSong(ctx context.Context, slug string, song *entity.Song, expectedSourceSongID string) (*entity.Queue, int, *entity.Song, entity.PlaybackStatus, int, error) {
+	if !entity.IsValidSlug(slug) {
+		return nil, 0, nil, "", 0, room.ErrInvalidSlug
+	}
+	roomObj, err := i.resolveActiveRoom(ctx, slug)
+	if err != nil {
+		return nil, 0, nil, "", 0, err
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	queue, err := i.loadQueue(ctx, roomObj.ID)
+	if err != nil {
+		// Operational failure (DB down, schema corruption, etc.) —
+		// surface it to the caller. Do NOT report as
+		// ErrRoomAutoQueueStale, which is reserved for queue states
+		// that loaded successfully but failed the staleness predicates.
+		return nil, 0, nil, "", 0, fmt.Errorf("failed to load room queue for auto-queue revalidation: %w", err)
+	}
+
+	if queue.CurrentIndex < 0 || queue.CurrentIndex >= len(queue.Songs) {
+		return nil, 0, nil, "", 0, ErrRoomAutoQueueStale
+	}
+	if queue.Songs[queue.CurrentIndex].ID != expectedSourceSongID {
+		return nil, 0, nil, "", 0, ErrRoomAutoQueueStale
+	}
+	if queue.CurrentIndex != len(queue.Songs)-1 {
+		return nil, 0, nil, "", 0, ErrRoomAutoQueueStale
+	}
+	if queue.ContainsSong(song.ID) {
+		return nil, 0, nil, "", 0, ErrRoomAutoQueueStale
+	}
+
+	queue.Add(*song)
+	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
+		return nil, 0, nil, "", 0, fmt.Errorf("failed to save room queue after auto-queue insert: %w", err)
+	}
+
+	var currentSong *entity.Song
+	if queue.CurrentIndex >= 0 && queue.CurrentIndex < len(queue.Songs) {
+		s := queue.Songs[queue.CurrentIndex]
+		currentSong = &s
+	}
+	return queue, queue.CurrentIndex, currentSong, queue.Status, queue.Elapsed, nil
 }
 
 // --- R09c volume command ---

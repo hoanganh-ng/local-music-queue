@@ -95,6 +95,8 @@ func (b *voteTestBroadcaster) BroadcastRoomPlaybackVolumeChanged(_, _ string) {}
 // handlers never invoke this; the R09d handler is the only caller in
 // the room-queue delivery layer.
 func (b *voteTestBroadcaster) BroadcastRoomPlaybackSongPrevious(_ string, _, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {}
+func (b *voteTestBroadcaster) BroadcastRoomAutoQueueAdded(_ string, _ entity.Song, _ string, _ *entity.Queue)    {}
+func (b *voteTestBroadcaster) BroadcastRoomAutoQueueConfigChanged(_ string, _ bool, _ string)       {}
 
 // fixedResolver is a deterministic roomvote.Resolver that always
 // returns the supplied unique-user count. Tests use it to pin the
