@@ -91,29 +91,38 @@ The broadcaster for the future per-room event is the existing `*ws.RoomWSHub`. T
 
 ### CD-5: Trigger ownership and trigger points
 
-A future implementation MUST keep the per-room trigger sites narrow and aligned with the room playback semantics. The trigger fires from any of the room-scoped paths that leave the queue at "current is last" with auto-queue enabled:
+The future room auto-queue trigger fires AFTER a successful room queue mutation that leaves the post-mutation queue at "current is last" (one song remaining) AND the per-room config is enabled. The trigger site is the roomqueue use-case layer, not the handler layer.
 
-- `roomqueue.Interactor.PlaybackEnded` (when `AdvanceToNext` returns `entity.ErrNoNextSong`).
-- `roomqueue.Interactor.SkipPlayback` (when `AdvanceToNext` returns `entity.ErrNoNextSong`).
-- `roomqueue.Interactor.SkipVote` (when `AdvanceToNext` returns `entity.ErrNoNextSong`).
-- `roomqueue.Interactor.RemoveSong` (when the removal leaves the queue at "current is last").
-- `roomqueue.Interactor.ClearQueue` (when the queue becomes "current is last" — typically when the queue had one upcoming song; the kept current song becomes the last).
+The trigger fires after a successful (non-stale, non-error) mutation in any of these paths:
 
-Trigger invocations are async (non-blocking) and use the same single-flight guard pattern as the global interactor (a per-room `triggering` flag, not a debounce). The slow `FetchRelated` call runs in the goroutine; the per-room mutex is NEVER held during the fetch.
+- `roomqueue.Interactor.PlaybackEnded` — final-song case. When the entity layer returns `entity.ErrNoNextSong`, the interactor pauses at end-of-queue (`Status = StatusPaused`, `Elapsed = 0`, `CurrentIndex` unchanged) and persists. The post-mutation queue is "current is last"; the trigger fires.
+- `roomqueue.Interactor.PlaybackEnded` — successful-advance case. When `AdvanceToNext` succeeds and the new current song is the new last in the queue (i.e. the previous "last" was an upcoming song and the queue was at "last+1" before the advance), the post-mutation queue is "current is last"; the trigger fires.
+- `roomqueue.Interactor.SkipPlayback` — successful-advance case. When the lease-holder skip advances to a new current song that becomes the new last in the queue, the post-mutation queue is "current is last"; the trigger fires.
+- `roomqueue.Interactor.SkipVote` — successful-advance case. When the room vote skip advances to a new current song that becomes the new last in the queue, the post-mutation queue is "current is last"; the trigger fires.
+- `roomqueue.Interactor.RemoveSong` — when the removal leaves the queue at "current is last" (the removed song was an upcoming song and the current song is now last).
+- `roomqueue.Interactor.ClearQueue` — when the queue becomes "current is last" after clearing (the kept current song is the only remaining song, or the queue had one upcoming song and clearing left the current as the new last).
 
-The trigger MUST NOT fire from:
-- `roomqueue.Interactor.PrevPlayback` (R09d: prev is not an auto-queue trigger).
-- `roomqueue.Interactor.PrioritizeSong` (a re-order, not an advance to last).
-- `roomqueue.Interactor.AddSong` (a manual add, not a "queue ended" path).
-- `roomqueue.Interactor.ChangePlaybackVolume` (no queue change).
+The trigger MUST NOT fire on:
+
+- `roomqueue.Interactor.PlaybackEnded` no-advance error paths (anything other than the persisted final-song pause or a successful advance to last). The `entity.ErrNoNextSong` / `entity.ErrNoCurrentSong` sentinels in `PlaybackEnded` are no-mutation paths: the trigger does NOT see them as "ended" and does NOT fire.
+- `roomqueue.Interactor.SkipPlayback` and `roomqueue.Interactor.SkipVote` no-mutation paths (those return `roomqueue.ErrNoNextSong` / `roomqueue.ErrNoCurrentSong` BEFORE any state change; the queue is byte-for-byte unchanged, so the trigger has nothing to react to).
+- `roomqueue.Interactor.PrevPlayback` (R09d: prev is not an auto-queue trigger; the post-mutation queue is a rewind, not an "ended" state).
+- `roomqueue.Interactor.PrioritizeSong` (a re-order; the queue tail is unchanged).
+- `roomqueue.Interactor.AddSong` (a manual add; the user-driven addition is the auto-queue's source of new content, not a trigger).
+- `roomqueue.Interactor.ChangePlaybackVolume` (no queue change at all).
+- `roomqueue.Interactor.SyncPlaybackElapsed` / `SetPlaybackStatus` (elapsed/status-only; the queue tail is unchanged).
+
+Trigger invocations are async (non-blocking) and use a per-room single-flight guard (see CD-6). The slow `FetchRelated` call runs in the goroutine; the per-room mutex is NEVER held during the fetch.
 
 ### CD-6: Per-room single-flight / concurrency model
 
-- A future `roomautoqueue.Interactor` MUST hold an `mu` mutex that serializes the `triggering` flag, the pre-fetch config + queue read, the post-fetch re-check, and the conditional insertion call against the future `SetEnabled` setter. This mirrors the global `autoqueue.Interactor` contract.
-- The future `roomqueue.Interactor.AddRoomAutoQueueSong` runs under the existing `roomqueue.Interactor` mutex (it re-uses the same mutex the rest of the roomqueue package already holds). The insertion MUST NOT call out to the slow `FetchRelated` (that already happened under the roomautoqueue mutex).
-- The `FetchRelated` call is held outside BOTH the roomautoqueue mutex and the roomqueue mutex.
+- A future `roomautoqueue.Interactor` MUST hold a **coordinator mutex** (working name: `mu`) that guards a **per-room in-flight map** (working name: `inFlight map[roomID|string]bool`). The `mu` is taken only to read or mutate the map; the slow `FetchRelated` call is NEVER held under `mu`. This is the per-room analogue of the global `autoqueue.Interactor.triggering` flag, but keyed per room so the in-flight state is per-room, not global.
+- Per-room in-flight semantics: each room's trigger is independent. A slow `FetchRelated` for room A MUST NOT suppress, block, or delay a trigger for room B; the map entry is keyed by room id (or slug) and checked under `mu` only. The single-flight guarantee is "at most one in-flight trigger per room at any time", not "at most one in-flight trigger across all rooms".
+- The future `roomqueue.Interactor.AddRoomAutoQueueSong` runs under the existing `roomqueue.Interactor` mutex (it re-uses the same mutex the rest of the roomqueue package already holds). The insertion MUST NOT call out to the slow `FetchRelated` (that already happened under the roomautoqueue coordinator mutex).
+- The `FetchRelated` call is held outside BOTH the roomautoqueue coordinator mutex and the roomqueue mutex. The two rooms' fetches (if both have triggers in flight) may run concurrently.
 - `AppendHistory`, activity writes, and the broadcaster call run OUTSIDE both locks, mirroring the global contract. A concurrent `SetEnabled` is not blocked on downstream work.
-- Stale-candidate, repository-load-failure, and disable-mid-flight paths are serialized exactly as the global contract serializes them.
+- Stale-candidate, repository-load-failure, and disable-mid-flight paths are serialized exactly as the global contract serializes them — and only with respect to OTHER triggers for the SAME room. Cross-room operations are independent.
+- Single-instance only: the per-room in-flight map is in-memory; on restart every room's in-flight state is empty. No cross-process safety claim is made; a future horizontal-scaling redesign would need a different coordinator (e.g. advisory lock per room) and is out of scope.
 
 ### CD-7: Stale-candidate handling
 
@@ -196,16 +205,16 @@ Repository load failures are wrapped and returned as operational errors (NOT the
 
 ## Failure semantics
 
-| Failure | Mutex held? | Save? | History append? | Activity? | Broadcast? | Logged? |
-|---|---|---|---|---|---|---|
-| Disabled mid-flight (post-fetch `enabled=false`) | release before save | No | No | No | No | `auto-queue: disabled mid-flight, dropping candidate` |
-| Stale (source song no longer current) | release before save | No | No | No | No | `auto-queue: candidate stale, dropping` |
-| Stale (upcoming song now exists) | release before save | No | No | No | No | `auto-queue: candidate stale, dropping` |
-| Stale (candidate already in queue) | release before save | No | No | No | No | `auto-queue: candidate stale, dropping` |
-| Repository load failure | release before save | No | No | No | No | wrapped error propagates; future `roomautoqueue.CheckAndTrigger` returns the wrapped error |
-| Fetcher fails AND no fallback candidate | n/a | No | No | No | No | `auto-queue: no candidate available` |
-| Insertion succeeds | release before downstream | Yes (room queue + room play history + room config if needed) | Yes (room play history only) | Yes (single activity) | Yes (room_auto_queue_added) | success log line |
-| `SetEnabled` lands during slow fetch | holds `mu`; serializes with post-fetch recheck | Same as disabled-mid-flight | Same as disabled-mid-flight | Same as disabled-mid-flight | Same as disabled-mid-flight | same log line as disabled-mid-flight |
+| Failure | Mutex held? | Room queue save? | History append? | Activity? | Broadcast? | Config save? | Logged? |
+|---|---|---|---|---|---|---|---|
+| Disabled mid-flight (post-fetch `enabled=false`) | release before save | No | No | No | No | No (config is saved only by the toggle endpoint) | `auto-queue: disabled mid-flight, dropping candidate` |
+| Stale (source song no longer current) | release before save | No | No | No | No | No | `auto-queue: candidate stale, dropping` |
+| Stale (upcoming song now exists) | release before save | No | No | No | No | No | `auto-queue: candidate stale, dropping` |
+| Stale (candidate already in queue) | release before save | No | No | No | No | No | `auto-queue: candidate stale, dropping` |
+| Repository load failure | release before save | No | No | No | No | No | wrapped error propagates; future `roomautoqueue.CheckAndTrigger` returns the wrapped error |
+| Fetcher fails AND no fallback candidate | n/a | No | No | No | No | No | `auto-queue: no candidate available` |
+| Insertion succeeds | release before downstream | Yes (room queue only — `room_queue_state` JSONB) | Yes (room play history only — `room_play_history`) | Yes (single activity) | Yes (`room_auto_queue_added`) | No (insertion does NOT touch the per-room config; config is saved only by the toggle / status endpoints, not by the trigger path) | success log line |
+| `SetEnabled` lands during slow fetch | holds coordinator `mu`; serializes with post-fetch recheck (per-room only) | Same as disabled-mid-flight | Same as disabled-mid-flight | Same as disabled-mid-flight | Same as disabled-mid-flight | No (config save is the toggle endpoint's path, separate from the trigger) | same log line as disabled-mid-flight |
 
 The "downstream work runs outside the lock" invariant is preserved end-to-end. A concurrent `SetEnabled` is not blocked on `AppendHistory` or the broadcaster.
 
