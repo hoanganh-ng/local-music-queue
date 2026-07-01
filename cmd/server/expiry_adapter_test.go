@@ -83,6 +83,7 @@ func (*expiryTestHub) BroadcastRoomPlaybackElapsedSync(_ string, _ int, _ *entit
 func (*expiryTestHub) BroadcastRoomPlaybackSongAdvanced(_ string, _ string, _, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {}
 func (*expiryTestHub) BroadcastRoomVoteUpdated(_ string, _ *entity.VoteSession, _ int, _ *entity.Queue) {}
 func (*expiryTestHub) BroadcastRoomPlaybackVolumeChanged(_ string, _ string)                          {}
+func (*expiryTestHub) BroadcastRoomPlaybackSongPrevious(_ string, _, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {}
 
 var (
 	_ roomqueue.Broadcaster = (*expiryTestHub)(nil)

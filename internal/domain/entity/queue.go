@@ -187,6 +187,13 @@ var ErrInvalidStatus = errors.New("invalid playback status")
 // from 0; negative is always invalid.
 var ErrInvalidElapsed = errors.New("invalid elapsed value")
 
+// ErrNoPreviousSong is returned by PrevToPrevious when the queue is
+// already on the first song (CurrentIndex == 0) and a backward move is
+// therefore impossible. Mirrors ErrNoNextSong for the forward path so
+// the R09d room playback use case can map it to a 400 cleanly without
+// string-matching the legacy Queue.Prev() error.
+var ErrNoPreviousSong = errors.New("no previous song in queue")
+
 // SetStatus mutates the queue to newStatus. It refuses to mutate when
 // the queue has no current song (CurrentIndex == -1 or empty Songs),
 // returning ErrNoCurrentSong without touching state. Refuses the
@@ -241,6 +248,33 @@ func (q *Queue) AdvanceToNext() (prevIndex int, newSong *Song, err error) {
 	}
 	prevIndex = q.CurrentIndex
 	q.CurrentIndex++
+	q.Elapsed = 0
+	q.Status = StatusPlaying
+	cs := q.Songs[q.CurrentIndex]
+	return prevIndex, &cs, nil
+}
+
+// PrevToPrevious is the R09d counterpart of AdvanceToNext for the
+// backward direction. It checks for a previous song BEFORE mutating,
+// returning ErrNoPreviousSong / ErrNoCurrentSong without touching
+// state when the move is impossible. On success it decrements
+// CurrentIndex, resets Elapsed to 0, sets Status = StatusPlaying, and
+// returns the (previousIndex, newSong) tuple the broadcast payload
+// needs.
+//
+// Returns:
+//   - ErrNoPreviousSong  → already on the first song, queue not mutated
+//   - ErrNoCurrentSong   → empty queue, queue not mutated
+//   - nil                → move succeeded
+func (q *Queue) PrevToPrevious() (prevIndex int, newSong *Song, err error) {
+	if len(q.Songs) == 0 || q.CurrentIndex < 0 {
+		return q.CurrentIndex, nil, ErrNoCurrentSong
+	}
+	if q.CurrentIndex <= 0 {
+		return q.CurrentIndex, nil, ErrNoPreviousSong
+	}
+	prevIndex = q.CurrentIndex
+	q.CurrentIndex--
 	q.Elapsed = 0
 	q.Status = StatusPlaying
 	cs := q.Songs[q.CurrentIndex]

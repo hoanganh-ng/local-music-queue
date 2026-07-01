@@ -68,6 +68,13 @@ var (
 	// value before resolving the room so malformed input is rejected
 	// without any DB / lease work.
 	ErrInvalidDirection = errors.New("invalid playback direction")
+	// R09d: ErrNoPreviousSong is returned by PrevPlayback when the queue
+	// is already on the first song (CurrentIndex == 0). Mirrors
+	// ErrNoNextSong so the handler maps it to HTTP 400 without relying on
+	// string matching against the legacy entity.Queue.Prev() error. The
+	// interactor validates the move BEFORE any mutation so a failed
+	// PrevPlayback leaves the persisted queue byte-for-byte unchanged.
+	ErrNoPreviousSong = errors.New("no previous song in queue")
 )
 
 // Interactor owns the room-scoped queue use cases. The mutex serializes
@@ -129,6 +136,12 @@ type Broadcaster interface {
 	// interactor does NOT call this; the handler invokes it after a
 	// successful ChangePlaybackVolume.
 	BroadcastRoomPlaybackVolumeChanged(roomSlug string, direction string)
+	// R09d: the lease-holder-only prev command fires a single additive
+	// per-room WebSocket delta carrying the prev/next indexes, the new
+	// current song, and the post-mutation queue state. The interactor
+	// does NOT call this; the handler invokes it after a successful
+	// PrevPlayback.
+	BroadcastRoomPlaybackSongPrevious(roomSlug string, previousIndex, newIndex int, currentSong *entity.Song, status entity.PlaybackStatus, elapsed int, state *entity.Queue)
 }
 
 // SetBroadcaster wires the broadcaster used by the delivery layer to
@@ -794,4 +807,56 @@ func (i *Interactor) ChangePlaybackVolume(ctx context.Context, slug string, acto
 		return err
 	}
 	return nil
+}
+
+// --- R09d prev command ---
+
+// PrevPlayback moves the room-scoped queue from the current song to
+// the previous song. Lease-holder only. Returns the post-mutation
+// queue plus the previous and new indexes; the handler fans these out
+// as room_playback_song_previous.
+//
+// The entity helper (Queue.PrevToPrevious) refuses to mutate state
+// when the move is impossible, so PrevPlayback translates the entity
+// sentinels into the local roomqueue ones for handler-side mapping.
+//
+// Errors:
+//   ErrNoPreviousSong    → already on the first song (handler → 400)
+//   ErrNoCurrentSong     → empty queue (handler → 400)
+//   ErrInvalidSlug       → malformed slug (handler → 400)
+//   ErrRoomNotFound      → unknown room (handler → 404)
+//   ErrArchived          → archived room (handler → 409)
+//   ErrPlaybackLeaseLost → no active lease (handler → 404)
+//   ErrPlaybackForbidden → lease held by another user (handler → 403)
+//   ErrPlaybackLeaseGone → lease past grace (handler → 410)
+func (i *Interactor) PrevPlayback(ctx context.Context, slug string, actorUserID int) (*entity.Queue, int, int, *entity.Song, error) {
+	roomObj, err := i.resolveActiveRoom(ctx, slug)
+	if err != nil {
+		return nil, 0, 0, nil, err
+	}
+	if err := i.requirePlaybackLease(ctx, slug, actorUserID); err != nil {
+		return nil, 0, 0, nil, err
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	queue, err := i.loadQueue(ctx, roomObj.ID)
+	if err != nil {
+		return nil, 0, 0, nil, err
+	}
+	prevIdx, newSong, err := queue.PrevToPrevious()
+	if err != nil {
+		if errors.Is(err, entity.ErrNoPreviousSong) {
+			return nil, 0, 0, nil, ErrNoPreviousSong
+		}
+		if errors.Is(err, entity.ErrNoCurrentSong) {
+			return nil, 0, 0, nil, ErrNoCurrentSong
+		}
+		return nil, 0, 0, nil, err
+	}
+	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
+		return nil, 0, 0, nil, fmt.Errorf("save room queue: %w", err)
+	}
+	return queue, prevIdx, queue.CurrentIndex, newSong, nil
 }

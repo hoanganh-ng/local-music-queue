@@ -79,6 +79,11 @@
             @click="setPlaybackStatus('paused')"
           >Pause</button>
           <button
+            class="prev-btn"
+            :disabled="!canMutate || !canGoPrevious"
+            @click="prevPlayback"
+          >Prev</button>
+          <button
             class="skip-btn"
             :disabled="!canMutate"
             @click="skipPlayback"
@@ -182,6 +187,12 @@ function applyMessage(msg) {
         const verb = d === 'up' ? 'increased' : d === 'down' ? 'decreased' : 'changed'
         toast.info(`Volume ${verb}.`)
       }
+      break
+    // R09d: lease-aware per-room previous-playback delta. Payload
+    // carries the full post-mutation state snapshot (preferred); the
+    // fallback path mirrors entity.Queue.PrevToPrevious semantics.
+    case 'room_playback_song_previous':
+      globalStore.applyRoomPlaybackSongPrevious(slug.value, msg.data)
       break
     default:
       // Ignore global / unrelated event types per the R07c contract.
@@ -354,6 +365,14 @@ const currentSongTitle = computed(() => {
   if (!hasCurrentSong.value) return ''
   return s.songs[s.current_index]?.title || '(untitled)'
 })
+// canGoPrevious is a UI convenience only. The backend enforces the
+// CurrentIndex > 0 invariant and returns 400 when the move is
+// impossible; this gate just suppresses a misleading click affordance
+// when the queue is on the first song.
+const canGoPrevious = computed(() => {
+  const s = roomState.value.state
+  return typeof s.current_index === 'number' && s.current_index > 0
+})
 
 async function setPlaybackStatus(status) {
   try {
@@ -368,6 +387,18 @@ async function skipPlayback() {
     await api.skipRoomPlayback(slug.value)
   } catch (e) {
     mapPlaybackToast(e, 'Could not skip the current song.')
+  }
+}
+
+// R09d: prev playback command. Lease-holder only. Empty body. The
+// backend enforces the no-current-song / already-on-first invariants
+// and returns 400 without mutation or broadcast on those error paths;
+// mapPlaybackToast already handles 400 (existing surface).
+async function prevPlayback() {
+  try {
+    await api.prevRoomPlayback(slug.value)
+  } catch (e) {
+    mapPlaybackToast(e, 'Could not go to the previous song.')
   }
 }
 
@@ -471,6 +502,26 @@ function handleBack() {
 .add-btn:disabled,
 .clear-btn:disabled,
 .prioritize-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* R09d: prev button sits inline with the other playback controls. It
+   uses the same accent surface as the queue-mutation buttons and is
+   disabled when the queue is on the first song (no prev available) or
+   when the actor lacks the lease (UI convenience; backend is
+   authoritative). */
+.prev-btn {
+  background: var(--accent);
+  color: #0a0a0a;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.35rem 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  margin-right: 0.4rem;
+}
+.prev-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

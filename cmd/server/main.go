@@ -447,6 +447,16 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	mux.HandleFunc("POST /api/rooms/{slug}/playback/volume", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomQueueHandlers.HandleChangeRoomPlaybackVolume(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
+	// R09d: room-scoped previous playback command. Lease-holder only.
+	// Moves the room queue from the current song to the previous song
+	// and broadcasts room_playback_song_previous on /ws/rooms/{slug}.
+	// Returns 400 when the queue has no current song or is already on
+	// the first song; the queue is NOT mutated, saved, or broadcast on
+	// those error paths. The global /ws 16-event inventory and the
+	// global /api/queue/prev contract are unchanged.
+	mux.HandleFunc("POST /api/rooms/{slug}/playback/prev", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomQueueHandlers.HandleChangeRoomPlaybackPrevious(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
 	mux.HandleFunc("POST /api/rooms/{slug}/vote/skip", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomVoteHandlers.HandleCastRoomVoteSkip(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))

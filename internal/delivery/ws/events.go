@@ -62,6 +62,13 @@ const (
 	// "up" / "down". The global /ws 16-event inventory is unchanged;
 	// this event rides /ws/rooms/{slug} only.
 	EventRoomPlaybackVolumeChanged = "room_playback_volume_changed"
+	// R09d: additive on top of R07b/R07d/R09a/R09b/R09c. Fires on
+	// successful POST /api/rooms/{slug}/playback/prev. The payload
+	// carries the previous/new indexes, the new current song, the
+	// post-mutation status and elapsed, plus the authoritative queue
+	// state snapshot. The global /ws 16-event inventory is unchanged;
+	// this event rides /ws/rooms/{slug} only.
+	EventRoomPlaybackSongPrevious = "room_playback_song_previous"
 )
 
 // UserJoinedData contains only the new user info
@@ -392,4 +399,20 @@ type RoomVoteResolvedData struct {
 type RoomPlaybackVolumeChangedData struct {
 	RoomSlug  string `json:"room_slug"`
 	Direction string `json:"direction"`
+}
+
+// RoomPlaybackSongPreviousData is broadcast after a successful
+// POST /api/rooms/{slug}/playback/prev. R09d addition; carries the
+// prev/next indexes, the new current song, the post-mutation status
+// and elapsed, and the authoritative queue state snapshot so clients
+// do not need a follow-up sync. The 16-event global /ws inventory is
+// unchanged; this event rides /ws/rooms/{slug} only.
+type RoomPlaybackSongPreviousData struct {
+	RoomSlug      string                `json:"room_slug"`
+	PreviousIndex int                   `json:"previous_index"`
+	NewIndex      int                   `json:"new_index"`
+	CurrentSong   *entity.Song          `json:"current_song"`
+	Status        entity.PlaybackStatus `json:"status"`
+	Elapsed       int                   `json:"elapsed"`
+	State         *entity.Queue         `json:"state"`
 }

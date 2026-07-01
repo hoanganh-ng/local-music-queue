@@ -398,6 +398,7 @@ func (r *recordingBroadcaster) BroadcastRoomPlaybackVolumeChanged(_ string, _ st
 	defer r.mu.Unlock()
 	r.volumeN++
 }
+func (r *recordingBroadcaster) BroadcastRoomPlaybackSongPrevious(_ string, _, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {}
 
 // --- helpers ---
 
@@ -1178,5 +1179,175 @@ func TestRoomQueue_ChangePlaybackVolume_RequiresNoCurrentSong(t *testing.T) {
 	}
 	if len(post.Songs) != 0 || post.CurrentIndex != -1 {
 		t.Fatalf("queue mutated on empty volume command: %+v", post)
+	}
+}
+
+// --- R09d PrevPlayback tests ---
+//
+// PrevPlayback is a lease-holder-only command that moves the room
+// queue from the current song to the previous one. It must:
+//   - require an active lease holder (R09a seam)
+//   - require a valid current song (no mutation on empty queue)
+//   - refuse to mutate when already on the first song (no prev song)
+//   - decrement CurrentIndex, reset Elapsed to 0, set Status to playing
+//   - persist the post-mutation queue
+//   - return the (prevIndex, newIndex, currentSong) tuple for the broadcast
+
+// TestRoomPlayback_PrevPlayback_HappyPath seeds a 2-song queue at
+// index 1 with the lease held by user 42. After PrevPlayback the queue
+// is on the previous song at index 0, elapsed=0, status=playing.
+func TestRoomPlayback_PrevPlayback_HappyPath(t *testing.T) {
+	inter, _, cleanup := playbackFixture(t, "rq-d-prev-ok", 42)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Fixture already seeded CurrentIndex=0; advance to index 1 so
+	// "previous" has a target. Use the lease-only SkipPlayback path.
+	if _, _, _, _, err := inter.SkipPlayback(ctx, "rq-d-prev-ok", 42); err != nil {
+		t.Fatalf("seed-advance: %v", err)
+	}
+
+	q, prevIdx, newIdx, song, err := inter.PrevPlayback(ctx, "rq-d-prev-ok", 42)
+	if err != nil {
+		t.Fatalf("prev: %v", err)
+	}
+	if prevIdx != 1 || newIdx != 0 {
+		t.Errorf("expected prev=1 new=0, got prev=%d new=%d", prevIdx, newIdx)
+	}
+	if song == nil || song.ID != "cur" {
+		t.Errorf("expected previous song id=cur, got %+v", song)
+	}
+	if q.CurrentIndex != 0 || q.Status != entity.StatusPlaying || q.Elapsed != 0 {
+		t.Errorf("expected current=0 playing elapsed=0, got %+v", q)
+	}
+
+	persisted, err := inter.queueRepo.Load(ctx, mustRoomID(t, inter, "rq-d-prev-ok"))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if persisted.CurrentIndex != 0 || persisted.Songs[0].ID != "cur" {
+		t.Errorf("expected persisted queue on cur@0, got %+v", persisted)
+	}
+}
+
+// TestRoomPlayback_PrevPlayback_AlreadyOnFirstReturnsErrNoPreviousSong
+// pins the no-partial-mutation invariant: fixture starts on index 0,
+// PrevPlayback must return ErrNoPreviousSong without mutating state.
+func TestRoomPlayback_PrevPlayback_AlreadyOnFirstReturnsErrNoPreviousSong(t *testing.T) {
+	inter, _, cleanup := playbackFixture(t, "rq-d-prev-first", 42)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Seed Elapsed so the no-mutation invariant is observable.
+	roomID := mustRoomID(t, inter, "rq-d-prev-first")
+	if err := inter.queueRepo.Save(ctx, roomID, &entity.Queue{
+		Songs: []entity.Song{
+			{ID: "cur", Title: "Cur"},
+		},
+		CurrentIndex: 0,
+		Status:       entity.StatusPaused,
+		Elapsed:      21,
+	}); err != nil {
+		t.Fatalf("reseed: %v", err)
+	}
+
+	_, _, _, _, err := inter.PrevPlayback(ctx, "rq-d-prev-first", 42)
+	if !errors.Is(err, ErrNoPreviousSong) {
+		t.Fatalf("expected ErrNoPreviousSong, got %v", err)
+	}
+	persisted, _ := inter.queueRepo.Load(ctx, roomID)
+	if persisted.CurrentIndex != 0 || persisted.Elapsed != 21 || persisted.Status != entity.StatusPaused {
+		t.Errorf("queue mutated on no-prev: %+v", persisted)
+	}
+}
+
+// TestRoomPlayback_PrevPlayback_EmptyQueueReturnsErrNoCurrentSong
+// pins the empty-queue branch: PrevPlayback on a fresh room must return
+// ErrNoCurrentSong without mutation or persistence.
+func TestRoomPlayback_PrevPlayback_EmptyQueueReturnsErrNoCurrentSong(t *testing.T) {
+	inter, _, cleanup := pgRoomQueue(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, "rq-d-prev-empty", "PE", 42, testTime()); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := inter.queueRepo.Save(ctx, mustRoomID(t, inter, "rq-d-prev-empty"), entity.NewQueue()); err != nil {
+		t.Fatalf("reset empty queue: %v", err)
+	}
+	inter.SetLeaseAuthorizer(allowAllLeaseAuthorizer{})
+
+	_, _, _, _, err := inter.PrevPlayback(ctx, "rq-d-prev-empty", 42)
+	if !errors.Is(err, ErrNoCurrentSong) {
+		t.Fatalf("expected ErrNoCurrentSong, got %v", err)
+	}
+}
+
+// TestRoomPlayback_PrevPlayback_NonHolderReturnsErrPlaybackForbidden
+// exercises the lease-authorizer seam: a guest must not be able to
+// advance the room queue backward. Built manually so the host is 200
+// (lease holder) and 42 is a guest member who can NOT issue the
+// command.
+func TestRoomPlayback_PrevPlayback_NonHolderReturnsErrPlaybackForbidden(t *testing.T) {
+	inter, db, _, cleanup := pgRoomQueueWithDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, "rq-d-prev-nh", "PDNH", 200, testTime()); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	roomID := mustRoomID(t, inter, "rq-d-prev-nh")
+	if err := inter.roomRepo.AddMember(ctx, roomID, 42, entity.RoomRoleGuest, testTime()); err != nil {
+		t.Fatalf("add guest 42: %v", err)
+	}
+	if err := inter.queueRepo.Save(ctx, roomID, &entity.Queue{
+		Songs: []entity.Song{
+			{ID: "a", Title: "A"},
+			{ID: "b", Title: "B"},
+		},
+		CurrentIndex: 1,
+		Status:       entity.StatusPlaying,
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	leaseRepo := persistence.NewPostgresPlayerLeaseRepository(db)
+	leaseInter := room.NewPlayerLeaseInteractor(leaseRepo, inter.roomRepo, db, room.DefaultLeaseDuration, room.DefaultLeaseGrace)
+	if _, err := leaseInter.Claim(ctx, "rq-d-prev-nh", 200); err != nil {
+		t.Fatalf("claim as 200: %v", err)
+	}
+	inter.SetLeaseAuthorizer(leaseInter)
+
+	_, _, _, _, err := inter.PrevPlayback(ctx, "rq-d-prev-nh", 42)
+	if !errors.Is(err, ErrPlaybackForbidden) {
+		t.Fatalf("expected ErrPlaybackForbidden, got %v", err)
+	}
+}
+
+// TestRoomPlayback_PrevPlayback_MissingLeaseReturnsErrPlaybackLeaseLost
+// pins the missing-lease path: the use case refuses the mutation when
+// no lease exists.
+func TestRoomPlayback_PrevPlayback_MissingLeaseReturnsErrPlaybackLeaseLost(t *testing.T) {
+	inter, db, _, cleanup := pgRoomQueueWithDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, "rq-d-prev-nl", "PN", 42, testTime()); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	roomID := mustRoomID(t, inter, "rq-d-prev-nl")
+	if err := inter.queueRepo.Save(ctx, roomID, &entity.Queue{
+		Songs: []entity.Song{
+			{ID: "a", Title: "A"},
+			{ID: "b", Title: "B"},
+		},
+		CurrentIndex: 1,
+		Status:       entity.StatusPlaying,
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	leaseRepo := persistence.NewPostgresPlayerLeaseRepository(db)
+	leaseInter := room.NewPlayerLeaseInteractor(leaseRepo, inter.roomRepo, db, room.DefaultLeaseDuration, room.DefaultLeaseGrace)
+	inter.SetLeaseAuthorizer(leaseInter)
+
+	_, _, _, _, err := inter.PrevPlayback(ctx, "rq-d-prev-nl", 42)
+	if !errors.Is(err, ErrPlaybackLeaseLost) {
+		t.Fatalf("expected ErrPlaybackLeaseLost, got %v", err)
 	}
 }

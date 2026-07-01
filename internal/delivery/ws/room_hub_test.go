@@ -1274,3 +1274,100 @@ func TestRoomHub_BroadcastRoomPlaybackVolumeChanged_FansOutToRoom(t *testing.T) 
 		}
 	}
 }
+
+// --- R09d playback previous broadcast envelope ---
+//
+// Pin the contract that BroadcastRoomPlaybackSongPrevious fans out to
+// every client connected to the matching room (and only that room)
+// with the right type, room_slug, previous_index, new_index,
+// current_song, status, elapsed, and state. Mirrors the R09a
+// room_playback_song_advanced envelope shape (no seq-allocation
+// claim — same hub-loop invariant).
+
+// TestRoomHub_BroadcastRoomPlaybackSongPrevious_FansOutToRoom
+// verifies that BroadcastRoomPlaybackSongPrevious delivers a single
+// envelope to every client on the per-room hub, carrying the prev/next
+// indices, the new current_song, status, elapsed, and the full state
+// snapshot.
+func TestRoomHub_BroadcastRoomPlaybackSongPrevious_FansOutToRoom(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("r09d-prev", &entity.Room{ID: 81, Slug: "r09d-prev", Status: entity.RoomStatusActive})
+	resolver.SetQueue(81, &entity.Queue{
+		Songs: []entity.Song{
+			{ID: "a", Title: "A"},
+			{ID: "b", Title: "B"},
+		},
+		CurrentIndex: 1,
+		Status:       entity.StatusPlaying,
+	})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{
+			"u1": {ID: 1, Role: entity.RoleHost, DisplayName: "U1"},
+			"u2": {ID: 2, Role: entity.RoleGuest, DisplayName: "U2"},
+		},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	c1 := dialRoomWS(t, server, "r09d-prev", "u1")
+	defer c1.Close()
+	c2 := dialRoomWS(t, server, "r09d-prev", "u2")
+	defer c2.Close()
+
+	// Drain initial sync frames so both read pumps are unblocked.
+	for _, c := range []*websocket.Conn{c1, c2} {
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, _, err := c.ReadMessage(); err != nil {
+			t.Fatalf("drain initial sync: %v", err)
+		}
+	}
+
+	prev := &entity.Song{ID: "a", Title: "A"}
+	hub.BroadcastRoomPlaybackSongPrevious("r09d-prev", 1, 0, prev, entity.StatusPlaying, 0, &entity.Queue{
+		Songs:        []entity.Song{*prev, {ID: "b", Title: "B"}},
+		CurrentIndex: 0,
+		Status:       entity.StatusPlaying,
+	})
+
+	for i, c := range []*websocket.Conn{c1, c2} {
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, raw, err := c.ReadMessage()
+		if err != nil {
+			t.Fatalf("conn %d: read prev broadcast: %v", i, err)
+		}
+		var env struct {
+			Type string                          `json:"type"`
+			Data RoomPlaybackSongPreviousData    `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &env); err != nil {
+			t.Fatalf("conn %d: unmarshal prev broadcast: %v", i, err)
+		}
+		if env.Type != EventRoomPlaybackSongPrevious {
+			t.Fatalf("conn %d: type=%q want %q", i, env.Type, EventRoomPlaybackSongPrevious)
+		}
+		d := env.Data
+		if d.RoomSlug != "r09d-prev" {
+			t.Errorf("conn %d: room_slug=%q want r09d-prev", i, d.RoomSlug)
+		}
+		if d.PreviousIndex != 1 || d.NewIndex != 0 {
+			t.Errorf("conn %d: prev/new=%d/%d want 1/0", i, d.PreviousIndex, d.NewIndex)
+		}
+		if d.CurrentSong == nil || d.CurrentSong.ID != "a" {
+			t.Errorf("conn %d: current_song=%+v want id=a", i, d.CurrentSong)
+		}
+		if d.Status != entity.StatusPlaying || d.Elapsed != 0 {
+			t.Errorf("conn %d: status=%q elapsed=%d want playing/0", i, d.Status, d.Elapsed)
+		}
+		if d.State == nil || d.State.CurrentIndex != 0 || len(d.State.Songs) != 2 {
+			t.Errorf("conn %d: state=%+v want snapshot with current=0, 2 songs", i, d.State)
+		}
+	}
+}

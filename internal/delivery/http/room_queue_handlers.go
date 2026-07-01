@@ -429,6 +429,39 @@ func (h *RoomQueueHandlers) HandleChangeRoomPlaybackVolume(w http.ResponseWriter
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// HandleChangeRoomPlaybackPrevious: POST /api/rooms/{slug}/playback/prev
+// — lease-holder only. Empty body. Moves the room queue from the
+// current song to the previous one, decrements CurrentIndex, resets
+// Elapsed to 0, and sets Status = StatusPlaying. Requires a valid
+// current song and CurrentIndex > 0; otherwise returns 400 without
+// mutation, save, or broadcast. The global /ws 16-event inventory is
+// unchanged; the matching room_playback_song_previous event rides
+// /ws/rooms/{slug} only.
+//
+// Status mapping:
+//   - 204 No Content on success
+//   - 400 Bad Request for no current song or already-on-first
+//   - 401 Unauthorized when actor is missing (defense-in-depth)
+//   - 403 Forbidden when the lease is held by another user
+//   - 404 Not Found when the room or active lease does not exist
+//   - 409 Conflict for archived rooms
+//   - 410 Gone when the lease is past grace
+func (h *RoomQueueHandlers) HandleChangeRoomPlaybackPrevious(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
+	if actorUserID == 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	queue, prevIndex, newIndex, song, err := h.inter.PrevPlayback(r.Context(), slug, actorUserID)
+	if err != nil {
+		writeRoomQueueError(w, err)
+		return
+	}
+	if bc := h.inter.Broadcaster(); bc != nil {
+		bc.BroadcastRoomPlaybackSongPrevious(slug, prevIndex, newIndex, song, queue.Status, queue.Elapsed, queue)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // --- error mapping ---
 
 // writeRoomQueueError maps use-case sentinel errors to the documented
@@ -442,7 +475,8 @@ func writeRoomQueueError(w http.ResponseWriter, err error) {
 		errors.Is(err, roomqueue.ErrInvalidElapsed),
 		errors.Is(err, roomqueue.ErrInvalidDirection),
 		errors.Is(err, roomqueue.ErrNoCurrentSong),
-		errors.Is(err, roomqueue.ErrNoNextSong):
+		errors.Is(err, roomqueue.ErrNoNextSong),
+		errors.Is(err, roomqueue.ErrNoPreviousSong):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, roomqueue.ErrNotSongOwner),
 		errors.Is(err, roomqueue.ErrCannotRemoveSong),

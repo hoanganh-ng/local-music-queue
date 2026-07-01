@@ -273,5 +273,16 @@ export const api = {
       method: 'POST',
       body: { direction }
     })
+  },
+
+  // R09d: room-scoped previous playback command. Lease-holder only
+  // (the backend is authoritative and surfaces 400/401/403/404/409/410
+  // toasts that mapPlaybackToast already handles). Empty body. Returns
+  // 400 on no-current-song or already-on-first; the backend does NOT
+  // mutate, save, or broadcast on those error paths.
+  async prevRoomPlayback(slug) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}/playback/prev`, {
+      method: 'POST'
+    })
   }
 }

@@ -234,3 +234,42 @@ R09c is the **first narrow slice** of the R09c+ bucket (volume, prev, room auto-
 - `cd frontend && npm run build` — clean vite build (recorded by Task 5 implementer; same npm caveat).
 
 **Closure:** R09c was implemented on `dev` and accepted by the Product Owner (2026-07-01). The implementation follows the R07d/R09a/R09b narrow-slice contract: one additive room-scoped command (`POST /api/rooms/{slug}/playback/volume`), one additive per-room WebSocket delta (`room_playback_volume_changed`), and a minimal frontend Vol± control surface gated on the existing lease-holder UI affordance. Volume is intentionally NOT persisted; the global `/api/queue/volume` contract, global `/ws` 16-event inventory, voting, priority balances, auto-queue, Docker, CORS, and auth/session design are all untouched.
+
+## Implementation summary (R09d)
+
+R09d is the **second narrow slice** of the legacy R09c+ bucket (the original `prev` slice from the R09 sprint stub). It adds **one backend-only HTTP command + one additive per-room WebSocket event + a minimal frontend Prev control surface** for room-scoped previous playback. Vote-to-skip, room auto-queue, and full media-player device integration remain intentionally NOT in this implementation. R09d follows the same narrow-slice contract as R07d/R09a/R09b/R09c: additive per-room REST mutation + matching per-room WebSocket delta + minimal frontend control, with no changes to global queue behavior, global `/ws` contract, auth, Docker, or deployment.
+
+**What landed:**
+
+- `internal/domain/entity/queue.go`: new sentinel `ErrNoPreviousSong`; new method `(*Queue).PrevToPrevious()` that mirrors `AdvanceToNext`'s no-partial-mutation invariant (checks for a previous song BEFORE mutating, returning `ErrNoPreviousSong` / `ErrNoCurrentSong` without touching state when the move is impossible). On success it decrements `CurrentIndex`, resets `Elapsed` to 0, forces `Status = StatusPlaying`, and returns the `(previousIndex, newSong)` tuple the broadcast payload needs.
+- `internal/usecase/roomqueue/interactor.go`: new sentinel `ErrNoPreviousSong`; new method `(*Interactor).PrevPlayback(ctx, slug, actorUserID) (*entity.Queue, int, int, *entity.Song, error)` that resolves the active room + enforces lease-holder via `requirePlaybackLease` + translates the entity sentinels to local roomqueue sentinels for handler-side mapping. Persists the post-mutation queue via `queueRepo.Save`. The `Broadcaster` interface gains `BroadcastRoomPlaybackSongPrevious(roomSlug, previousIndex, newIndex, currentSong, status, elapsed, state)`.
+- `internal/delivery/http/room_queue_handlers.go`: new handler `HandleChangeRoomPlaybackPrevious`. Empty body. Returns 204 on success and fans out `room_playback_song_previous`. `writeRoomQueueError` extended with the `ErrNoPreviousSong` → 400 mapping (and the same mapping for `ErrNoCurrentSong` is unchanged).
+- `internal/delivery/ws/events.go`: new constant `EventRoomPlaybackSongPrevious = "room_playback_song_previous"`; new payload struct `RoomPlaybackSongPreviousData { RoomSlug, PreviousIndex, NewIndex, CurrentSong, Status, Elapsed, State }`. The 16-event global `/ws` inventory is unchanged.
+- `internal/delivery/ws/room_hub.go`: new method `(*RoomWSHub).BroadcastRoomPlaybackSongPrevious` following the existing dispatch pattern (no seq allocation in `dispatch`; hub loop stamps seq on dequeue).
+- `cmd/server/main.go`: registers `POST /api/rooms/{slug}/playback/prev` behind `roomAuth` (empty body).
+- `frontend/src/services/api.js`: new method `api.prevRoomPlayback(slug)`.
+- `frontend/src/store/index.js`: new isolated mutator on `globalStore.roomQueues[slug]` (`applyRoomPlaybackSongPrevious`). Prefers `payload.state` when present; the fallback path stamps `current_index` / `current_song` / `status` / `elapsed` without touching global queueState, currentUser, voteSessions, or autoQueueConfig.
+- `frontend/src/views/RoomView.vue`: minimal `Prev` button in the existing playback panel, gated on `canMutate` AND `canGoPrevious` (UI convenience only; backend is authoritative). Adds a `room_playback_song_previous` WS listener that calls `globalStore.applyRoomPlaybackSongPrevious`. The existing `mapPlaybackToast` already handles the 400 status code for the no-current-song / already-first-song paths.
+
+**Request shape:** `POST /api/rooms/{slug}/playback/prev` — empty body.
+
+**Authorisation (use-case layer):**
+
+- Active room (else 409 archived / 404 not-found)
+- Active player-lease holder (else 404 missing lease / 403 non-holder / 410 lease past grace / 409 archived room)
+- Valid current song and `CurrentIndex > 0` (else 400 no-current-song / 400 already-on-first)
+
+The use-case layer rejects invalid requests / lease failures BEFORE the broadcaster fires; no broadcast on failed validation or authorisation.
+
+**No-partial-mutation invariant:** the entity helper `Queue.PrevToPrevious` refuses to mutate state when the move is impossible (empty queue → `ErrNoCurrentSong`; `CurrentIndex == 0` → `ErrNoPreviousSong`). The interactor translates these entity sentinels into the local `roomqueue.ErrNoCurrentSong` / `roomqueue.ErrNoPreviousSong` sentinels for handler-side 400 mapping without string matching the legacy `Queue.Prev()` error.
+
+**Verification:** (2026-07-01)
+
+- `go test -count=1 ./internal/usecase/roomqueue ./internal/usecase/room ./internal/delivery/http ./internal/delivery/ws ./cmd/server` — PASS (roomqueue 7.434s; room 2.563s; http 24.037s; ws 4.072s; cmd/server 1.113s).
+- `go test -race -count=1 ./internal/usecase/roomqueue ./internal/delivery/ws` — PASS (roomqueue 10.002s; ws 5.109s).
+- `go vet ./cmd/... ./internal/...` — clean.
+- `git diff --check` — exit 0 (clean).
+- `cd frontend && npm run test:unit -- --run` — BLOCKED (pre-existing environmental: `npm` not in this shell; same caveat recorded in the R09c closure note).
+- `cd frontend && npm run build` — BLOCKED (pre-existing environmental: same as above).
+
+**Closure:** R09d was implemented on `dev` (2026-07-01); Product Owner acceptance is pending. The implementation follows the R07d/R09a/R09b/R09c narrow-slice contract: one additive room-scoped command (`POST /api/rooms/{slug}/playback/prev`), one additive per-room WebSocket delta (`room_playback_song_previous`), and a minimal frontend Prev control surface gated on the existing lease-holder UI affordance AND on `current_index > 0`. The command is intentionally NOT triggered by auto-queue; the global `/api/queue/prev` contract, global `/ws` 16-event inventory, voting, priority balances, Docker, CORS, and auth/session design are all untouched. Remaining R09 scope (room auto-queue, full media-player device integration) remains split into future R09e+ slices.

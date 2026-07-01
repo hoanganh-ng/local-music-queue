@@ -371,3 +371,88 @@ func TestNewActivity_AllTypes(t *testing.T) {
 		})
 	}
 }
+
+// --- R09d Queue.PrevToPrevious tests ---
+//
+// PrevToPrevious mirrors AdvanceToNext's no-partial-mutation invariant:
+// it checks for a previous song BEFORE mutating, returning
+// ErrNoPreviousSong / ErrNoCurrentSong without touching state when the
+// move is impossible. The happy path decrements CurrentIndex, resets
+// Elapsed to 0, sets Status = StatusPlaying, and returns the previous
+// index plus a pointer to the now-current song.
+
+// TestQueue_PrevToPrevious_HappyPath moves from index 1 to 0 and
+// verifies the entity invariants on the post-mutation queue plus the
+// returned prev/new indexes and song pointer.
+func TestQueue_PrevToPrevious_HappyPath(t *testing.T) {
+	q := &Queue{
+		Songs: []Song{
+			{ID: "a", Title: "A"},
+			{ID: "b", Title: "B"},
+		},
+		CurrentIndex: 1,
+		Status:       StatusPaused,
+		Elapsed:      42,
+	}
+
+	prevIdx, newSong, err := q.PrevToPrevious()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if prevIdx != 1 {
+		t.Errorf("expected prevIdx=1, got %d", prevIdx)
+	}
+	if newSong == nil || newSong.ID != "a" {
+		t.Errorf("expected new song id=a, got %+v", newSong)
+	}
+	if q.CurrentIndex != 0 {
+		t.Errorf("expected CurrentIndex=0, got %d", q.CurrentIndex)
+	}
+	if q.Elapsed != 0 {
+		t.Errorf("expected Elapsed=0, got %d", q.Elapsed)
+	}
+	if q.Status != StatusPlaying {
+		t.Errorf("expected Status=playing, got %q", q.Status)
+	}
+}
+
+// TestQueue_PrevToPrevious_AlreadyAtFirstReturnsErrNoPreviousSong
+// pins the no-partial-mutation invariant at index 0: nothing changes,
+// state is untouched, and the sentinel is returned.
+func TestQueue_PrevToPrevious_AlreadyAtFirstReturnsErrNoPreviousSong(t *testing.T) {
+	q := &Queue{
+		Songs: []Song{
+			{ID: "first", Title: "First"},
+		},
+		CurrentIndex: 0,
+		Status:       StatusPaused,
+		Elapsed:      17,
+	}
+
+	prevIdx, newSong, err := q.PrevToPrevious()
+	if err != ErrNoPreviousSong {
+		t.Fatalf("expected ErrNoPreviousSong, got %v", err)
+	}
+	if prevIdx != 0 || newSong != nil {
+		t.Errorf("expected prevIdx=0 newSong=nil on no-prev, got prev=%d new=%+v", prevIdx, newSong)
+	}
+	if q.CurrentIndex != 0 || q.Elapsed != 17 || q.Status != StatusPaused {
+		t.Errorf("queue mutated on no-prev: %+v", q)
+	}
+}
+
+// TestQueue_PrevToPrevious_EmptyQueueReturnsErrNoCurrentSong pins the
+// empty-queue branch. State must not be mutated.
+func TestQueue_PrevToPrevious_EmptyQueueReturnsErrNoCurrentSong(t *testing.T) {
+	q := NewQueue()
+	prevIdx, newSong, err := q.PrevToPrevious()
+	if err != ErrNoCurrentSong {
+		t.Fatalf("expected ErrNoCurrentSong, got %v", err)
+	}
+	if prevIdx != -1 || newSong != nil {
+		t.Errorf("expected prevIdx=-1 newSong=nil on empty, got prev=%d new=%+v", prevIdx, newSong)
+	}
+	if q.CurrentIndex != -1 || q.Status != StatusIdle {
+		t.Errorf("empty queue mutated: %+v", q)
+	}
+}

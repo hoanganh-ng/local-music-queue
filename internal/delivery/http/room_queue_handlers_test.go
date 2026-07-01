@@ -233,6 +233,7 @@ type recordingRoomBroadcaster struct {
 	elapsedCalls  []recordingElapsedCall
 	advancedCalls []recordingAdvancedCall
 	volumeCalls   []recordingVolumeCall
+	previousCalls []recordingPreviousCall
 }
 
 type recordingPrioCall struct {
@@ -268,6 +269,17 @@ type recordingAdvancedCall struct {
 type recordingVolumeCall struct {
 	slug      string
 	direction string
+}
+
+// recordingPreviousCall: append {slug, prev, next, song, status, elapsed}
+// whenever BroadcastRoomPlaybackSongPrevious is invoked. R09d.
+type recordingPreviousCall struct {
+	slug    string
+	prev    int
+	next    int
+	song    *entity.Song
+	status  entity.PlaybackStatus
+	elapsed int
 }
 
 func (r *recordingRoomBroadcaster) BroadcastRoomQueueSync(slug string, _ *entity.Queue) {
@@ -316,6 +328,11 @@ func (r *recordingRoomBroadcaster) BroadcastRoomPlaybackVolumeChanged(slug, dire
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.volumeCalls = append(r.volumeCalls, recordingVolumeCall{slug: slug, direction: direction})
+}
+func (r *recordingRoomBroadcaster) BroadcastRoomPlaybackSongPrevious(slug string, prev, next int, song *entity.Song, status entity.PlaybackStatus, elapsed int, _ *entity.Queue) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.previousCalls = append(r.previousCalls, recordingPreviousCall{slug: slug, prev: prev, next: next, song: song, status: status, elapsed: elapsed})
 }
 
 func TestRoomQueue_AddSong_BroadcastsSongAdded(t *testing.T) {
@@ -1411,5 +1428,147 @@ func TestRoomQueue_ChangePlaybackVolume_MissingLeaseReturns404(t *testing.T) {
 	defer bc.mu.Unlock()
 	if len(bc.volumeCalls) != 0 {
 		t.Errorf("expected 0 broadcasts on missing lease, got %d", len(bc.volumeCalls))
+	}
+}
+
+// --- R09d PrevPlayback handler tests ---
+
+// TestRoomQueue_PrevPlayback_HolderReturns204AndBroadcasts pins the
+// happy path: lease holder posts empty body; queue moves to previous
+// song (index 1→0); handler returns 204; broadcaster receives exactly
+// one {slug, prev=1, next=0, song=cur, status=playing, elapsed=0} call.
+func TestRoomQueue_PrevPlayback_HolderReturns204AndBroadcasts(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-d-pb-prev-ok", 200)
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	// Advance the fixture's seed (CurrentIndex=0) to index 1 via the
+	// lease-only SkipPlayback path so "previous" has a target.
+	skipReq := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-d-pb-prev-ok/playback/skip", nil)
+	skipRR := httptest.NewRecorder()
+	rqh.HandleSkipRoomPlayback(skipRR, skipReq, "rq-d-pb-prev-ok", 200)
+	if skipRR.Code != http.StatusNoContent {
+		t.Fatalf("seed-advance: expected 204, got %d", skipRR.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/rooms/rq-d-pb-prev-ok/playback/prev", nil)
+	rr := httptest.NewRecorder()
+	rqh.HandleChangeRoomPlaybackPrevious(rr, req, "rq-d-pb-prev-ok", 200)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.previousCalls) != 1 {
+		t.Fatalf("expected 1 previous broadcast, got %d", len(bc.previousCalls))
+	}
+	pc := bc.previousCalls[0]
+	if pc.slug != "rq-d-pb-prev-ok" || pc.prev != 1 || pc.next != 0 {
+		t.Errorf("unexpected previous capture: %+v", pc)
+	}
+	if pc.song == nil || pc.song.ID != "cur" {
+		t.Errorf("expected previous song id=cur, got %+v", pc.song)
+	}
+	if pc.status != entity.StatusPlaying || pc.elapsed != 0 {
+		t.Errorf("expected status=playing elapsed=0, got status=%q elapsed=%d", pc.status, pc.elapsed)
+	}
+}
+
+// TestRoomQueue_PrevPlayback_AlreadyOnFirstReturns400 pins the
+// no-partial-mutation invariant at the handler boundary: queue on
+// index 0 with Elapsed=42 — PrevPlayback returns 400 and the queue is
+// not mutated.
+func TestRoomQueue_PrevPlayback_AlreadyOnFirstReturns400(t *testing.T) {
+	rqh, db, cleanup := playbackRoomFixture(t, "rq-d-pb-prev-first", 200)
+	defer cleanup()
+	roomID := mustRoomIDQueue(t, db, "rq-d-pb-prev-first")
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	seed := entity.NewQueue()
+	seed.Songs = []entity.Song{
+		{ID: "first", Title: "First", URL: "u", AddedBy: "H", AddedByID: 200},
+	}
+	seed.CurrentIndex = 0
+	seed.Status = entity.StatusPaused
+	seed.Elapsed = 42
+	if err := queueRepo.Save(context.Background(), roomID, seed); err != nil {
+		t.Fatalf("reseed: %v", err)
+	}
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/rooms/rq-d-pb-prev-first/playback/prev", nil)
+	rr := httptest.NewRecorder()
+	rqh.HandleChangeRoomPlaybackPrevious(rr, req, "rq-d-pb-prev-first", 200)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.previousCalls) != 0 {
+		t.Errorf("expected 0 broadcasts on no-prev, got %d", len(bc.previousCalls))
+	}
+	persisted, err := queueRepo.Load(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("post-load: %v", err)
+	}
+	if persisted.CurrentIndex != 0 || persisted.Elapsed != 42 || persisted.Status != entity.StatusPaused {
+		t.Errorf("queue mutated on no-prev: %+v", persisted)
+	}
+}
+
+// TestRoomQueue_PrevPlayback_EmptyQueueReturns400 pins the
+// empty-queue branch: PrevPlayback on a fresh room returns 400 and
+// does NOT broadcast.
+func TestRoomQueue_PrevPlayback_EmptyQueueReturns400(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-d-pb-prev-empty", 200)
+	defer cleanup()
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/rooms/rq-d-pb-prev-empty/playback/prev", nil)
+	rr := httptest.NewRecorder()
+	rqh.HandleChangeRoomPlaybackPrevious(rr, req, "rq-d-pb-prev-empty", 200)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.previousCalls) != 0 {
+		t.Errorf("expected 0 broadcasts on empty queue, got %d", len(bc.previousCalls))
+	}
+}
+
+// TestRoomQueue_PrevPlayback_NonHolderReturns403AndNoBroadcast
+// exercises the lease-authorizer seam at the handler boundary: a guest
+// is rejected with 403 and the broadcaster is never invoked.
+func TestRoomQueue_PrevPlayback_NonHolderReturns403AndNoBroadcast(t *testing.T) {
+	rqh, _, cleanup := playbackRoomFixture(t, "rq-d-pb-prev-nh", 200)
+	defer cleanup()
+	// Advance so prev has a target.
+	skipReq := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-d-pb-prev-nh/playback/skip", nil)
+	skipRR := httptest.NewRecorder()
+	rqh.HandleSkipRoomPlayback(skipRR, skipReq, "rq-d-pb-prev-nh", 200)
+	if skipRR.Code != http.StatusNoContent {
+		t.Fatalf("seed-advance: expected 204, got %d", skipRR.Code)
+	}
+	bc := &recordingRoomBroadcaster{}
+	rqh.inter.SetBroadcaster(bc)
+
+	// caller 42 is a guest (not the lease holder).
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/rooms/rq-d-pb-prev-nh/playback/prev", nil)
+	rr := httptest.NewRecorder()
+	rqh.HandleChangeRoomPlaybackPrevious(rr, req, "rq-d-pb-prev-nh", 42)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.previousCalls) != 0 {
+		t.Errorf("expected 0 broadcasts on non-holder, got %d", len(bc.previousCalls))
 	}
 }

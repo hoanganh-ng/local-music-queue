@@ -89,6 +89,13 @@ func (b *voteTestBroadcaster) BroadcastRoomVoteResolved(slug, sessionID, outcome
 // the room-queue delivery layer.
 func (b *voteTestBroadcaster) BroadcastRoomPlaybackVolumeChanged(_, _ string) {}
 
+// BroadcastRoomPlaybackSongPrevious is a no-op stub kept on
+// voteTestBroadcaster so it continues to satisfy roomqueue.Broadcaster
+// after R09d added the prev method to the interface. The vote
+// handlers never invoke this; the R09d handler is the only caller in
+// the room-queue delivery layer.
+func (b *voteTestBroadcaster) BroadcastRoomPlaybackSongPrevious(_ string, _, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {}
+
 // fixedResolver is a deterministic roomvote.Resolver that always
 // returns the supplied unique-user count. Tests use it to pin the
 // threshold (max(2, count/2 + 1)) at session creation time.

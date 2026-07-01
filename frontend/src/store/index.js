@@ -405,6 +405,36 @@ export const globalStore = reactive({
       s.elapsed = payload.elapsed
     }
   },
+
+  // R09d: applies a room_playback_song_previous event for slug.
+  // Same contract as applyRoomPlaybackSongAdvanced: prefers
+  // payload.state when present (authoritative post-mutation snapshot);
+  // the fallback path mirrors entity.Queue.PrevToPrevious semantics
+  // (decrement current_index, stamp the new current song, status,
+  // elapsed) without touching the global queue state. The prev index
+  // is intentionally NOT applied — only the new_index reflects the
+  // current position after the move.
+  applyRoomPlaybackSongPrevious(slug, payload) {
+    const entry = this._ensureRoomEntry(slug)
+    if (payload && payload.state) {
+      entry.state = payload.state
+      return
+    }
+    const s = entry.state
+    if (!payload) return
+    if (typeof payload.new_index === 'number') {
+      s.current_index = payload.new_index
+    }
+    if (payload.current_song !== undefined) {
+      s.current_song = payload.current_song
+    }
+    if (typeof payload.status === 'string') {
+      s.status = payload.status
+    }
+    if (typeof payload.elapsed === 'number') {
+      s.elapsed = payload.elapsed
+    }
+  },
 })
 
 // Watch for changes to currentUser and persist to localStorage

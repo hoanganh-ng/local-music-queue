@@ -429,6 +429,28 @@ func (h *RoomWSHub) BroadcastRoomPlaybackVolumeChanged(roomSlug, direction strin
 	})
 }
 
+// --- R09d playback previous broadcast ---
+//
+// dispatch() does NOT allocate seq; the hub loop stamps seq on
+// dequeue. Adding this method does not change the global /ws
+// 16-event inventory — the event rides the per-room endpoint only.
+//
+// The payload carries the full post-mutation state snapshot
+// (mirroring R09a's BroadcastRoomPlaybackSongAdvanced shape) so
+// subscribers can render the new queue without a follow-up sync.
+
+func (h *RoomWSHub) BroadcastRoomPlaybackSongPrevious(roomSlug string, previousIndex, newIndex int, currentSong *entity.Song, status entity.PlaybackStatus, elapsed int, state *entity.Queue) {
+	h.dispatch(roomSlug, EventRoomPlaybackSongPrevious, RoomPlaybackSongPreviousData{
+		RoomSlug:      roomSlug,
+		PreviousIndex: previousIndex,
+		NewIndex:      newIndex,
+		CurrentSong:   currentSong,
+		Status:        status,
+		Elapsed:       elapsed,
+		State:         state,
+	})
+}
+
 // --- RegisterHandler ---
 
 // RegisterHandler handles GET /ws/rooms/{slug}?session_token=<opaque>.
