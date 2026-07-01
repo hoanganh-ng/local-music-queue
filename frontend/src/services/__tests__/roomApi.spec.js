@@ -143,4 +143,30 @@ describe('Room Queue API', () => {
       await expect(api.getRoomQueue('lobby')).rejects.toMatchObject({ status })
     }
   })
+
+  // --- R09g room auto-queue API ---
+
+  it('getRoomAutoQueueStatus targets /rooms/{slug}/autoqueue/status with GET and bearer when valid', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    const mockFetch = mockFetchOk({ enabled: false, strategy: 'related' })
+    const res = await api.getRoomAutoQueueStatus('lobby')
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/autoqueue\/status$/)
+    expect(init.method).toBe('GET')
+    expect(init.headers['Authorization']).toBe('Bearer tok')
+    expect(res).toEqual({ enabled: false, strategy: 'related' })
+  })
+
+  it('setRoomAutoQueueEnabled posts ONLY {enabled} to /rooms/{slug}/autoqueue/toggle', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ status: 200, ok: true, json: async () => ({ enabled: true, strategy: 'related' }) })
+    global.fetch = mockFetch
+    await api.setRoomAutoQueueEnabled('lobby', true)
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/autoqueue\/toggle$/)
+    expect(init.method).toBe('POST')
+    const body = JSON.parse(init.body)
+    expect(body).toEqual({ enabled: true })
+    expect(JSON.stringify(body)).not.toMatch(/(user_id|requested_by|added_by|user_role|strategy)/)
+  })
 })

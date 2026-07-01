@@ -156,4 +156,72 @@ describe('Room queue store (isolated)', () => {
     expect(globalStore.roomQueues.lobby.state.status).toBe('playing')
     expect(globalStore.roomQueues.lobby.state.elapsed).toBe(0)
   })
+
+  // --- R09g room auto-queue mutators ---
+
+  it('_ensureRoomEntry seeds autoQueueConfig to {enabled:false, strategy:"related"}', () => {
+    globalStore.setRoomQueueConnected('lobby', true)
+    expect(globalStore.roomQueues.lobby.autoQueueConfig).toEqual({ enabled: false, strategy: 'related' })
+  })
+
+  it('setRoomAutoQueueConfig replaces per-room autoQueueConfig and never touches global autoQueueConfig', () => {
+    const before = { ...globalStore.autoQueueConfig }
+    globalStore.setRoomAutoQueueConfig('lobby', true, 'related')
+    expect(globalStore.roomQueues.lobby.autoQueueConfig).toEqual({ enabled: true, strategy: 'related' })
+    expect(globalStore.autoQueueConfig).toEqual(before)
+  })
+
+  it('applyRoomAutoQueueConfigChanged replaces per-room autoQueueConfig from payload only', () => {
+    globalStore.applyRoomAutoQueueConfigChanged('lobby', { room_slug: 'lobby', enabled: true, strategy: 'related' })
+    expect(globalStore.roomQueues.lobby.autoQueueConfig).toEqual({ enabled: true, strategy: 'related' })
+    // global autoQueueConfig MUST NOT be mutated.
+    expect(globalStore.autoQueueConfig).toEqual({ enabled: false, strategy: 'related' })
+  })
+
+  it('applyRoomAutoQueueAdded prefers payload.state when present', () => {
+    const fullState = { songs: [{ id: 'a' }, { id: 'auto' }], current_index: 1, current_song: { id: 'auto' }, status: 'playing', elapsed: 0, queue: [], history: [] }
+    globalStore.applyRoomAutoQueueAdded('lobby', {
+      room_slug: 'lobby',
+      song: { id: 'auto', added_by: 'system:autoqueue' },
+      source_song_title: 'a',
+      current_index: 1,
+      current_song: { id: 'auto' },
+      status: 'playing',
+      elapsed: 0,
+      state: fullState,
+    })
+    expect(globalStore.roomQueues.lobby.state).toEqual(fullState)
+  })
+
+  it('applyRoomAutoQueueAdded fallback: stamps current_index/current_song/status/elapsed', () => {
+    globalStore.setRoomQueueState('lobby', { songs: [{ id: 'a' }], current_index: 0, current_song: { id: 'a' }, status: 'playing', elapsed: 9, queue: [], history: [] })
+    globalStore.applyRoomAutoQueueAdded('lobby', {
+      room_slug: 'lobby',
+      song: { id: 'b' },
+      current_index: 1,
+      current_song: { id: 'b' },
+      status: 'playing',
+      elapsed: 0,
+    })
+    const s = globalStore.roomQueues.lobby.state
+    expect(s.current_index).toBe(1)
+    expect(s.current_song).toEqual({ id: 'b' })
+    expect(s.status).toBe('playing')
+    expect(s.elapsed).toBe(0)
+  })
+
+  it('applyRoomAutoQueueAdded NEVER mutates global queueState / autoQueueConfig / voteSessions / currentUser', () => {
+    const before = {
+      queueState: JSON.parse(JSON.stringify(globalStore.queueState)),
+      voteSessions: { ...globalStore.voteSessions },
+      autoQueueConfig: { ...globalStore.autoQueueConfig },
+      currentUser: globalStore.currentUser,
+    }
+    globalStore.applyRoomAutoQueueAdded('lobby', { state: { songs: [{ id: 'auto' }], current_index: 0, current_song: { id: 'auto' }, status: 'playing', elapsed: 0, queue: [], history: [] } })
+    globalStore.applyRoomAutoQueueConfigChanged('lobby', { enabled: true, strategy: 'related' })
+    expect(globalStore.queueState).toEqual(before.queueState)
+    expect(globalStore.voteSessions).toEqual(before.voteSessions)
+    expect(globalStore.autoQueueConfig).toEqual(before.autoQueueConfig)
+    expect(globalStore.currentUser).toBe(before.currentUser)
+  })
 })

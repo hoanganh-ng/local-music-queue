@@ -187,6 +187,25 @@ export const api = {
     })
   },
 
+  // R09g: per-room auto-queue REST endpoints. R09f ships the
+  // backend; the frontend exposes a thin read + a host/admin toggle
+  // (host/admin is enforced by the backend — frontend does NOT
+  // pre-check the role). Status is open to any active member; toggle
+  // is host/admin only. Body shape is exactly { enabled } — no
+  // strategy, no identity fields.
+  async getRoomAutoQueueStatus(slug) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}/autoqueue/status`, {
+      method: 'GET'
+    })
+  },
+
+  async setRoomAutoQueueEnabled(slug, enabled) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}/autoqueue/toggle`, {
+      method: 'POST',
+      body: { enabled }
+    })
+  },
+
   // Room Queue (R07a). Bearer-token auth via api.request; no client-supplied
   // identity fields are sent. Body shapes mirror the Go handler request
   // structs in internal/delivery/http/room_queue_handlers.go.

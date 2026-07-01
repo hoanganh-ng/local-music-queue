@@ -350,3 +350,23 @@ R09f is the backend-only runtime implementation slice that conforms to the R09e 
 - `git diff --check` — clean.
 
 The closure pass added two new tests and modified one production method; no global queue/playback/voting/auto-queue, frontend, Docker, migration-CLI, or REST contract changes.
+
+## Implementation summary (R09g)
+
+R09g is the frontend integration slice that exposes the R09f backend runtime in the existing room frontend. Implemented on `dev` on 2026-07-01; **Product Owner acceptance pending**. R09g lands:
+
+- **Two frontend API methods (`frontend/src/services/api.js`):** `getRoomAutoQueueStatus(slug)` targets `GET /api/rooms/{slug}/autoqueue/status` and `setRoomAutoQueueEnabled(slug, enabled)` targets `POST /api/rooms/{slug}/autoqueue/toggle` with body exactly `{ enabled }`. No client-supplied identity fields, no strategy field — the toggle body shape is the contract; missing/extra fields are NOT sent.
+- **Per-room store slice (`frontend/src/store/index.js`):** extends `_ensureRoomEntry` to seed `roomQueues[slug].autoQueueConfig = { enabled: false, strategy: 'related' }` (mirrors the R09f backend default). Adds three mutators: `setRoomAutoQueueConfig(slug, enabled, strategy)` (replaces the per-room slice), `applyRoomAutoQueueAdded(slug, payload)` (prefers `payload.state` when present; fallback stamps `current_index` / `current_song` / `status` / `elapsed`), and `applyRoomAutoQueueConfigChanged(slug, payload)` (replaces only the per-room `autoQueueConfig`). All three mutators are isolated — they MUST NOT touch `globalStore.queueState`, `currentUser`, `voteSessions`, or `autoQueueConfig` (pinned by tests).
+- **RoomView UI (`frontend/src/views/RoomView.vue`):** adds a small `📻 Radio` toggle inline with the Queue heading that calls `toggleRoomAutoQueue()`. The toggle fetches status on mount and on every room-slug change (`seedRoomAutoQueueConfigFromRest`), is disabled when the room is disconnected, the user is signed out, or a toggle is in flight (`autoQueueToggleInFlight` ref), and maps 401/403/404/409 to clear toasts via a dedicated status-code branch. The toggle is a UI convenience only — the backend remains authoritative on host/admin authorization and the frontend does NOT pre-check the role. A small `⚡ auto` badge is rendered on any song with `added_by === 'system:autoqueue'`.
+- **WebSocket handling (`frontend/src/views/RoomView.vue`):** `applyMessage` now handles `room_auto_queue_added` (via `applyRoomAutoQueueAdded`) and `room_auto_queue_config_changed` (via `applyRoomAutoQueueConfigChanged`). Unrelated / global events are ignored as before.
+- **Test updates:** `frontend/src/services/__tests__/roomApi.spec.js` adds URL + method + body assertions for the two new methods; `frontend/src/store/__tests__/roomStore.spec.js` adds default-seed, replace-slice, fullState-prefer, fallback-stamp, and isolation-invariant tests; `frontend/src/views/__tests__/RoomView.spec.js` adds fetch-on-mount, fetch-on-slug-change, toggle-call, toggle-toast-mapping, and WS-listener tests. The existing R07/R09a/R09b/R09c/R09d tests are unchanged.
+
+R09g does NOT change the R09f backend, the global `/api/autoqueue/...` contract, the global `/ws` 16-event inventory, the global `autoQueueConfig` slice, the global `frontend/src/views/DashboardView.vue` radio button, the schema version 7 (`room_auto_queue_config` + `room_play_history` tables added in R09f), the `domain.AutoQueueRepository` / `usecase/autoqueue.Interactor` / `PostgresAutoQueueRepository` / `YtDlpRelatedFetcher` chain, the `usecase/roomautoqueue.Interactor`, the `roomqueue.Broadcaster.BroadcastRoomAutoQueueAdded` / `BroadcastRoomAutoQueueConfigChanged` methods, the `internal/delivery/ws/events.go` `EventRoomAutoQueueAdded` / `EventRoomAutoQueueConfigChanged` constants, or the `roomqueue.ErrRoomAutoQueueStale` sentinel. R09g only touches frontend code; no Go runtime code, migrations, Docker, or REST/WebSocket contract changes.
+
+## Verification (R09g)
+
+- `cd frontend && npm run test:unit -- --run` — PASS (all suites).
+- `cd frontend && npm run build` — clean production build.
+- `git diff --check` (frontend only) — clean.
+
+The R09g implementation does not modify any backend code, schema, or test; the R09f verification artifacts (Go test runs, `go vet`, `git diff --check`) remain valid.

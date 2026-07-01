@@ -49,6 +49,8 @@ const apiMock = vi.hoisted(() => ({
   syncRoomPlayback: vi.fn(),
   skipRoomPlayback: vi.fn(),
   roomSongEnded: vi.fn(),
+  getRoomAutoQueueStatus: vi.fn(),
+  setRoomAutoQueueEnabled: vi.fn(),
 }))
 vi.mock('../../services/api', () => ({ api: apiMock }))
 
@@ -344,6 +346,93 @@ describe('RoomView', () => {
       expect(toastMock.error).toHaveBeenCalled()
       toastMock.error.mockClear()
     }
+    wrapper.unmount()
+  })
+
+  // --- R09g room auto-queue ---
+
+  it('fetches room auto-queue status on mount and stores it in the per-room slice', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: true, strategy: 'related' })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    expect(apiMock.getRoomAutoQueueStatus).toHaveBeenCalledWith('lobby')
+    expect(globalStore.roomQueues.lobby.autoQueueConfig).toEqual({ enabled: true, strategy: 'related' })
+    // global autoQueueConfig MUST NOT be mutated.
+    expect(globalStore.autoQueueConfig).toEqual({ enabled: false, strategy: 'related' })
+    wrapper.unmount()
+  })
+
+  it('re-fetches room auto-queue status when the room slug changes', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    apiMock.getRoomAutoQueueStatus.mockClear()
+    apiMock.getRoomAutoQueueStatus.mockResolvedValueOnce({ enabled: true, strategy: 'related' })
+    await router.push('/rooms/lounge')
+    await flushPromises()
+    expect(apiMock.getRoomAutoQueueStatus).toHaveBeenCalledWith('lounge')
+    expect(globalStore.roomQueues.lounge.autoQueueConfig).toEqual({ enabled: true, strategy: 'related' })
+    wrapper.unmount()
+  })
+
+  it('toggleRoomAutoQueue calls api.setRoomAutoQueueEnabled with the flipped value and stores the response', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.setRoomAutoQueueEnabled.mockResolvedValue({ enabled: true, strategy: 'related' })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    // Simulate an authenticated, connected user so the toggle is enabled.
+    globalStore.setUser({ id: 'u1', display_name: 'Host', user_role: 'host' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const vm = wrapper.vm
+    await vm.toggleRoomAutoQueue()
+    expect(apiMock.setRoomAutoQueueEnabled).toHaveBeenCalledWith('lobby', true)
+    expect(globalStore.roomQueues.lobby.autoQueueConfig).toEqual({ enabled: true, strategy: 'related' })
+    wrapper.unmount()
+  })
+
+  it('toggleRoomAutoQueue surfaces 401/403/404/409 via toast without throwing', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    // Simulate an authenticated, connected user so the toggle is enabled.
+    globalStore.setUser({ id: 'u1', display_name: 'Host', user_role: 'host' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const vm = wrapper.vm
+    for (const status of [401, 403, 404, 409]) {
+      apiMock.setRoomAutoQueueEnabled.mockRejectedValueOnce(Object.assign(new Error(`err ${status}`), { status }))
+      await vm.toggleRoomAutoQueue()
+      expect(toastMock.error).toHaveBeenCalled()
+      toastMock.error.mockClear()
+    }
+    wrapper.unmount()
+  })
+
+  it('handles room_auto_queue_added and room_auto_queue_config_changed events', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const inst = wsFactoryMock.lastInstance
+    inst.onMessage({
+      type: 'room_auto_queue_added',
+      data: { room_slug: 'lobby', song: { id: 'auto', added_by: 'system:autoqueue' }, source_song_title: 'src', current_index: 1, current_song: { id: 'auto' }, status: 'playing', elapsed: 0, state: { songs: [{ id: 'src' }, { id: 'auto' }], current_index: 1, current_song: { id: 'auto' }, status: 'playing', elapsed: 0, queue: [], history: [] } }
+    })
+    expect(globalStore.roomQueues.lobby.state.songs[1].id).toBe('auto')
+    inst.onMessage({ type: 'room_auto_queue_config_changed', data: { room_slug: 'lobby', enabled: true, strategy: 'related' } })
+    expect(globalStore.roomQueues.lobby.autoQueueConfig).toEqual({ enabled: true, strategy: 'related' })
+    // global autoQueueConfig MUST remain unchanged.
+    expect(globalStore.autoQueueConfig).toEqual({ enabled: false, strategy: 'related' })
     wrapper.unmount()
   })
 })

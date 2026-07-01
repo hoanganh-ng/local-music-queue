@@ -233,7 +233,10 @@ export const globalStore = reactive({
   // --- R07c: per-room queue slice (isolated from global queue state) ---
   roomQueues: {},
 
-  // Make sure a slug has an entry; returns the entry.
+  // Make sure a slug has an entry; returns the entry. R09g seeds the
+  // per-room autoQueueConfig to the same default the R09f backend
+  // uses (enabled=false, strategy='related') so reads before the
+  // first status fetch still render a coherent "off" state.
   _ensureRoomEntry(slug) {
     if (!this.roomQueues[slug]) {
       this.roomQueues[slug] = {
@@ -242,6 +245,7 @@ export const globalStore = reactive({
         recoveryInFlight: false,
         lastError: null,
         connected: false,
+        autoQueueConfig: { enabled: false, strategy: 'related' },
       }
     }
     return this.roomQueues[slug]
@@ -433,6 +437,54 @@ export const globalStore = reactive({
     }
     if (typeof payload.elapsed === 'number') {
       s.elapsed = payload.elapsed
+    }
+  },
+
+  // --- R09g room auto-queue mutators ---
+  //
+  // All three mutators are isolated to globalStore.roomQueues[slug].
+  // They MUST NOT touch globalStore.queueState, currentUser,
+  // voteSessions, or autoQueueConfig. applyRoomAutoQueueAdded
+  // mirrors the R09e payload contract: prefers payload.state when
+  // present (the broadcast's post-mutation snapshot is authoritative);
+  // the fallback path stamps current_index / current_song / status /
+  // elapsed. applyRoomAutoQueueConfigChanged replaces the per-room
+  // autoQueueConfig slice only.
+
+  setRoomAutoQueueConfig(slug, enabled, strategy) {
+    this._ensureRoomEntry(slug).autoQueueConfig = {
+      enabled: !!enabled,
+      strategy: strategy || 'related',
+    }
+  },
+
+  applyRoomAutoQueueAdded(slug, payload) {
+    const entry = this._ensureRoomEntry(slug)
+    if (payload && payload.state) {
+      entry.state = payload.state
+      return
+    }
+    const s = entry.state
+    if (!payload) return
+    if (typeof payload.current_index === 'number') {
+      s.current_index = payload.current_index
+    }
+    if (payload.current_song !== undefined) {
+      s.current_song = payload.current_song
+    }
+    if (typeof payload.status === 'string') {
+      s.status = payload.status
+    }
+    if (typeof payload.elapsed === 'number') {
+      s.elapsed = payload.elapsed
+    }
+  },
+
+  applyRoomAutoQueueConfigChanged(slug, payload) {
+    if (!payload) return
+    this._ensureRoomEntry(slug).autoQueueConfig = {
+      enabled: !!payload.enabled,
+      strategy: payload.strategy || 'related',
     }
   },
 })

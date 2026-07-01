@@ -12,7 +12,17 @@
 
     <main class="room-content">
       <section class="queue-panel glass-panel">
-        <h3>Queue</h3>
+        <h3>
+          Queue
+          <button
+            class="radio-toggle-btn"
+            :disabled="!canMutate || autoQueueToggleInFlight"
+            :aria-pressed="!!(roomState.autoQueueConfig && roomState.autoQueueConfig.enabled)"
+            @click="toggleRoomAutoQueue"
+          >
+            {{ roomState.autoQueueConfig && roomState.autoQueueConfig.enabled ? '📻 Radio: on' : '📻 Radio: off' }}
+          </button>
+        </h3>
         <p v-if="roomState.lastError" class="error" role="alert">
           {{ roomState.lastError }}
         </p>
@@ -22,7 +32,10 @@
             :key="String(song.id) + ':' + idx"
             class="queue-item"
           >
-            <span class="song-title">{{ song.title || '(untitled)' }}</span>
+            <span class="song-title">
+              {{ song.title || '(untitled)' }}
+              <span v-if="song.added_by === 'system:autoqueue'" class="auto-badge" title="Added by room auto-queue">⚡ auto</span>
+            </span>
             <button
               v-if="idx !== (roomState.state.current_index ?? -1)"
               class="prioritize-btn"
@@ -194,6 +207,17 @@ function applyMessage(msg) {
     case 'room_playback_song_previous':
       globalStore.applyRoomPlaybackSongPrevious(slug.value, msg.data)
       break
+    // R09g: room auto-queue events. room_auto_queue_added carries
+    // the post-mutation snapshot (payload.state preferred); the
+    // fallback path mirrors the additive R09f payload fields.
+    // room_auto_queue_config_changed only updates the per-room
+    // autoQueueConfig slice — it MUST NOT touch globalStore.autoQueueConfig.
+    case 'room_auto_queue_added':
+      globalStore.applyRoomAutoQueueAdded(slug.value, msg.data)
+      break
+    case 'room_auto_queue_config_changed':
+      globalStore.applyRoomAutoQueueConfigChanged(slug.value, msg.data)
+      break
     default:
       // Ignore global / unrelated event types per the R07c contract.
       break
@@ -239,6 +263,25 @@ async function seedStateFromRest() {
   }
 }
 
+// R09g: seed the per-room auto-queue config from the existing R09f
+// status endpoint. This is the initial paint for the Radio toggle so
+// the UI is consistent with the room's persisted setting even if the
+// WS room_auto_queue_config_changed event is delayed. 401/403/404/409
+// surface as a clear toast but do NOT block the rest of the room
+// from rendering — the toggle just stays at its seed value.
+async function seedRoomAutoQueueConfigFromRest() {
+  try {
+    const cfg = await api.getRoomAutoQueueStatus(slug.value)
+    globalStore.setRoomAutoQueueConfig(slug.value, cfg.enabled, cfg.strategy)
+  } catch (e) {
+    const status = e?.status
+    if (status === 401) toast.error('You are signed out. Log in again.')
+    else if (status === 403) toast.error('You are not a member of this room.')
+    else if (status === 404) toast.error('Room not found.')
+    else if (status === 409) toast.error('Room is archived or in conflict.')
+  }
+}
+
 function buildRoomClient(targetSlug) {
   const options = {
     onMessage: applyMessage,
@@ -275,6 +318,7 @@ onMounted(async () => {
   connectedSlug = target
   globalStore.setRoomQueueConnected(target, false)
   await seedStateFromRest()
+  await seedRoomAutoQueueConfigFromRest()
   wsClient = buildRoomClient(target)
   wsClient.connect()
 })
@@ -284,10 +328,12 @@ watch(slug, async (newSlug) => {
   teardownCurrentClient()
   connectedSlug = newSlug
   globalStore.setRoomQueueConnected(newSlug, false)
-  // Mirror the mount path: REST-seed the new room's queue before opening
-  // the room WebSocket so the UI is consistent with the next room's state
-  // even if the WS initial sync is delayed.
+  // Mirror the mount path: REST-seed the new room's queue AND its
+  // auto-queue config before opening the room WebSocket so the UI
+  // is consistent with the next room's state even if the WS
+  // initial sync is delayed.
   await seedStateFromRest()
+  await seedRoomAutoQueueConfigFromRest()
   wsClient = buildRoomClient(newSlug)
   wsClient.connect()
 })
@@ -429,6 +475,37 @@ function mapPlaybackToast(e, fallback) {
   else toast.error(fallback)
 }
 
+// R09g: room auto-queue toggle. The backend enforces host/admin;
+// the frontend does not pre-check the role. The toggle button is
+// disabled when the room is disconnected, the user is signed out, or
+// a previous toggle is in flight (so a double-click cannot fire two
+// requests). The post-response store apply uses the response body;
+// the room_auto_queue_config_changed WS event that follows is
+// authoritative and a no-op for an already-correct local state.
+const autoQueueToggleInFlight = ref(false)
+async function toggleRoomAutoQueue() {
+  if (autoQueueToggleInFlight.value) return
+  if (!canMutate.value) return
+  const current = !!roomState.value?.autoQueueConfig?.enabled
+  const next = !current
+  autoQueueToggleInFlight.value = true
+  try {
+    const cfg = await api.setRoomAutoQueueEnabled(slug.value, next)
+    if (cfg) {
+      globalStore.setRoomAutoQueueConfig(slug.value, cfg.enabled, cfg.strategy)
+    }
+  } catch (e) {
+    const s = e?.status
+    if (s === 401) toast.error('You are signed out. Log in again.')
+    else if (s === 403) toast.error('Only the host or an admin can toggle room auto-queue.')
+    else if (s === 404) toast.error('Room not found.')
+    else if (s === 409) toast.error('Room is archived or in conflict.')
+    else toast.error('Could not toggle room auto-queue.')
+  } finally {
+    autoQueueToggleInFlight.value = false
+  }
+}
+
 function handleBack() {
   router.push({ name: 'Dashboard' })
 }
@@ -544,5 +621,30 @@ function handleBack() {
 .empty {
   color: var(--text-muted);
   font-style: italic;
+}
+
+/* R09g: small room-scoped radio toggle that sits inline with the
+   Queue heading. Disabled when disconnected, unauthenticated, or a
+   toggle is in flight. */
+.radio-toggle-btn {
+  margin-left: 0.5rem;
+  background: var(--accent);
+  color: #0a0a0a;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.2rem 0.6rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.radio-toggle-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.auto-badge {
+  margin-left: 0.4rem;
+  font-size: 0.7rem;
+  color: var(--accent);
+  font-weight: 600;
 }
 </style>
