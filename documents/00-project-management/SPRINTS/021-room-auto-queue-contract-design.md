@@ -95,7 +95,7 @@ The future room auto-queue trigger fires AFTER a successful room queue mutation 
 
 The trigger fires after a successful (non-stale, non-error) mutation in any of these paths:
 
-- `roomqueue.Interactor.PlaybackEnded` — final-song case. When the entity layer returns `entity.ErrNoNextSong`, the interactor pauses at end-of-queue (`Status = StatusPaused`, `Elapsed = 0`, `CurrentIndex` unchanged) and persists. The post-mutation queue is "current is last"; the trigger fires.
+- `roomqueue.Interactor.PlaybackEnded` — final-song case. When the entity layer returns `entity.ErrNoNextSong`, the interactor pauses at end-of-queue (`Status = StatusPaused`, `Elapsed = 0`, `CurrentIndex` unchanged) and persists. The post-mutation queue is "current is last"; the trigger fires AFTER that save if room auto-queue is enabled.
 - `roomqueue.Interactor.PlaybackEnded` — successful-advance case. When `AdvanceToNext` succeeds and the new current song is the new last in the queue (i.e. the previous "last" was an upcoming song and the queue was at "last+1" before the advance), the post-mutation queue is "current is last"; the trigger fires.
 - `roomqueue.Interactor.SkipPlayback` — successful-advance case. When the lease-holder skip advances to a new current song that becomes the new last in the queue, the post-mutation queue is "current is last"; the trigger fires.
 - `roomqueue.Interactor.SkipVote` — successful-advance case. When the room vote skip advances to a new current song that becomes the new last in the queue, the post-mutation queue is "current is last"; the trigger fires.
@@ -104,8 +104,8 @@ The trigger fires after a successful (non-stale, non-error) mutation in any of t
 
 The trigger MUST NOT fire on:
 
-- `roomqueue.Interactor.PlaybackEnded` no-advance error paths (anything other than the persisted final-song pause or a successful advance to last). The `entity.ErrNoNextSong` / `entity.ErrNoCurrentSong` sentinels in `PlaybackEnded` are no-mutation paths: the trigger does NOT see them as "ended" and does NOT fire.
-- `roomqueue.Interactor.SkipPlayback` and `roomqueue.Interactor.SkipVote` no-mutation paths (those return `roomqueue.ErrNoNextSong` / `roomqueue.ErrNoCurrentSong` BEFORE any state change; the queue is byte-for-byte unchanged, so the trigger has nothing to react to).
+- `roomqueue.Interactor.PlaybackEnded` no-mutation error paths (e.g. `entity.ErrNoCurrentSong` from an empty queue, or other non-final-song errors). The trigger only fires after the interactor returns nil — i.e. after a successful save. The `entity.ErrNoNextSong` return from `AdvanceToNext` inside `PlaybackEnded` is NOT a no-mutation path: the interactor handles it by persisting paused end-of-queue state, and that save IS the trigger site.
+- `roomqueue.Interactor.SkipPlayback` and `roomqueue.Interactor.SkipVote` no-mutation paths. These methods return `roomqueue.ErrNoNextSong` / `roomqueue.ErrNoCurrentSong` BEFORE any state change (the entity layer refuses to mutate); the queue is byte-for-byte unchanged, so the trigger has nothing to react to.
 - `roomqueue.Interactor.PrevPlayback` (R09d: prev is not an auto-queue trigger; the post-mutation queue is a rewind, not an "ended" state).
 - `roomqueue.Interactor.PrioritizeSong` (a re-order; the queue tail is unchanged).
 - `roomqueue.Interactor.AddSong` (a manual add; the user-driven addition is the auto-queue's source of new content, not a trigger).
@@ -222,7 +222,7 @@ The "downstream work runs outside the lock" invariant is preserved end-to-end. A
 
 The future implementation lands as a single narrow slice, mirroring the R07a/R07b/R07c/R07d, R09a/R09b/R09c/R09d pattern. The slice:
 
-1. Adds a new `internal/usecase/roomautoqueue` package containing a `roomautoqueue.Interactor` with `CheckAndTrigger(ctx, slug)`, `GetConfig(ctx, slug)`, and `SetEnabled(ctx, slug, enabled)`. The interactor holds its own `mu` mirroring the global `autoqueue.Interactor` contract (single-flight `triggering`, serialized `SetEnabled`, slow `FetchRelated` outside the lock).
+1. Adds a new `internal/usecase/roomautoqueue` package containing a `roomautoqueue.Interactor` with `CheckAndTrigger(ctx, slug)`, `GetConfig(ctx, slug)`, and `SetEnabled(ctx, slug, enabled)`. The interactor holds a coordinator `mu` mutex that guards a per-room `inFlight` map keyed by room id (or slug). The map is the per-room analogue of the global `autoqueue.Interactor.triggering` flag, but is NOT a single global flag: each room's in-flight state is independent, so a slow `FetchRelated` for room A does not suppress or block room B's trigger. The slow `FetchRelated` is held OUTSIDE the coordinator mutex (CD-6). The per-room in-flight map is in-memory, single-instance only.
 2. Adds a per-room `RoomAutoQueueRepository` interface in `internal/domain/repository` (or a sibling package) with `GetConfig(ctx, roomID)`, `SaveConfig(ctx, roomID, cfg)`, `AppendHistory(ctx, roomID, entry)`, and `GetRecentHistory(ctx, roomID, limit)`. Backed by a future `PostgresRoomAutoQueueRepository` and a future migration.
 3. Adds a new `roomqueue.Interactor.AddRoomAutoQueueSong(ctx, slug, song, expectedSourceSongID)` method that runs under the existing roomqueue mutex, revalidates the stale predicates, persists via `queueRepo.Save`, and returns the post-mutation snapshot + a stale sentinel. This mirrors the global `queue.Interactor.AddAutoQueueSong` contract byte-for-byte.
 4. Adds a `roomautoqueue.AddRoomAutoQueueSongFunc` seam (mirror of the global `AddAutoQueueSongFunc` seam) so the future `roomautoqueue.Interactor` does not import `roomqueue` (avoiding an upward dependency from a leaf usecase).
