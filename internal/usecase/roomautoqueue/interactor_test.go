@@ -128,6 +128,16 @@ type mockRoomAQRepo struct {
 	history         []domain.RoomPlayHistoryEntry
 	appendCount     int
 	getRecentCalled int
+
+	// Optional SaveConfig gate (SetEnabled serialization test).
+	//
+	// If saveConfigCalled is set, SaveConfig sends a token on it the
+	// first time it is entered (and is silent on subsequent calls).
+	// If saveConfigRelease is set, SaveConfig blocks until that channel
+	// is closed. Both fields are independently opt-in so existing
+	// tests do not need to change.
+	saveConfigCalled  chan struct{}
+	saveConfigRelease chan struct{}
 }
 
 func (m *mockRoomAQRepo) GetConfig(_ context.Context, _ int64) (*domain.RoomAutoQueueConfig, error) {
@@ -141,6 +151,21 @@ func (m *mockRoomAQRepo) GetConfig(_ context.Context, _ int64) (*domain.RoomAuto
 }
 
 func (m *mockRoomAQRepo) SaveConfig(_ context.Context, _ int64, cfg domain.RoomAutoQueueConfig) error {
+	// Signal entry (first call only) so tests can observe whether
+	// SetEnabled's SaveConfig entered while another caller held the
+	// coordinator mu. The buffered channel makes this idempotent.
+	if m.saveConfigCalled != nil {
+		select {
+		case m.saveConfigCalled <- struct{}{}:
+		default:
+			// already signaled; subsequent calls are silent.
+		}
+	}
+	// Block on the test's gate so the test can hold SaveConfig open
+	// across a critical-section observation window.
+	if m.saveConfigRelease != nil {
+		<-m.saveConfigRelease
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cfg = &cfg
@@ -769,23 +794,191 @@ func TestCheckAndTrigger_Success_BroadcastsConfiguredBroadcaster(t *testing.T) {
 	}
 }
 
-// TestSetEnabled_DisabledMidFlightBeforeInsertion_DropsCandidate
-// pins the SetEnabled serialization contract with the post-fetch
-// insertion. The contract this test pins is:
+// TestSetEnabled_SerializedWithPostFetchCriticalSection pins the
+// SetEnabled/CheckAndTrigger serialization contract directly.
 //
-//   1. CheckAndTrigger reaches the post-fetch critical section
-//      under the coordinator mu.
-//   2. SetEnabled(false) commits the config write BEFORE the
-//      add fn runs the insertion (we force this ordering via a
-//      blockingFetcher gate).
-//   3. After the gate releases, the add fn observes Enabled=false
-//      and refuses to insert (mirroring the production insertion
-//      path, which would observe the post-toggle config).
+// The contract this test pins:
 //
-//   The expected outcome: no queue save, no history append, and
-//   no broadcast. The candidate is dropped exactly as the global
-//   autoqueue Sprint 004 contract requires.
-func TestSetEnabled_DisabledMidFlightBeforeInsertion_DropsCandidate(t *testing.T) {
+//   - SetEnabled(false) MUST take the same coordinator mu that
+//     CheckAndTrigger holds across its post-fetch "still enabled?"
+//     recheck + AddRoomAutoQueueSong insertion. Without that lock,
+//     a SetEnabled(false) save could land between the recheck and
+//     the insertion call — leaving the candidate inserted even
+//     though the user has just toggled the room off.
+//
+// This test forces the bug-prone ordering deterministically:
+//   1. CheckAndTrigger pre-fetches (Enabled=true), enters the
+//      blocking fetcher, then is released into the post-fetch mu
+//      critical section.
+//   2. The post-fetch recheck reads Enabled=true and calls the add
+//      fn; the add fn blocks on a test-controlled gate WHILE STILL
+//      HOLDING mu.
+//   3. A concurrent SetEnabled(false) starts in another goroutine.
+//   4. The mock's SaveConfig is gated through channels so we can
+//      observe whether SetEnabled's SaveConfig entered while the
+//      add fn held mu.
+//
+// The locked-correct outcome: SaveConfig does NOT enter until mu
+// is released (after the add fn returns). Without the lock,
+// SaveConfig enters immediately, racing past the mu-held critical
+// section.
+//
+// Final state after both complete: the trigger ran to completion
+// (insertion succeeded, history appended, broadcast emitted)
+// because SetEnabled did not land before the recheck. The persisted
+// config is Enabled=false because SetEnabled saved it after mu was
+// released. This is one of the two valid outcomes the lock allows;
+// the in-between (interleaved) outcome is the one the lock forbids.
+func TestSetEnabled_SerializedWithPostFetchCriticalSection(t *testing.T) {
+	saveCalled := make(chan struct{}, 1)
+	saveRelease := make(chan struct{})
+	repo := &mockRoomAQRepo{
+		cfg:               &domain.RoomAutoQueueConfig{Enabled: true},
+		saveConfigCalled:  saveCalled,
+		saveConfigRelease: saveRelease,
+	}
+	snap := &queueStubSnapshot{}
+	bf := &blockingFetcher{
+		song:    &entity.Song{ID: "cand", Title: "C", AddedBy: entity.SystemUserID},
+		release: make(chan struct{}),
+		started: make(chan struct{}),
+	}
+
+	inter, _ := newTestInteractor(repo, bf, snap, "rts", 34)
+
+	// add fn blocks on a test-controlled gate WHILE INSIDE the
+	// post-fetch mu critical section. We deliberately do NOT
+	// return ErrAutoQueueStale here — we want to model the
+	// production insertion path so we can observe whether the
+	// trigger's queue mutation ran to completion (proving SetEnabled
+	// did not interleave the lock-free window).
+	addEntered := make(chan struct{})
+	addRelease := make(chan struct{})
+	inter.SetAddRoomAutoQueueSongFunc(func(_ context.Context, _ string, song *entity.Song, _ string) (*AddRoomAutoQueueSongResult, error) {
+		select {
+		case <-addEntered:
+		default:
+			close(addEntered)
+		}
+		<-addRelease
+		snap.mu.Lock()
+		defer snap.mu.Unlock()
+		q := snap.current
+		if q == nil {
+			return nil, ErrAutoQueueStale
+		}
+		q.Add(*song)
+		return &AddRoomAutoQueueSongResult{
+			Queue:        q,
+			CurrentIndex: q.CurrentIndex,
+			CurrentSong:  nil,
+			Status:       q.Status,
+			Elapsed:      q.Elapsed,
+		}, nil
+	})
+
+	bc := &mockBroadcaster{}
+	inter.SetBroadcaster(bc)
+
+	// 1. Start CheckAndTrigger. It pre-fetches (sees Enabled=true),
+	//    hits the blocking fetcher, and waits for release.
+	triggerDone := make(chan error, 1)
+	go func() {
+		triggerDone <- inter.CheckAndTrigger(context.Background(), "rts")
+	}()
+	<-bf.started
+
+	// 2. Release the fetcher so CheckAndTrigger enters the post-fetch
+	//    mu critical section.
+	close(bf.release)
+
+	// 3. Wait until the add fn has been entered and is holding mu.
+	<-addEntered
+
+	// 4. Start SetEnabled(false) in another goroutine. With the
+	//    coordinator mu, its SaveConfig must NOT enter until the
+	//    add fn releases mu.
+	setDone := make(chan error, 1)
+	go func() {
+		_, err := inter.SetEnabled(context.Background(), "rts", 1, false)
+		setDone <- err
+	}()
+
+	// 5. Give the goroutine scheduler a brief window and verify
+	//    that SaveConfig did NOT enter. With the lock, this is the
+	//    guaranteed outcome: SetEnabled is parked on i.mu.Lock().
+	select {
+	case <-saveCalled:
+		t.Fatal("SetEnabled's SaveConfig entered while CheckAndTrigger held the coordinator mu — SetEnabled serialization invariant violated")
+	case <-time.After(50 * time.Millisecond):
+		// Good — SaveConfig was held back by the coordinator mu.
+	}
+
+	// 6. Release the add fn. The insertion completes; mu becomes
+	//    free; SetEnabled can now proceed past its i.mu.Lock().
+	close(addRelease)
+
+	// 7. Now that mu is free, SetEnabled's SaveConfig must enter.
+	//    Wait briefly for it (bounded wait so the test does not hang
+	//    on a regression that detaches SetEnabled from the lock).
+	select {
+	case <-saveCalled:
+		// Good — SaveConfig entered after mu release.
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("SetEnabled's SaveConfig did not enter after the coordinator mu was released")
+	}
+	close(saveRelease)
+
+	// 8. Both goroutines must complete without error.
+	if err := <-triggerDone; err != nil {
+		t.Fatalf("CheckAndTrigger: %v", err)
+	}
+	if err := <-setDone; err != nil {
+		t.Fatalf("SetEnabled: %v", err)
+	}
+
+	// 9. Final state: trigger ran to completion (insertion succeeded,
+	//    history appended, broadcast emitted) because SetEnabled did
+	//    NOT land before the post-fetch recheck. cfg persisted=false
+	//    because SetEnabled saved it after mu was released. Both are
+	//    consistent with the locked-correct outcome.
+	snap.mu.Lock()
+	songs := len(snap.current.Songs)
+	snap.mu.Unlock()
+	if songs != 2 {
+		t.Errorf("expected 2 songs after successful insertion, got %d", songs)
+	}
+	repo.mu.Lock()
+	persistEnabled := repo.cfg.Enabled
+	appendCount := repo.appendCount
+	repo.mu.Unlock()
+	if persistEnabled {
+		t.Errorf("expected persisted Enabled=false after SetEnabled, got true")
+	}
+	if appendCount != 1 {
+		t.Errorf("expected 1 history entry from successful insertion, got %d", appendCount)
+	}
+	bc.mu.Lock()
+	bcCount := len(bc.calls)
+	bc.mu.Unlock()
+	if bcCount != 1 {
+		t.Errorf("expected 1 broadcast (insertion ran to completion), got %d", bcCount)
+	}
+}
+
+// TestSetEnabled_RunsBeforePostFetchRecheck_DropsCandidate pins the
+// other half of the serialization contract: when SetEnabled(false)
+// completes BEFORE CheckAndTrigger's post-fetch recheck acquires the
+// coordinator mu, the recheck observes Enabled=false and drops the
+// candidate (no add fn call, no queue mutation, no history append,
+// no broadcast). This is the second valid outcome the lock allows —
+// distinct from the interleave outcome the lock forbids.
+//
+// The test forces the ordering by holding CheckAndTrigger in the
+// blocking fetcher while SetEnabled(false) commits its save. The
+// post-fetch recheck then observes the persisted Enabled=false and
+// drops the candidate.
+func TestSetEnabled_RunsBeforePostFetchRecheck_DropsCandidate(t *testing.T) {
 	repo := &mockRoomAQRepo{cfg: &domain.RoomAutoQueueConfig{Enabled: true}}
 	snap := &queueStubSnapshot{}
 	bf := &blockingFetcher{
@@ -794,76 +987,74 @@ func TestSetEnabled_DisabledMidFlightBeforeInsertion_DropsCandidate(t *testing.T
 		started: make(chan struct{}),
 	}
 
-	inter, _ := newTestInteractor(repo, bf, snap, "rt-dm", 34)
+	inter, _ := newTestInteractor(repo, bf, snap, "rt-rb", 35)
 
-	// Gate the insertion until the test has flipped the config. We
-	// pre-create the gate so the add fn blocks on it before any
-	// repo access — this avoids interleaving with the mock's mutex.
-	gate := make(chan struct{})
-	insertStarted := make(chan struct{})
+	// add fn MUST NOT be called. Replace with a watchdog that fails
+	// the test if invoked.
+	addCalls := make(chan struct{}, 1)
 	inter.SetAddRoomAutoQueueSongFunc(func(_ context.Context, _ string, _ *entity.Song, _ string) (*AddRoomAutoQueueSongResult, error) {
 		select {
-		case <-insertStarted:
-			// already closed (defensive — should not happen)
+		case addCalls <- struct{}{}:
 		default:
-			close(insertStarted)
 		}
-		<-gate
-		// Snapshot the persisted config under the gate so the
-		// SetEnabled(false) call has already committed before we
-		// observe the value. We do NOT touch the snap here — the
-		// candidate is dropped via the ErrAutoQueueStale return
-		// path so no downstream mutation runs.
 		return nil, ErrAutoQueueStale
 	})
 
 	bc := &mockBroadcaster{}
 	inter.SetBroadcaster(bc)
 
-	done := make(chan error, 1)
+	triggerDone := make(chan error, 1)
 	go func() {
-		done <- inter.CheckAndTrigger(context.Background(), "rt-dm")
+		triggerDone <- inter.CheckAndTrigger(context.Background(), "rt-rb")
 	}()
 
-	// Wait for the fetcher to enter its blocking window, then
-	// release it so CheckAndTrigger reaches the post-fetch
-	// critical section.
+	// Wait for the fetcher to be blocked, then commit SetEnabled
+	// (false) BEFORE releasing the fetcher. The persisted config is
+	// now Enabled=false before CheckAndTrigger's post-fetch recheck
+	// runs.
 	<-bf.started
-	close(bf.release)
-
-	// Wait until the insertion call is in flight (gated on the
-	// channel so the post-fetch mu is held).
-	<-insertStarted
-
-	// Toggle OFF. In the production wiring this commits the config
-	// and broadcasts the config-changed event. We invoke SetEnabled
-	// directly here.
-	if _, err := inter.SetEnabled(context.Background(), "rt-dm", 1, false); err != nil {
+	if _, err := inter.SetEnabled(context.Background(), "rt-rb", 1, false); err != nil {
+		close(bf.release)
 		t.Fatalf("SetEnabled: %v", err)
 	}
 
-	// Release the insertion gate. The add fn now returns
-	// ErrAutoQueueStale → the trigger drops the candidate with no
-	// queue save, no history, no broadcast.
-	close(gate)
-	if err := <-done; err != nil {
+	// Release the fetcher. CheckAndTrigger reaches the post-fetch mu
+	// critical section; the recheck observes Enabled=false and drops.
+	close(bf.release)
+	if err := <-triggerDone; err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	repo.mu.Lock()
-	if repo.appendCount != 0 {
-		t.Errorf("expected 0 history entries (candidate dropped), got %d", repo.appendCount)
+	// add fn must NEVER have been called.
+	select {
+	case <-addCalls:
+		t.Fatal("AddRoomAutoQueueSong was called despite post-fetch recheck observing Enabled=false")
+	default:
+		// Good — recheck dropped the candidate.
 	}
-	// Sanity: the persisted config is now Enabled=false.
-	cfg := *repo.cfg
+
+	repo.mu.Lock()
+	persistEnabled := repo.cfg.Enabled
+	appendCount := repo.appendCount
 	repo.mu.Unlock()
-	if cfg.Enabled {
-		t.Error("expected persisted Enabled=false after toggle")
+	if !persistEnabled == false {
+		// Effectively "if persistEnabled is true".
+		t.Errorf("expected persisted Enabled=false, got %v", persistEnabled)
+	}
+	if appendCount != 0 {
+		t.Errorf("expected 0 history entries (candidate dropped), got %d", appendCount)
+	}
+	snap.mu.Lock()
+	songs := len(snap.current.Songs)
+	snap.mu.Unlock()
+	if songs != 1 {
+		t.Errorf("expected 1 song in queue (no insertion), got %d", songs)
 	}
 	bc.mu.Lock()
-	defer bc.mu.Unlock()
-	if len(bc.calls) != 0 {
-		t.Errorf("expected 0 broadcasts (candidate dropped), got %d", len(bc.calls))
+	bcCount := len(bc.calls)
+	bc.mu.Unlock()
+	if bcCount != 0 {
+		t.Errorf("expected 0 broadcasts (candidate dropped), got %d", bcCount)
 	}
 }
 

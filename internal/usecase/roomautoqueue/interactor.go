@@ -25,6 +25,12 @@
 //     "still-enabled?" check + insertion. GetConfig, queue snapshot
 //     loading, GetRecentHistory, FetchRelated, AppendHistory, and the
 //     broadcaster call all run OUTSIDE mu.
+//   - SetEnabled's SaveConfig write is held under the same coordinator
+//     mu (GetConfig itself runs OUTSIDE mu — only the persist is in
+//     the critical section). This is the minimum needed to serialize
+//     a SetEnabled(false) write with the post-fetch recheck +
+//     insertion so a disable cannot interleave between the
+//     "still-enabled?" check and the queue mutation.
 //   - The per-room in-flight map is guarded only by the coordinator
 //     mu. Cross-room in-flight independence is preserved because
 //     mu is only held for the map check/set/clear and the
@@ -114,14 +120,16 @@ type Interactor struct {
 	//   - the post-fetch "still enabled?" recheck + the
 	//     AddRoomAutoQueueSong insertion (so SetEnabled(false)
 	//     cannot land between the final recheck and the queue
-	//     mutation).
+	//     mutation)
+	//   - SetEnabled's SaveConfig write (so the toggle's persist is
+	//     atomic with the post-fetch recheck + insertion window).
 	//
-	// mu is NEVER held during GetConfig, queue snapshot loading,
-	// GetRecentHistory, FetchRelated, AppendHistory, or the
-	// broadcaster call. Cross-room in-flight independence is
-	// preserved because mu is held only for the per-room map
-	// check/set/clear and the final pre-insertion critical
-	// section.
+	// mu is NEVER held during GetConfig (SetEnabled's pre-save load),
+	// queue snapshot loading, GetRecentHistory, FetchRelated,
+	// AppendHistory, or the broadcaster call. Cross-room in-flight
+	// independence is preserved because mu is held only for the
+	// per-room map check/set/clear, the final pre-insertion
+	// critical section, and SetEnabled's SaveConfig write.
 	mu       sync.Mutex
 	inFlight map[int64]bool // roomID -> in-flight flag
 }
@@ -180,9 +188,11 @@ func (i *Interactor) GetConfig(ctx context.Context, slug string, actorUserID int
 // either runs first (then the candidate is dropped on the
 // post-fetch recheck) or runs after the insertion completes.
 //
-// Config loading + saving happens OUTSIDE the critical section
-// (we hold mu only for the final SaveConfig write); a concurrent
-// slow repo read for room A never blocks the per-room B path.
+// Config loading + saving happens with the SaveConfig write under
+// the coordinator mu (the minimum critical section needed to
+// serialize the persist with the post-fetch recheck + insertion).
+// The slow GetConfig read runs outside mu so a concurrent slow
+// repo read for room A never blocks the per-room B path.
 //
 // Maps to roomautoqueue.ErrAutoQueueStale on insertion, which this
 // method never sees (toggle only writes config; no queue mutation).
@@ -194,13 +204,23 @@ func (i *Interactor) SetEnabled(ctx context.Context, slug string, actorUserID in
 	if err := i.requireHostOrAdmin(ctx, roomObj.ID, actorUserID); err != nil {
 		return nil, err
 	}
+	// GetConfig runs OUTSIDE the coordinator mu — a slow repo read
+	// for room A must not block the per-room B path. The toggle's
+	// final write is serialized below.
 	cfg, err := i.autoQueueRepo.GetConfig(ctx, roomObj.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get room auto-queue config: %w", err)
 	}
 	cfg.Enabled = enabled
-	if err := i.autoQueueRepo.SaveConfig(ctx, roomObj.ID, *cfg); err != nil {
-		return nil, fmt.Errorf("failed to save room auto-queue config: %w", err)
+	// Critical section: serialize this SaveConfig write with
+	// CheckAndTrigger's post-fetch recheck + AddRoomAutoQueueSong
+	// insertion so a SetEnabled(false) cannot interleave between
+	// the final "still enabled?" check and the queue mutation.
+	i.mu.Lock()
+	saveErr := i.autoQueueRepo.SaveConfig(ctx, roomObj.ID, *cfg)
+	i.mu.Unlock()
+	if saveErr != nil {
+		return nil, fmt.Errorf("failed to save room auto-queue config: %w", saveErr)
 	}
 	return cfg, nil
 }
