@@ -284,12 +284,17 @@ type recordingPreviousCall struct {
 	elapsed int
 }
 
-// recordingAutoQueueAddedCall: append {slug, song, sourceTitle}
-// whenever BroadcastRoomAutoQueueAdded is invoked. R09f.
+// recordingAutoQueueAddedCall: append {slug, song, sourceTitle,
+// currentIndex, currentSong, status, elapsed} whenever
+// BroadcastRoomAutoQueueAdded is invoked. R09f.
 type recordingAutoQueueAddedCall struct {
-	slug        string
-	song        entity.Song
-	sourceTitle string
+	slug         string
+	song         entity.Song
+	sourceTitle  string
+	currentIndex int
+	currentSong  *entity.Song
+	status       entity.PlaybackStatus
+	elapsed      int
 }
 
 // recordingAutoQueueConfigChangedCall: append {slug, enabled, strategy}
@@ -352,10 +357,10 @@ func (r *recordingRoomBroadcaster) BroadcastRoomPlaybackSongPrevious(slug string
 	defer r.mu.Unlock()
 	r.previousCalls = append(r.previousCalls, recordingPreviousCall{slug: slug, prev: prev, next: next, song: song, status: status, elapsed: elapsed})
 }
-func (r *recordingRoomBroadcaster) BroadcastRoomAutoQueueAdded(slug string, song entity.Song, sourceTitle string, _ *entity.Queue) {
+func (r *recordingRoomBroadcaster) BroadcastRoomAutoQueueAdded(slug string, song entity.Song, sourceTitle string, currentIndex int, currentSong *entity.Song, status entity.PlaybackStatus, elapsed int, _ *entity.Queue) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.autoQueueAddedCalls = append(r.autoQueueAddedCalls, recordingAutoQueueAddedCall{slug: slug, song: song, sourceTitle: sourceTitle})
+	r.autoQueueAddedCalls = append(r.autoQueueAddedCalls, recordingAutoQueueAddedCall{slug: slug, song: song, sourceTitle: sourceTitle, currentIndex: currentIndex, currentSong: currentSong, status: status, elapsed: elapsed})
 }
 func (r *recordingRoomBroadcaster) BroadcastRoomAutoQueueConfigChanged(slug string, enabled bool, strategy string) {
 	r.mu.Lock()

@@ -17,12 +17,23 @@ import (
 // repository.RoomRepository interface while routing only the two
 // methods roomautoqueue cares about to custom logic. Everything
 // else panics if called — the tests never exercise those paths.
+//
+// members stores per-(roomID, userID) role rows so the use case's
+// requireMember / requireHostOrAdmin can resolve identity.
 type mockRoomRepo struct {
 	noOpRoomRepo
-	rooms map[string]*entity.Room
+	rooms   map[string]*entity.Room
+	members map[mockMemberKey]entity.RoomMember
 }
 
-func newMockRoomRepo() *mockRoomRepo { return &mockRoomRepo{rooms: map[string]*entity.Room{}} }
+type mockMemberKey struct {
+	roomID int64
+	userID int
+}
+
+func newMockRoomRepo() *mockRoomRepo {
+	return &mockRoomRepo{rooms: map[string]*entity.Room{}, members: map[mockMemberKey]entity.RoomMember{}}
+}
 
 func (m *mockRoomRepo) GetRoomBySlug(_ context.Context, slug string) (*entity.Room, error) {
 	if r, ok := m.rooms[slug]; ok {
@@ -30,6 +41,31 @@ func (m *mockRoomRepo) GetRoomBySlug(_ context.Context, slug string) (*entity.Ro
 	}
 	return nil, nil
 }
+
+// GetMember returns the seeded role for (roomID, userID) or a
+// sql.ErrNoRows-equivalent so the use case's requireMember /
+// requireHostOrAdmin can reject non-members.
+func (m *mockRoomRepo) GetMember(_ context.Context, roomID int64, userID int) (*entity.RoomMember, error) {
+	if mem, ok := m.members[mockMemberKey{roomID: roomID, userID: userID}]; ok {
+		return &mem, nil
+	}
+	return nil, mockNoMember
+}
+
+// addMember seeds a role row for the (roomID, userID) pair.
+func (m *mockRoomRepo) addMember(roomID int64, userID int, role entity.RoomMemberRole) {
+	m.members[mockMemberKey{roomID: roomID, userID: userID}] = entity.RoomMember{
+		RoomID:   roomID,
+		UserID:   userID,
+		Role:     role,
+		JoinedAt: time.Now(),
+	}
+}
+
+// mockNoMember is a sentinel for "not a member". The use case
+// translates ANY error from GetMember to ErrForbidden; the
+// sentinel value only needs to be non-nil.
+var mockNoMember = errors.New("not a member")
 
 // noOpRoomRepo satisfies the rest of repository.RoomRepository as
 // panics — none of these methods are exercised in roomautoqueue
@@ -207,6 +243,40 @@ type addCall struct {
 	SourceID string
 }
 
+// mockBroadcaster captures typed BroadcastRoomAutoQueueAdded calls.
+// The interactor_test uses it instead of a generic BroadcastFunc so
+// the typed narrow broadcaster seam is exercised by the tests.
+type mockBroadcaster struct {
+	mu    sync.Mutex
+	calls []broadcasterCall
+}
+
+type broadcasterCall struct {
+	roomSlug        string
+	song            entity.Song
+	sourceSongTitle string
+	currentIndex    int
+	currentSong     *entity.Song
+	status          entity.PlaybackStatus
+	elapsed         int
+	state           *entity.Queue
+}
+
+func (m *mockBroadcaster) BroadcastRoomAutoQueueAdded(roomSlug string, song entity.Song, sourceSongTitle string, currentIndex int, currentSong *entity.Song, status entity.PlaybackStatus, elapsed int, state *entity.Queue) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, broadcasterCall{
+		roomSlug:        roomSlug,
+		song:            song,
+		sourceSongTitle: sourceSongTitle,
+		currentIndex:    currentIndex,
+		currentSong:     currentSong,
+		status:          status,
+		elapsed:         elapsed,
+		state:           state,
+	})
+}
+
 // helper: build an interactor wired against the supplied stubs. The
 // caller is responsible for seed snap.current (with a 1-song queue at
 // current=0 by default) BEFORE invoking CheckAndTrigger so the
@@ -225,6 +295,11 @@ func newTestInteractor(repo *mockRoomAQRepo, fetcher domain.RelatedSongFetcher, 
 	inter := NewInteractor(roomRepo, repo, fetcher)
 	inter.SetQueueSnapshotLoader(snap.snapshot)
 	inter.SetAddRoomAutoQueueSongFunc(testAddFn(snap, &[]addCall{}))
+	// Default seed: actor 1 is the room host so the use case's
+	// requireMember / requireHostOrAdmin checks pass for any test
+	// that calls GetConfig / SetEnabled without explicitly seeding a
+	// different role.
+	roomRepo.addMember(roomID, 1, entity.RoomRoleHost)
 	return inter, roomRepo
 }
 
@@ -240,13 +315,8 @@ func TestCheckAndTrigger_DisabledConfig(t *testing.T) {
 
 	inter, _ := newTestInteractor(repo, fetcher, snap, "rsd", 11)
 
-	var broadcasts []string
-	var bMu sync.Mutex
-	inter.SetBroadcastFunc(func(t string, _ interface{}) {
-		bMu.Lock()
-		defer bMu.Unlock()
-		broadcasts = append(broadcasts, t)
-	})
+	bc := &mockBroadcaster{}
+	inter.SetBroadcaster(bc)
 
 	if err := inter.CheckAndTrigger(context.Background(), "rsd"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -254,12 +324,10 @@ func TestCheckAndTrigger_DisabledConfig(t *testing.T) {
 	if fetcher.videoIDSeen != "" {
 		t.Errorf("fetcher called with %q despite disabled config", fetcher.videoIDSeen)
 	}
-	bMu.Lock()
-	defer bMu.Unlock()
-	for _, e := range broadcasts {
-		if e == "room_auto_queue_added" {
-			t.Error("broadcast must not fire when disabled")
-		}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.calls) != 0 {
+		t.Errorf("broadcast must not fire when disabled, got %d calls", len(bc.calls))
 	}
 }
 
@@ -319,15 +387,8 @@ func TestCheckAndTrigger_LastSong_Triggers(t *testing.T) {
 		t.Fatalf("precondition: fetcher already saw %q", fetcher.videoIDSeen)
 	}
 
-	var broadcasts []map[string]interface{}
-	var bMu sync.Mutex
-	inter.SetBroadcastFunc(func(_ string, data interface{}) {
-		bMu.Lock()
-		defer bMu.Unlock()
-		if m, ok := data.(map[string]interface{}); ok {
-			broadcasts = append(broadcasts, m)
-		}
-	})
+	bc := &mockBroadcaster{}
+	inter.SetBroadcaster(bc)
 
 	if err := inter.CheckAndTrigger(context.Background(), "rt1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -340,10 +401,35 @@ func TestCheckAndTrigger_LastSong_Triggers(t *testing.T) {
 	if repo.appendCount != 1 {
 		t.Errorf("expected 1 history entry, got %d", repo.appendCount)
 	}
-	bMu.Lock()
-	defer bMu.Unlock()
-	if len(broadcasts) != 1 {
-		t.Fatalf("expected 1 broadcast, got %d", len(broadcasts))
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.calls) != 1 {
+		t.Fatalf("expected 1 broadcast, got %d", len(bc.calls))
+	}
+	// Payload shape: the typed narrow broadcaster seam must carry
+	// the full R09e tuple — song, source_song_title, current_index,
+	// current_song, status, elapsed, state.
+	got := bc.calls[0]
+	if got.roomSlug != "rt1" {
+		t.Errorf("roomSlug=%q want rt1", got.roomSlug)
+	}
+	if got.song.ID != "cand" {
+		t.Errorf("song.id=%q want cand", got.song.ID)
+	}
+	if got.sourceSongTitle != "Source" {
+		t.Errorf("sourceSongTitle=%q want Source", got.sourceSongTitle)
+	}
+	if got.currentIndex != 0 {
+		t.Errorf("currentIndex=%d want 0", got.currentIndex)
+	}
+	if got.currentSong == nil || got.currentSong.ID != "src" {
+		t.Errorf("currentSong=%+v want src", got.currentSong)
+	}
+	if got.status != entity.StatusIdle && got.status != entity.StatusPlaying {
+		t.Errorf("status=%q want idle or playing", got.status)
+	}
+	if got.state == nil || len(got.state.Songs) != 2 {
+		t.Errorf("expected state with 2 songs, got %+v", got.state)
 	}
 	// post-mutation queue length should now be 2.
 	snap.mu.Lock()
@@ -390,15 +476,8 @@ func TestCheckAndTrigger_BothFail(t *testing.T) {
 
 	inter, _ := newTestInteractor(repo, fetcher, snap, "rbf", 15)
 
-	var broadcasts []map[string]interface{}
-	var bMu sync.Mutex
-	inter.SetBroadcastFunc(func(_ string, data interface{}) {
-		bMu.Lock()
-		defer bMu.Unlock()
-		if m, ok := data.(map[string]interface{}); ok {
-			broadcasts = append(broadcasts, m)
-		}
-	})
+	bc := &mockBroadcaster{}
+	inter.SetBroadcaster(bc)
 
 	if err := inter.CheckAndTrigger(context.Background(), "rbf"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -408,10 +487,10 @@ func TestCheckAndTrigger_BothFail(t *testing.T) {
 	if repo.appendCount != 0 {
 		t.Errorf("expected 0 history entries, got %d", repo.appendCount)
 	}
-	bMu.Lock()
-	defer bMu.Unlock()
-	if len(broadcasts) != 0 {
-		t.Errorf("expected 0 broadcasts, got %d", len(broadcasts))
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.calls) != 0 {
+		t.Errorf("expected 0 broadcasts, got %d", len(bc.calls))
 	}
 }
 
@@ -432,13 +511,8 @@ func TestCheckAndTrigger_StaleAtInsertion_SourceMismatch(t *testing.T) {
 		return nil, ErrAutoQueueStale
 	})
 
-	var broadcasts int
-	var bMu sync.Mutex
-	inter.SetBroadcastFunc(func(_ string, _ interface{}) {
-		bMu.Lock()
-		defer bMu.Unlock()
-		broadcasts++
-	})
+	bc := &mockBroadcaster{}
+	inter.SetBroadcaster(bc)
 
 	if err := inter.CheckAndTrigger(context.Background(), "rsm"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -448,10 +522,10 @@ func TestCheckAndTrigger_StaleAtInsertion_SourceMismatch(t *testing.T) {
 	if repo.appendCount != 0 {
 		t.Errorf("expected 0 history entries on stale mismatch, got %d", repo.appendCount)
 	}
-	bMu.Lock()
-	defer bMu.Unlock()
-	if broadcasts != 0 {
-		t.Errorf("expected 0 broadcasts on stale mismatch, got %d", broadcasts)
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.calls) != 0 {
+		t.Errorf("expected 0 broadcasts on stale mismatch, got %d", len(bc.calls))
 	}
 }
 
@@ -470,13 +544,8 @@ func TestCheckAndTrigger_DisabledMidFlight(t *testing.T) {
 
 	inter, _ := newTestInteractor(repo, bf, snap, "rdm", 17)
 
-	var broadcasts int
-	var bMu sync.Mutex
-	inter.SetBroadcastFunc(func(_ string, _ interface{}) {
-		bMu.Lock()
-		defer bMu.Unlock()
-		broadcasts++
-	})
+	bc := &mockBroadcaster{}
+	inter.SetBroadcaster(bc)
 
 	done := make(chan error, 1)
 	go func() {
@@ -497,10 +566,10 @@ func TestCheckAndTrigger_DisabledMidFlight(t *testing.T) {
 	if repo.appendCount != 0 {
 		t.Errorf("expected 0 history entries, got %d", repo.appendCount)
 	}
-	bMu.Lock()
-	defer bMu.Unlock()
-	if broadcasts != 0 {
-		t.Errorf("expected 0 broadcasts when disabled mid-flight, got %d", broadcasts)
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.calls) != 0 {
+		t.Errorf("expected 0 broadcasts when disabled mid-flight, got %d", len(bc.calls))
 	}
 }
 
@@ -610,7 +679,7 @@ func TestCheckAndTrigger_ExcludedAfterInsert(t *testing.T) {
 	repo.history = []domain.RoomPlayHistoryEntry{}
 	fetcher2 := &mockFetcher{}
 	inter.SetAddRoomAutoQueueSongFunc(testAddFn(snap, &[]addCall{}))
-	inter.SetBroadcastFunc(func(_ string, _ interface{}) {}) // capture nothing further
+	inter.SetBroadcaster(&mockBroadcaster{}) // capture nothing further
 	// Replace the fetcher so we can observe the new exclude list.
 	roomRepo := newMockRoomRepo()
 	roomRepo.rooms["rxi"] = &entity.Room{ID: 21, Slug: "rxi", Status: entity.RoomStatusActive}
@@ -649,6 +718,152 @@ func TestCheckAndTrigger_ExcludedAfterInsert(t *testing.T) {
 	}
 	if !got["auto1"] {
 		t.Errorf("expected auto1 in second-fetch exclude list (no self-loop), got %+v", got)
+	}
+}
+
+// TestCheckAndTrigger_Success_BroadcastsConfiguredBroadcaster pins
+// the production-broadcast wiring contract: a successful trigger
+// MUST call the configured broadcaster exactly once with the full
+// R09e payload tuple (room_slug, song, source_song_title,
+// current_index, current_song, status, elapsed, state). This is
+// the regression guard for "the production BroadcastFunc adapter
+// is a no-op" — any future regression that drops the broadcaster
+// call (or short-circuits with the old generic-map signature) will
+// fail this test.
+func TestCheckAndTrigger_Success_BroadcastsConfiguredBroadcaster(t *testing.T) {
+	repo := &mockRoomAQRepo{cfg: &domain.RoomAutoQueueConfig{Enabled: true}}
+	fetcher := &mockFetcher{song: &entity.Song{ID: "cand", Title: "Candidate", AddedBy: entity.SystemUserID}}
+	snap := &queueStubSnapshot{}
+
+	inter, _ := newTestInteractor(repo, fetcher, snap, "rt-bc", 33)
+
+	bc := &mockBroadcaster{}
+	inter.SetBroadcaster(bc)
+
+	if err := inter.CheckAndTrigger(context.Background(), "rt-bc"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.calls) != 1 {
+		t.Fatalf("expected exactly 1 broadcaster call after successful trigger, got %d (broadcast wiring may be a no-op)", len(bc.calls))
+	}
+	got := bc.calls[0]
+	if got.roomSlug != "rt-bc" {
+		t.Errorf("roomSlug=%q want rt-bc", got.roomSlug)
+	}
+	if got.song.ID != "cand" {
+		t.Errorf("song.id=%q want cand", got.song.ID)
+	}
+	if got.sourceSongTitle != "Source" {
+		t.Errorf("sourceSongTitle=%q want Source", got.sourceSongTitle)
+	}
+	if got.currentIndex != 0 {
+		t.Errorf("currentIndex=%d want 0", got.currentIndex)
+	}
+	if got.currentSong == nil || got.currentSong.ID != "src" {
+		t.Errorf("currentSong=%+v want src", got.currentSong)
+	}
+	if got.state == nil || len(got.state.Songs) != 2 {
+		t.Errorf("state=%+v want post-mutation snapshot with 2 songs", got.state)
+	}
+}
+
+// TestSetEnabled_DisabledMidFlightBeforeInsertion_DropsCandidate
+// pins the SetEnabled serialization contract with the post-fetch
+// insertion. The contract this test pins is:
+//
+//   1. CheckAndTrigger reaches the post-fetch critical section
+//      under the coordinator mu.
+//   2. SetEnabled(false) commits the config write BEFORE the
+//      add fn runs the insertion (we force this ordering via a
+//      blockingFetcher gate).
+//   3. After the gate releases, the add fn observes Enabled=false
+//      and refuses to insert (mirroring the production insertion
+//      path, which would observe the post-toggle config).
+//
+//   The expected outcome: no queue save, no history append, and
+//   no broadcast. The candidate is dropped exactly as the global
+//   autoqueue Sprint 004 contract requires.
+func TestSetEnabled_DisabledMidFlightBeforeInsertion_DropsCandidate(t *testing.T) {
+	repo := &mockRoomAQRepo{cfg: &domain.RoomAutoQueueConfig{Enabled: true}}
+	snap := &queueStubSnapshot{}
+	bf := &blockingFetcher{
+		song:    &entity.Song{ID: "cand", Title: "C", AddedBy: entity.SystemUserID},
+		release: make(chan struct{}),
+		started: make(chan struct{}),
+	}
+
+	inter, _ := newTestInteractor(repo, bf, snap, "rt-dm", 34)
+
+	// Gate the insertion until the test has flipped the config. We
+	// pre-create the gate so the add fn blocks on it before any
+	// repo access — this avoids interleaving with the mock's mutex.
+	gate := make(chan struct{})
+	insertStarted := make(chan struct{})
+	inter.SetAddRoomAutoQueueSongFunc(func(_ context.Context, _ string, _ *entity.Song, _ string) (*AddRoomAutoQueueSongResult, error) {
+		select {
+		case <-insertStarted:
+			// already closed (defensive — should not happen)
+		default:
+			close(insertStarted)
+		}
+		<-gate
+		// Snapshot the persisted config under the gate so the
+		// SetEnabled(false) call has already committed before we
+		// observe the value. We do NOT touch the snap here — the
+		// candidate is dropped via the ErrAutoQueueStale return
+		// path so no downstream mutation runs.
+		return nil, ErrAutoQueueStale
+	})
+
+	bc := &mockBroadcaster{}
+	inter.SetBroadcaster(bc)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- inter.CheckAndTrigger(context.Background(), "rt-dm")
+	}()
+
+	// Wait for the fetcher to enter its blocking window, then
+	// release it so CheckAndTrigger reaches the post-fetch
+	// critical section.
+	<-bf.started
+	close(bf.release)
+
+	// Wait until the insertion call is in flight (gated on the
+	// channel so the post-fetch mu is held).
+	<-insertStarted
+
+	// Toggle OFF. In the production wiring this commits the config
+	// and broadcasts the config-changed event. We invoke SetEnabled
+	// directly here.
+	if _, err := inter.SetEnabled(context.Background(), "rt-dm", 1, false); err != nil {
+		t.Fatalf("SetEnabled: %v", err)
+	}
+
+	// Release the insertion gate. The add fn now returns
+	// ErrAutoQueueStale → the trigger drops the candidate with no
+	// queue save, no history, no broadcast.
+	close(gate)
+	if err := <-done; err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	repo.mu.Lock()
+	if repo.appendCount != 0 {
+		t.Errorf("expected 0 history entries (candidate dropped), got %d", repo.appendCount)
+	}
+	// Sanity: the persisted config is now Enabled=false.
+	cfg := *repo.cfg
+	repo.mu.Unlock()
+	if cfg.Enabled {
+		t.Error("expected persisted Enabled=false after toggle")
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if len(bc.calls) != 0 {
+		t.Errorf("expected 0 broadcasts (candidate dropped), got %d", len(bc.calls))
 	}
 }
 

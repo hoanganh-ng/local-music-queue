@@ -2,25 +2,37 @@
 // orchestrates the per-room config read, the recommendation fetch
 // (via the existing domain.RelatedSongFetcher), the queue-owned
 // conditional insertion (via the roomqueue AddRoomAutoQueueSongFunc
-// seam), and the per-room broadcast via the roomqueue.Broadcaster
+// seam), and the per-room broadcast via a typed narrow broadcaster
 // seam. It is the per-room analogue of the global usecase/autoqueue
 // package — same concurrency model, same slow-fetch-outside-lock
 // invariant, same stale-candidate semantics, but keyed by room id so
 // cross-room operations are independent (a slow FetchRelated for
 // room A MUST NOT suppress or delay a trigger for room B).
 //
-// All locking mirrors the global contract:
+// Authorization ownership (R09f):
+//   - GetConfig is open to any active member (read).
+//   - SetEnabled requires host/admin role (use-case enforced so it
+//     matches the roomqueue use-case pattern).
+//   - CheckAndTrigger has no per-action authorization — the trigger
+//     fires regardless of who holds the lease, mirroring the global
+//     auto-queue.
+//
+// Locking discipline:
 //   - The slow FetchRelated call is NEVER held under any lock.
-//   - The queue-owned conditional insertion takes the roomqueue
-//     mutex (via the AddRoomAutoQueueSongFunc seam). The seam takes
-//     care of the roomqueue mutex; this package never imports
-//     usecase/roomqueue.
-//   - The per-room in-flight flag is guarded by a coordinator mu.
-//   - AppendHistory, activity writes, and the broadcaster call run
-//     OUTSIDE both locks.
+//   - The post-fetch enabled recheck + AddRoomAutoQueueSong insertion
+//     run under the coordinator mu. This is the minimum critical
+//     section that serializes SetEnabled(false) with the
+//     "still-enabled?" check + insertion. GetConfig, queue snapshot
+//     loading, GetRecentHistory, FetchRelated, AppendHistory, and the
+//     broadcaster call all run OUTSIDE mu.
+//   - The per-room in-flight map is guarded only by the coordinator
+//     mu. Cross-room in-flight independence is preserved because
+//     mu is only held for the map check/set/clear and the
+//     recheck+insertion critical section.
 //   - Stale-candidate, repository-load-failure, and disable-mid-flight
 //     paths are serialized exactly as the global contract serializes
-//     them — and only with respect to OTHER triggers for the SAME room.
+//     them — and only with respect to OTHER triggers for the SAME
+//     room.
 //   - The per-room in-flight map is in-memory; on restart every
 //     room's in-flight state is empty. No cross-process safety claim
 //     is made; a future horizontal-scaling redesign would need a
@@ -35,6 +47,7 @@ import (
 	"local-music-queue/internal/domain"
 	"local-music-queue/internal/domain/entity"
 	"local-music-queue/internal/domain/repository"
+	"local-music-queue/internal/usecase/room"
 	"log"
 	"math/rand"
 	"sync"
@@ -62,10 +75,19 @@ type AddRoomAutoQueueSongResult struct {
 // usecase). Mirrors the global autoqueue.AddAutoQueueSongFunc seam.
 type AddRoomAutoQueueSongFunc func(ctx context.Context, slug string, song *entity.Song, expectedSourceSongID string) (*AddRoomAutoQueueSongResult, error)
 
-// BroadcastFunc is the seam into the per-room broadcaster. Avoids
-// an import cycle onto delivery/ws. The cmd/server adapter wires
-// this to the per-room WebSocket hub.
-type BroadcastFunc func(eventType string, payload interface{})
+// RoomAutoQueueBroadcaster is the typed narrow seam the wiring layer
+// implements to fan out the per-room auto-queue-added event. Keeping
+// it typed (rather than a generic map[string]interface{}) removes
+// ambiguity at the call site and matches the existing per-room
+// broadcaster methods (BroadcastRoomAutoQueueAdded).
+//
+// The "added" payload carries room_slug, song, source_song_title,
+// current_index, current_song, status, elapsed, and the authoritative
+// post-mutation queue state — the same fields the R09e contract
+// settled for the room_auto_queue_added envelope.
+type RoomAutoQueueBroadcaster interface {
+	BroadcastRoomAutoQueueAdded(roomSlug string, song entity.Song, sourceSongTitle string, currentIndex int, currentSong *entity.Song, status entity.PlaybackStatus, elapsed int, state *entity.Queue)
+}
 
 // ErrAutoQueueStale is the per-room analogue of
 // autoqueue.ErrAutoQueueStale. The AddRoomAutoQueueSongFunc seam
@@ -84,13 +106,22 @@ type Interactor struct {
 	autoQueueRepo     domain.RoomAutoQueueRepository
 	fetcher           domain.RelatedSongFetcher
 	addRoomAutoSongFn AddRoomAutoQueueSongFunc
-	broadcast         BroadcastFunc
+	broadcaster       RoomAutoQueueBroadcaster
 	queueSnapshotLoader queueSnapshotLoader
 
-	// mu serializes the per-room in-flight map (a slow FetchRelated
-	// for room A must not suppress or block a trigger for room B).
-	// The slow FetchRelated call is intentionally held OUTSIDE mu so
-	// the coordinator mutex never blocks on the yt-dlp I/O.
+	// mu serializes:
+	//   - the per-room inFlight map (set/clear at trigger boundaries)
+	//   - the post-fetch "still enabled?" recheck + the
+	//     AddRoomAutoQueueSong insertion (so SetEnabled(false)
+	//     cannot land between the final recheck and the queue
+	//     mutation).
+	//
+	// mu is NEVER held during GetConfig, queue snapshot loading,
+	// GetRecentHistory, FetchRelated, AppendHistory, or the
+	// broadcaster call. Cross-room in-flight independence is
+	// preserved because mu is held only for the per-room map
+	// check/set/clear and the final pre-insertion critical
+	// section.
 	mu       sync.Mutex
 	inFlight map[int64]bool // roomID -> in-flight flag
 }
@@ -113,33 +144,56 @@ func NewInteractor(roomRepo repository.RoomRepository, autoQueueRepo domain.Room
 // perform a candidate insertion (mirrors the global contract).
 func (i *Interactor) SetAddRoomAutoQueueSongFunc(fn AddRoomAutoQueueSongFunc) { i.addRoomAutoSongFn = fn }
 
-// SetBroadcastFunc wires the per-room broadcaster seam.
-func (i *Interactor) SetBroadcastFunc(fn BroadcastFunc) { i.broadcast = fn }
+// SetBroadcaster wires the typed narrow broadcaster seam.
+func (i *Interactor) SetBroadcaster(b RoomAutoQueueBroadcaster) { i.broadcaster = b }
 
-// GetConfig returns the per-room auto-queue config. Slug-validation
-// + active-room checks mirror the roomqueue package. Any active
-// member may read.
+// SetQueueSnapshotLoader wires the loader the interactor uses to
+// fetch the queue snapshot before fetcher + insertion. The
+// production wiring points this at roomqueue.Interactor.
+// GetStateByRoomID. nil is tolerated (returns "queue unavailable"
+// so the trigger can short-circuit before fetching).
+func (i *Interactor) SetQueueSnapshotLoader(fn queueSnapshotLoader) {
+	i.queueSnapshotLoader = fn
+}
+
+// GetConfig returns the per-room auto-queue config. Any active
+// member may read. Authorization (active-membership check) is
+// enforced inside the use case so the handler layer does not have
+// to duplicate it.
 func (i *Interactor) GetConfig(ctx context.Context, slug string, actorUserID int) (*domain.RoomAutoQueueConfig, error) {
 	roomObj, err := i.resolveRoom(ctx, slug)
 	if err != nil {
 		return nil, err
 	}
-	// Authorization: the handler layer enforces host/admin for
-	// toggles. GetConfig is open to any active member per the spec.
+	if err := i.requireMember(ctx, roomObj.ID, actorUserID); err != nil {
+		return nil, err
+	}
 	return i.autoQueueRepo.GetConfig(ctx, roomObj.ID)
 }
 
 // SetEnabled updates the per-room enabled flag. Host/admin only —
-// the handler layer enforces the role gate. Maps to
-// roomautoqueue.ErrAutoQueueStale on insertion, which this method
-// never sees (toggle only writes config; no queue mutation).
+// the use case enforces the role gate (matches the roomqueue
+// use-case pattern so the handler layer is thin). The method
+// holds the same coordinator mu that the post-fetch recheck + the
+// insertion hold, so a SetEnabled(false) cannot land between the
+// final "still enabled?" check and the queue mutation: the disable
+// either runs first (then the candidate is dropped on the
+// post-fetch recheck) or runs after the insertion completes.
+//
+// Config loading + saving happens OUTSIDE the critical section
+// (we hold mu only for the final SaveConfig write); a concurrent
+// slow repo read for room A never blocks the per-room B path.
+//
+// Maps to roomautoqueue.ErrAutoQueueStale on insertion, which this
+// method never sees (toggle only writes config; no queue mutation).
 func (i *Interactor) SetEnabled(ctx context.Context, slug string, actorUserID int, enabled bool) (*domain.RoomAutoQueueConfig, error) {
 	roomObj, err := i.resolveRoom(ctx, slug)
 	if err != nil {
 		return nil, err
 	}
-	// Load the current config (preserving the strategy field) and
-	// update only Enabled.
+	if err := i.requireHostOrAdmin(ctx, roomObj.ID, actorUserID); err != nil {
+		return nil, err
+	}
 	cfg, err := i.autoQueueRepo.GetConfig(ctx, roomObj.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get room auto-queue config: %w", err)
@@ -151,63 +205,17 @@ func (i *Interactor) SetEnabled(ctx context.Context, slug string, actorUserID in
 	return cfg, nil
 }
 
-// resolveRoom converts a slug to a *entity.Room under the same
-// rules roomqueue uses. Re-declared here to avoid the upward
-// dependency on usecase/roomqueue for slug validation.
-func (i *Interactor) resolveRoom(ctx context.Context, slug string) (*entity.Room, error) {
-	if !entity.IsValidSlug(slug) {
-		return nil, errInvalidSlug
-	}
-	r, err := i.roomRepo.GetRoomBySlug(ctx, slug)
-	if err != nil {
-		return nil, err
-	}
-	if r == nil {
-		return nil, errRoomNotFound
-	}
-	if r.Status != entity.RoomStatusActive {
-		return nil, errArchived
-	}
-	return r, nil
-}
-
-// errInvalidSlug / errArchived are intentionally local (not a
-// re-export from usecase/room) so the handler layer can map them
-// without taking a dependency on usecase/room. Mirrors the global
-// queue.AddAutoQueueSong sentinel shape.
-var (
-	errInvalidSlug  = errors.New("invalid room slug")
-	errArchived     = errors.New("room archived")
-	errRoomNotFound = errors.New("room not found")
-)
-
-// Errors returns the typed sentinels the handler layer needs to map
-// to HTTP statuses. Exposed here (rather than as package vars) so
-// callers don't accidentally treat them as the global queue's
-// sentinels.
-func (i *Interactor) Errors() (invalidSlug, archived, forbidden error) {
-	return errInvalidSlug, errArchived, errForbidden
-}
-
-// errForbidden is the local sentinel the handler layer maps to 403
-// when an active-member check fails (rare — the handler typically
-// resolves actor identity before calling GetConfig/SetEnabled, but
-// the seam allows for membership-resolved variants).
-var errForbidden = errors.New("room auto-queue action not permitted for this member")
-
 // CheckAndTrigger checks if per-room auto-queue should fire and
 // inserts a song if needed.
 //
 // Serialization contract (mirrors the global autoqueue contract):
-//   - Pre-fetch:
-//       1. mu is taken to check+set the per-room in-flight flag
+//
+//   - Pre-fetch (under mu):
+//       1. cfg = autoQueueRepo.GetConfig(roomID) (outside mu; see below)
+//       2. queue = queueSnapshotLoader(roomID) (outside mu; see below)
+//       3. mu is taken to check+set the per-room in-flight flag
 //          (returns nil if another trigger for THIS room is in
 //          flight — cross-room triggers are independent).
-//       2. cfg = autoQueueRepo.GetConfig(roomID)
-//       3. queue = queueRepo.Load(roomID)
-//       4. recentHistory = autoQueueRepo.GetRecentHistory(roomID, 20)
-//       5. exclude = history ∪ queue
-//       6. mu is released BEFORE the slow FetchRelated runs.
 //
 //   - FetchRelated: held outside any lock.
 //
@@ -227,12 +235,13 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context, slug string) error {
 	roomObj, err := i.resolveRoom(ctx, slug)
 	if err != nil {
 		// No room → nothing to trigger. Silent skip so the trigger
-		// goroutine never panics on a missing slub.
+		// goroutine never panics on a missing slug.
 		return nil
 	}
 	roomID := roomObj.ID
 
 	// Phase 1a: per-room in-flight guard under the coordinator mu.
+	// This is the only place mu guards the in-flight map.
 	i.mu.Lock()
 	if i.inFlight[roomID] {
 		i.mu.Unlock()
@@ -247,42 +256,35 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context, slug string) error {
 		i.mu.Unlock()
 	}()
 
-	// Phase 1b: pre-fetch revalidation under mu.
-	i.mu.Lock()
+	// Phase 1b: pre-fetch revalidation. GetConfig, queue snapshot
+	// loading, and GetRecentHistory all run OUTSIDE mu — a slow
+	// repo read or slow loader for room A MUST NOT block room B's
+	// trigger (mu is held only for the inFlight map ops above and
+	// the final post-fetch critical section below).
 	cfg, err := i.autoQueueRepo.GetConfig(ctx, roomID)
 	if err != nil {
-		i.mu.Unlock()
 		log.Printf("room auto-queue: failed to get config (%d): %v", roomID, err)
 		return fmt.Errorf("failed to get config: %w", err)
 	}
 	if !cfg.Enabled {
-		i.mu.Unlock()
 		log.Printf("room auto-queue: disabled, skipping trigger for room %d", roomID)
 		return nil
 	}
 
-	// Load the queue snapshot via the same path the roomqueue
-	// interactor uses; we re-load instead of threading the
-	// post-mutation queue through the trigger seam. This keeps the
-	// trigger independent of any in-flight roomqueue mutex holder.
 	queue, err := i.loadQueueSnapshot(ctx, roomID)
 	if err != nil {
-		i.mu.Unlock()
 		log.Printf("room auto-queue: failed to load queue (%d): %v", roomID, err)
 		return fmt.Errorf("failed to load queue: %w", err)
 	}
 	if len(queue.Songs) == 0 {
-		i.mu.Unlock()
 		log.Printf("room auto-queue: queue empty, skipping trigger for room %d", roomID)
 		return nil
 	}
 	if queue.CurrentIndex < 0 || queue.CurrentIndex >= len(queue.Songs) {
-		i.mu.Unlock()
 		log.Printf("room auto-queue: invalid current index %d for %d songs, skipping trigger for room %d", queue.CurrentIndex, len(queue.Songs), roomID)
 		return nil
 	}
 	if queue.CurrentIndex != len(queue.Songs)-1 {
-		i.mu.Unlock()
 		log.Printf("room auto-queue: current index %d is not last (%d), skipping trigger for room %d", queue.CurrentIndex, len(queue.Songs), roomID)
 		return nil
 	}
@@ -307,8 +309,6 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context, slug string) error {
 	for id := range excludeMap {
 		exclude = append(exclude, id)
 	}
-	i.mu.Unlock()
-	// End Phase 1: mu released before slow FetchRelated.
 
 	song, err := i.fetcher.FetchRelated(ctx, lastSong.ID, exclude)
 	if err != nil {
@@ -325,7 +325,10 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context, slug string) error {
 		return nil
 	}
 
-	// Phase 2: post-fetch revalidation + insertion under mu.
+	// Phase 2: post-fetch revalidation + insertion under mu. This is
+	// the minimum critical section needed to serialize SetEnabled
+	// with the post-fetch insert decision — same shape as the global
+	// autoqueue Sprint 004 contract.
 	if i.addRoomAutoSongFn == nil {
 		log.Printf("room auto-queue: insertion callback not configured, skipping for room %d", roomID)
 		return nil
@@ -370,13 +373,24 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context, slug string) error {
 		log.Printf("room auto-queue: failed to append room play history (%d): %v", roomID, err)
 	}
 
-	if i.broadcast != nil {
-		i.broadcast("room_auto_queue_added", map[string]interface{}{
-			"room_slug":         slug,
-			"song":              result.Queue.Songs[len(result.Queue.Songs)-1],
-			"source_song_title": lastSong.Title,
-			"state":             result.Queue,
-		})
+	if i.broadcaster != nil {
+		// The just-inserted song is the last element of the
+		// post-mutation queue. The roomqueue.AddRoomAutoQueueSong
+		// contract guarantees queue.Songs[len-1] is the candidate.
+		var added entity.Song
+		var currentSong *entity.Song
+		var currentIndex, elapsed int
+		var status entity.PlaybackStatus
+		var state *entity.Queue
+		if result != nil && result.Queue != nil && len(result.Queue.Songs) > 0 {
+			added = result.Queue.Songs[len(result.Queue.Songs)-1]
+			state = result.Queue
+			currentIndex = result.CurrentIndex
+			currentSong = result.CurrentSong
+			status = result.Status
+			elapsed = result.Elapsed
+		}
+		i.broadcaster.BroadcastRoomAutoQueueAdded(slug, added, lastSong.Title, currentIndex, currentSong, status, elapsed, state)
 	}
 
 	return nil
@@ -411,6 +425,63 @@ func (i *Interactor) fallbackFromHistory(ctx context.Context, roomID int64, excl
 	}
 }
 
+// resolveRoom converts a slug to a *entity.Room under the same
+// rules roomqueue uses. Re-declared here to avoid the upward
+// dependency on usecase/roomqueue for slug validation. Returns
+// the room.Err* sentinels so the handler layer can map them via
+// writeRoomQueueError without taking a dependency on
+// usecase/roomautoqueue sentinels (the room sentinels are the
+// canonical room-domain errors).
+func (i *Interactor) resolveRoom(ctx context.Context, slug string) (*entity.Room, error) {
+	if !entity.IsValidSlug(slug) {
+		return nil, room.ErrInvalidSlug
+	}
+	r, err := i.roomRepo.GetRoomBySlug(ctx, slug)
+	if err != nil {
+		return nil, room.ErrRoomNotFound
+	}
+	if r == nil {
+		return nil, room.ErrRoomNotFound
+	}
+	if r.Status != entity.RoomStatusActive {
+		return nil, room.ErrArchived
+	}
+	return r, nil
+}
+
+// requireMember returns nil when actorUserID is a member of the
+// room (any role). Non-members get room.ErrForbidden. Mirrors the
+// roomqueue.Interactor.requireMember shape so the package's
+// authorization surface matches its sibling use case.
+func (i *Interactor) requireMember(ctx context.Context, roomID int64, actorUserID int) error {
+	if actorUserID == 0 {
+		return room.ErrForbidden
+	}
+	if _, err := i.roomRepo.GetMember(ctx, roomID, actorUserID); err != nil {
+		return room.ErrForbidden
+	}
+	return nil
+}
+
+// requireHostOrAdmin returns nil when actorUserID holds the host or
+// admin role in the room. Guests and non-members get
+// room.ErrForbidden so the controller can't distinguish the two
+// via status code. Mirrors the roomqueue.Interactor permission
+// checks for privileged mutations.
+func (i *Interactor) requireHostOrAdmin(ctx context.Context, roomID int64, actorUserID int) error {
+	if actorUserID == 0 {
+		return room.ErrForbidden
+	}
+	member, err := i.roomRepo.GetMember(ctx, roomID, actorUserID)
+	if err != nil {
+		return room.ErrForbidden
+	}
+	if member.Role != entity.RoomRoleHost && member.Role != entity.RoomRoleAdmin {
+		return room.ErrForbidden
+	}
+	return nil
+}
+
 // loadQueueSnapshot loads the persisted room queue for a trigger.
 // The interactor does not hold the roomqueue mutex itself; the
 // post-fetch insertion takes the roomqueue mutex via the seam. We
@@ -423,10 +494,6 @@ func (i *Interactor) fallbackFromHistory(ctx context.Context, roomID int64, excl
 // production wiring points this at roomqueue.Interactor.
 // GetStateByRoomID. nil is tolerated (returns "queue unavailable"
 // so the trigger can short-circuit before fetching).
-func (i *Interactor) SetQueueSnapshotLoader(fn queueSnapshotLoader) {
-	i.queueSnapshotLoader = fn
-}
-
 func (i *Interactor) loadQueueSnapshot(ctx context.Context, roomID int64) (*entity.Queue, error) {
 	if i.queueSnapshotLoader == nil {
 		return nil, errors.New("room auto-queue: queue snapshot loader not wired")
@@ -434,6 +501,12 @@ func (i *Interactor) loadQueueSnapshot(ctx context.Context, roomID int64) (*enti
 	return i.queueSnapshotLoader(ctx, roomID)
 }
 
+// errInvalidSlug / errArchived / errRoomNotFound are intentionally
+// REMOVED — the use case returns room.ErrInvalidSlug /
+// room.ErrRoomNotFound / room.ErrArchived directly so the handler
+// layer's writeRoomQueueError can map them via the canonical
+// room-domain sentinels without taking a dependency on
+// usecase/roomautoqueue package-level errors.
 var (
 	_ = sync.Mutex{}
 	_ queueSnapshotLoader

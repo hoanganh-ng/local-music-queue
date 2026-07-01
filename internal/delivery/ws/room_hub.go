@@ -461,15 +461,22 @@ func (h *RoomWSHub) BroadcastRoomPlaybackSongPrevious(roomSlug string, previousI
 // auto-add) or SetEnabled (room auto-config-changed).
 
 // BroadcastRoomAutoQueueAdded emits room_auto_queue_added. The
-// payload carries the auto-added song, its source song title, and
-// the post-mutation queue state. Stale candidates never reach this
-// call site — the roomautoqueue use case only invokes the seam on a
-// successful insertion.
-func (h *RoomWSHub) BroadcastRoomAutoQueueAdded(roomSlug string, song entity.Song, sourceSongTitle string, state *entity.Queue) {
+// payload carries the auto-added song, its source song title, the
+// authoritative post-mutation snapshot (current_index, current_song,
+// status, elapsed — captured by the roomautoqueue use case from the
+// roomqueue.AddRoomAutoQueueSong return tuple), and the full queue
+// state. Stale candidates never reach this call site — the
+// roomautoqueue use case only invokes the seam on a successful
+// insertion.
+func (h *RoomWSHub) BroadcastRoomAutoQueueAdded(roomSlug string, song entity.Song, sourceSongTitle string, currentIndex int, currentSong *entity.Song, status entity.PlaybackStatus, elapsed int, state *entity.Queue) {
 	h.dispatch(roomSlug, EventRoomAutoQueueAdded, RoomAutoQueueAddedData{
 		RoomSlug:        roomSlug,
 		Song:            song,
 		SourceSongTitle: sourceSongTitle,
+		CurrentIndex:    currentIndex,
+		CurrentSong:     currentSong,
+		Status:          status,
+		Elapsed:         elapsed,
 		State:           state,
 	})
 }

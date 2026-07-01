@@ -73,6 +73,14 @@ func newPostgresDB(t *testing.T) *sql.DB {
 		t.Fatalf("reopen with search_path: %v", err)
 	}
 	_ = db.Close()
+	// Cap per-test pool so concurrent tests do not exhaust PG
+	// `max_connections` (mirrors the limit applied in
+	// room_test_db.NewRoomTestDB). Set high enough that the
+	// golang-migrate driver can hold a dedicated `sql.Conn` plus run
+	// concurrent Ping/Query calls without deadlocking under the
+	// per-test pool.
+	scoped.SetMaxOpenConns(8)
+	scoped.SetMaxIdleConns(2)
 
 	t.Cleanup(func() {
 		drop, err := sql.Open("pgx", dsn)

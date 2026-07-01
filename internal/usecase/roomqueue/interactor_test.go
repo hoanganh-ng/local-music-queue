@@ -401,7 +401,7 @@ func (r *recordingBroadcaster) BroadcastRoomPlaybackVolumeChanged(_ string, _ st
 	r.volumeN++
 }
 func (r *recordingBroadcaster) BroadcastRoomPlaybackSongPrevious(_ string, _, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {}
-func (r *recordingBroadcaster) BroadcastRoomAutoQueueAdded(_ string, _ entity.Song, _ string, _ *entity.Queue) {
+func (r *recordingBroadcaster) BroadcastRoomAutoQueueAdded(_ string, _ entity.Song, _ string, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.autoQueueAddedN++

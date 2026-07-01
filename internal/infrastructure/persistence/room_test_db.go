@@ -43,6 +43,15 @@ func NewRoomTestDB(t *testing.T) (*sql.DB, func()) {
 	if err != nil {
 		t.Fatalf("open postgres: %v", err)
 	}
+	// Cap each per-test pool so a parallel run of many http test cases
+	// (each opens its own scoped DB) does not exhaust the PG
+	// `max_connections` server limit and surface as "FATAL: sorry, too
+	// many clients already (SQLSTATE 53300)". Set high enough that the
+	// golang-migrate driver can hold a dedicated `sql.Conn` (via
+	// `instance.Conn`) plus run concurrent Ping/Query calls without
+	// deadlocking under the per-test pool.
+	scoped.SetMaxOpenConns(8)
+	scoped.SetMaxIdleConns(2)
 	openCtx, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
 	if err := scoped.PingContext(openCtx); err != nil {

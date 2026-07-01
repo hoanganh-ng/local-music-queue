@@ -167,7 +167,7 @@ type Broadcaster interface {
 	// for toggle also invokes BroadcastRoomAutoQueueConfigChanged
 	// after a successful SetEnabled so the per-room WebSocket
 	// subscribers observe the new config without a follow-up fetch.
-	BroadcastRoomAutoQueueAdded(roomSlug string, song entity.Song, sourceSongTitle string, state *entity.Queue)
+	BroadcastRoomAutoQueueAdded(roomSlug string, song entity.Song, sourceSongTitle string, currentIndex int, currentSong *entity.Song, status entity.PlaybackStatus, elapsed int, state *entity.Queue)
 	BroadcastRoomAutoQueueConfigChanged(roomSlug string, enabled bool, strategy string)
 }
 

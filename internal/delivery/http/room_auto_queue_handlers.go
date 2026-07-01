@@ -1,15 +1,12 @@
 package http
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 
 	"local-music-queue/internal/domain"
-	"local-music-queue/internal/domain/entity"
-	"local-music-queue/internal/domain/repository"
 	"local-music-queue/internal/usecase/auth"
 	"local-music-queue/internal/usecase/room"
 	"local-music-queue/internal/usecase/roomautoqueue"
@@ -19,7 +16,7 @@ import (
 // RoomAutoQueueHandlers wires the room-scoped auto-queue REST
 // endpoints added in R09f. The handlers are intentionally thin so
 // the use case (usecase/roomautoqueue) owns the per-room scope +
-// concurrency model.
+// concurrency model + authorization.
 //
 // Two endpoints are exposed:
 //   - GET  /api/rooms/{slug}/autoqueue/status  (any active member)
@@ -29,20 +26,24 @@ import (
 // identity is server-resolved from the bearer token) and broadcast
 // via the roomqueue.Broadcaster seam — never on the global /ws
 // endpoint, which is unchanged.
+//
+// Authorization ownership: the use case enforces host/admin for
+// toggle and active-membership for read; the handler layer does not
+// duplicate role checks. The auth interactor remains a constructor
+// parameter so future authz extensions (e.g. role hints) can wire
+// through without a constructor churn.
 type RoomAutoQueueHandlers struct {
-	inter          *roomautoqueue.Interactor
-	roomRepo       repository.RoomRepository
-	auth           *auth.Interactor
-	broadcaster    roomqueue.Broadcaster
+	inter       *roomautoqueue.Interactor
+	auth        *auth.Interactor
+	broadcaster roomqueue.Broadcaster
 }
 
 // NewRoomAutoQueueHandlers constructs the handlers. broadcaster is
 // used only by the toggle handler (after a successful SetEnabled it
 // fires room_auto_queue_config_changed).
-func NewRoomAutoQueueHandlers(inter *roomautoqueue.Interactor, roomRepo repository.RoomRepository, a *auth.Interactor, broadcaster roomqueue.Broadcaster) *RoomAutoQueueHandlers {
+func NewRoomAutoQueueHandlers(inter *roomautoqueue.Interactor, a *auth.Interactor, broadcaster roomqueue.Broadcaster) *RoomAutoQueueHandlers {
 	return &RoomAutoQueueHandlers{
 		inter:       inter,
-		roomRepo:    roomRepo,
 		auth:        a,
 		broadcaster: broadcaster,
 	}
@@ -57,10 +58,10 @@ type roomAutoQueueToggleReq struct {
 
 // HandleGetRoomAutoQueueStatus: GET /api/rooms/{slug}/autoqueue/status
 // — returns {"enabled": bool, "strategy": "related"} for the room.
-// Any active member may read (roomAuth-resolved membership check
-// happens at the use-case layer via the room repository).
+// Any active member may read; the use case enforces the membership
+// check via requireMember.
 //
-// Status mapping:
+// Status mapping (delegated to the use case):
 //   - 200 OK with the config
 //   - 401 Unauthorized on missing actor (defense-in-depth)
 //   - 403 Forbidden for non-members
@@ -69,10 +70,6 @@ type roomAutoQueueToggleReq struct {
 func (h *RoomAutoQueueHandlers) HandleGetRoomAutoQueueStatus(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
 	if actorUserID == 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if err := h.requireMember(r.Context(), slug, actorUserID); err != nil {
-		writeRoomQueueError(w, err)
 		return
 	}
 	cfg, err := h.inter.GetConfig(r.Context(), slug, actorUserID)
@@ -94,10 +91,16 @@ func (h *RoomAutoQueueHandlers) HandleGetRoomAutoQueueStatus(w http.ResponseWrit
 // 400; only true/false is accepted. Returns 200 with the new config
 // on success and broadcasts room_auto_queue_config_changed.
 //
-// Status mapping:
+// The host/admin role check is enforced INSIDE the use case
+// (roomautoqueue.Interactor.SetEnabled), matching the roomqueue
+// use-case pattern where authorization is owned at the use-case
+// boundary. The handler is intentionally thin: it decodes the body,
+// invokes SetEnabled, and broadcasts the config change.
+//
+// Status mapping (delegated to the use case):
 //   - 200 OK with the new config on success
 //   - 400 Bad Request on missing/invalid body shape
-//   - 401 Unauthorized on missing actor
+//   - 401 Unauthorized on missing actor (defense-in-depth)
 //   - 403 Forbidden for guests / non-privileged members
 //   - 404 Not Found when the room does not exist
 //   - 409 Conflict when the room is archived
@@ -118,16 +121,8 @@ func (h *RoomAutoQueueHandlers) HandleRoomAutoQueueToggle(w http.ResponseWriter,
 		return
 	}
 
-	// Role gate: only host/admin may toggle. The handler-layer role
-	// check is defensive; the use case rejects non-host/admin in
-	// SetEnabled via the persisted role row.
-	if actorUserID > 0 {
-		if err := h.requireHostOrAdmin(r.Context(), slug, actorUserID); err != nil {
-			writeRoomQueueError(w, err)
-			return
-		}
-	}
-
+	// Use case enforces host/admin role + active-room + room-not-found
+	// + active-status checks; handler is a thin transport.
 	cfg, err := h.inter.SetEnabled(r.Context(), slug, actorUserID, *req.Enabled)
 	if err != nil {
 		writeRoomQueueError(w, err)
@@ -144,53 +139,6 @@ func (h *RoomAutoQueueHandlers) HandleRoomAutoQueueToggle(w http.ResponseWriter,
 		Enabled:  cfg.Enabled,
 		Strategy: string(cfg.Strategy),
 	})
-}
-
-// requireMember rejects non-members. Mirrors the roomqueue.Interactor.
-// requireMember check; the handler layer preserves the existing 403
-// shape so non-roommembers never observe the per-room config.
-func (h *RoomAutoQueueHandlers) requireMember(ctx context.Context, slug string, actorUserID int) error {
-	if !entity.IsValidSlug(slug) {
-		return room.ErrInvalidSlug
-	}
-	roomObj, err := h.roomRepo.GetRoomBySlug(ctx, slug)
-	if err != nil {
-		return room.ErrRoomNotFound
-	}
-	if roomObj.Status != entity.RoomStatusActive {
-		return room.ErrArchived
-	}
-	if _, err := h.roomRepo.GetMember(ctx, roomObj.ID, actorUserID); err != nil {
-		return room.ErrForbidden
-	}
-	return nil
-}
-
-// requireHostOrAdmin rejects non-host/admin members. Reads the
-// actor's room-member role via the same helper the queue handlers
-// use to keep the role check aligned with roomqueue's membership
-// model. Guests get ErrForbidden; missing members also get
-// ErrForbidden so the controller can't distinguish the two via
-// status code.
-func (h *RoomAutoQueueHandlers) requireHostOrAdmin(ctx context.Context, slug string, actorUserID int) error {
-	if !entity.IsValidSlug(slug) {
-		return room.ErrInvalidSlug
-	}
-	roomObj, err := h.roomRepo.GetRoomBySlug(ctx, slug)
-	if err != nil {
-		return room.ErrRoomNotFound
-	}
-	if roomObj.Status != entity.RoomStatusActive {
-		return room.ErrArchived
-	}
-	member, err := h.roomRepo.GetMember(ctx, roomObj.ID, actorUserID)
-	if err != nil {
-		return room.ErrForbidden
-	}
-	if member.Role != entity.RoomRoleHost && member.Role != entity.RoomRoleAdmin {
-		return room.ErrForbidden
-	}
-	return nil
 }
 
 // roomAutoQueueStatusPayload is the response shape for both the

@@ -428,15 +428,21 @@ type RoomPlaybackSongPreviousData struct {
 // RoomAutoQueueAddedData is broadcast after a successful per-room
 // auto-queue insertion. R09f addition; rides /ws/rooms/{slug} only.
 // The payload carries the auto-added song, the source song's title,
-// and the authoritative post-mutation queue state so clients do not
-// need a follow-up sync. The 16-event global /ws inventory is
-// unchanged — the global auto_queue_added event continues to live
-// solely on the global /ws endpoint and is never reused here.
+// the authoritative post-mutation snapshot (current_index,
+// current_song, status, elapsed), and the full queue state so
+// clients do not need a follow-up sync. The 16-event global /ws
+// inventory is unchanged — the global auto_queue_added event
+// continues to live solely on the global /ws endpoint and is never
+// reused here.
 type RoomAutoQueueAddedData struct {
-	RoomSlug        string        `json:"room_slug"`
-	Song            entity.Song   `json:"song"`
-	SourceSongTitle string        `json:"source_song_title"`
-	State           *entity.Queue `json:"state"`
+	RoomSlug        string                `json:"room_slug"`
+	Song            entity.Song           `json:"song"`
+	SourceSongTitle string                `json:"source_song_title"`
+	CurrentIndex    int                   `json:"current_index"`
+	CurrentSong     *entity.Song          `json:"current_song"`
+	Status          entity.PlaybackStatus `json:"status"`
+	Elapsed         int                   `json:"elapsed"`
+	State           *entity.Queue         `json:"state"`
 }
 
 // RoomAutoQueueConfigChangedData is broadcast after a successful

@@ -1425,7 +1425,7 @@ func TestRoomHub_BroadcastRoomAutoQueueAdded_DeliversEnvelopeAndSeq(t *testing.T
 	}
 	hub.BroadcastRoomAutoQueueAdded("r09f-add", entity.Song{
 		ID: "auto", Title: "AutoSong", AddedBy: entity.SystemUserID, AddedByID: 0,
-	}, "Cur", state)
+	}, "Cur", 0, &entity.Song{ID: "cur", Title: "Cur"}, entity.StatusPlaying, 0, state)
 
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, data, err := conn.ReadMessage()
@@ -1454,6 +1454,18 @@ func TestRoomHub_BroadcastRoomAutoQueueAdded_DeliversEnvelopeAndSeq(t *testing.T
 	}
 	if env.Data.SourceSongTitle != "Cur" {
 		t.Errorf("expected source_song_title=Cur, got %q", env.Data.SourceSongTitle)
+	}
+	if env.Data.CurrentIndex != 0 {
+		t.Errorf("expected current_index=0, got %d", env.Data.CurrentIndex)
+	}
+	if env.Data.CurrentSong == nil || env.Data.CurrentSong.ID != "cur" {
+		t.Errorf("expected current_song.id=cur, got %+v", env.Data.CurrentSong)
+	}
+	if env.Data.Status != entity.StatusPlaying {
+		t.Errorf("expected status=playing, got %q", env.Data.Status)
+	}
+	if env.Data.Elapsed != 0 {
+		t.Errorf("expected elapsed=0, got %d", env.Data.Elapsed)
 	}
 	if env.Data.State == nil || len(env.Data.State.Songs) != 2 {
 		t.Errorf("expected post-mutation state with 2 songs, got %+v", env.Data.State)
@@ -1554,7 +1566,7 @@ func TestRoomHub_BroadcastRoomAutoQueueAdded_DoesNotLeakToGlobal(t *testing.T) {
 	}
 
 	state := &entity.Queue{Songs: []entity.Song{{ID: "auto", Title: "Auto", AddedBy: entity.SystemUserID}}}
-	hub.BroadcastRoomAutoQueueAdded("r09f-iso-a", entity.Song{ID: "auto", Title: "Auto", AddedBy: entity.SystemUserID}, "src", state)
+	hub.BroadcastRoomAutoQueueAdded("r09f-iso-a", entity.Song{ID: "auto", Title: "Auto", AddedBy: entity.SystemUserID}, "src", 0, &entity.Song{ID: "auto", Title: "Auto", AddedBy: entity.SystemUserID}, entity.StatusPlaying, 0, state)
 
 	cA.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, _, err := cA.ReadMessage(); err != nil {

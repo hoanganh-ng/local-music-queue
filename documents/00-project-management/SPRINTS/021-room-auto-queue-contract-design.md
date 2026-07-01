@@ -330,7 +330,7 @@ R09e is a documentation-only planning/design sprint. R09e shapes the contract fo
 
 ## Implementation summary (R09f)
 
-R09f is the backend-only runtime implementation slice that conforms to the R09e contract. Closed and accepted by the Product Owner on 2026-07-01 (immediately after R09e). R09f lands:
+R09f is the backend-only runtime implementation slice that conforms to the R09e contract. Implemented on `dev` on 2026-07-01 (immediately after R09e). Product Owner acceptance is PENDING review — the slice has not been claimed as accepted on `dev`. R09f lands:
 
 - **Migration 0007_room_auto_queue:** adds `room_auto_queue_config (room_id PK + enabled + strategy + updated_at)` and `room_play_history (id + room_id + video_id + title + played_at)` plus the per-room 50-row cap enforcement. Default config is `(enabled=false, strategy='related')` (mirrors the global auto_queue_config shape).
 - **Per-room persistence (`internal/domain/room_auto_queue.go`):** adds `RoomAutoQueueConfig`, `RoomPlayHistoryEntry`, and `RoomAutoQueueRepository` (GetConfig default-disabled + SaveConfig + AppendHistory + GetRecentHistory). Implementation: `internal/infrastructure/persistence/postgres_room_auto_queue_repository.go`.

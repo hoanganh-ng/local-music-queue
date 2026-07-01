@@ -281,25 +281,15 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 			Queue: q, CurrentIndex: ci, CurrentSong: cs, Status: st, Elapsed: el,
 		}, nil
 	})
-	// Broadcast adapter: the roomautoqueue use case uses a generic
-	// BroadcastFunc; the per-room hub speaks the roomqueue.Broadcaster
-	// interface. Wrap the hub so the adapter can call the explicit
-	// BroadcastRoomAutoQueueAdded signature.
-	roomAutoQueueInteractor.SetBroadcastFunc(func(eventType string, _ interface{}) {
-		// The seam passes a map[string]interface{}; the R09f
-		// implementation only cares about eventType (one event
-		// today). Handlers invoke BroadcastRoomAutoQueueAdded
-		// directly with concrete types for richer payloads —
-		// this adapter is only for the trigger path that the
-		// roomautoqueue interactor owns end-to-end. The richer
-		// payload fields (room_slug, song, state) are reconstructed
-		// by the roomqueue.AddRoomAutoQueueSong return tuple —
-		// but the use case only forwards a generic map today for
-		// simplicity; the trigger-time details reach the WS
-		// hub through the roomqueue.interactor's broadcaster
-		// directly. Reserved for future per-room event variants.
-		_ = eventType
-	})
+	// Broadcast adapter: the roomautoqueue use case exposes a typed
+	// narrow broadcaster seam (RoomAutoQueueBroadcaster) — the per-room
+	// hub satisfies it directly via its BroadcastRoomAutoQueueAdded
+	// method, so no wrapping is needed. The adapter passes the full
+	// (room_slug, song, source_song_title, current_index, current_song,
+	// status, elapsed, state) tuple returned by roomqueue.AddRoomAutoQueueSong
+	// to the hub, which builds the canonical RoomAutoQueueAddedData
+	// envelope inside dispatch().
+	roomAutoQueueInteractor.SetBroadcaster(roomWSHub)
 	// Hand the roomautoqueue use case to the roomqueue interactor so
 	// successful mutations that leave current==last fire it as a
 	// non-blocking goroutine. Nil-safe: the trigger short-circuits
@@ -514,7 +504,7 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	// host/admin role inside its own layer. The R09f broadcasts
 	// ride /ws/rooms/{slug} only; the global /ws 16-event
 	// inventory is unchanged.
-	roomAutoQueueHandlers := delivery.NewRoomAutoQueueHandlers(roomAutoQueueInteractor, pgRoom, authInteractor, roomWSHub)
+	roomAutoQueueHandlers := delivery.NewRoomAutoQueueHandlers(roomAutoQueueInteractor, authInteractor, roomWSHub)
 	mux.HandleFunc("GET /api/rooms/{slug}/autoqueue/status", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomAutoQueueHandlers.HandleGetRoomAutoQueueStatus(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))

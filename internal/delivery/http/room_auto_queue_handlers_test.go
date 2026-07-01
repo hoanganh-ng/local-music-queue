@@ -64,7 +64,7 @@ func pgRoomAutoQueueHandlers(t *testing.T) (*RoomAutoQueueHandlers, *sql.DB, *pe
 		}, nil
 	})
 	bc := &recordingRoomBroadcaster{}
-	rq := NewRoomAutoQueueHandlers(inter, roomRepo, authI, bc)
+	rq := NewRoomAutoQueueHandlers(inter, authI, bc)
 	return rq, db, roomAQRepo, cleanup
 }
 

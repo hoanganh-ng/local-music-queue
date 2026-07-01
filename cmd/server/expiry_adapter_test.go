@@ -84,7 +84,7 @@ func (*expiryTestHub) BroadcastRoomPlaybackSongAdvanced(_ string, _ string, _, _
 func (*expiryTestHub) BroadcastRoomVoteUpdated(_ string, _ *entity.VoteSession, _ int, _ *entity.Queue) {}
 func (*expiryTestHub) BroadcastRoomPlaybackVolumeChanged(_ string, _ string)                          {}
 func (*expiryTestHub) BroadcastRoomPlaybackSongPrevious(_ string, _, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {}
-func (*expiryTestHub) BroadcastRoomAutoQueueAdded(_ string, _ entity.Song, _ string, _ *entity.Queue)    {}
+func (*expiryTestHub) BroadcastRoomAutoQueueAdded(_ string, _ entity.Song, _ string, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue)    {}
 func (*expiryTestHub) BroadcastRoomAutoQueueConfigChanged(_ string, _ bool, _ string)       {}
 
 var (
