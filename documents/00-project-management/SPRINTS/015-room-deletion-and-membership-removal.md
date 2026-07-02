@@ -447,4 +447,8 @@ The server closes the removed client's per-room WebSocket connections with **clo
 
 ### Verification results
 
-[filled in Task 11]
+- `go test -count=1 ./internal/usecase/room/... ./internal/delivery/http/... ./internal/delivery/ws/... ./internal/infrastructure/persistence/... ./cmd/server/...` — all PASS (room 5.995s, http 38.159s, ws 4.988s, persistence 6.499s, cmd/server 1.588s).
+- `go test -race -count=1 ./internal/usecase/room/... ./internal/delivery/ws/... ./internal/infrastructure/persistence/...` — all PASS (room 7.740s, ws 6.018s, persistence 8.584s).
+- `go vet ./internal/... ./cmd/...` — clean (exit 0).
+- `git diff --check` — clean (exit 0).
+- 12 commits on `dev` from baseline `ad7a9e4`; `git log ad7a9e4..HEAD --oneline` lists the runtime + test + doc commits.
