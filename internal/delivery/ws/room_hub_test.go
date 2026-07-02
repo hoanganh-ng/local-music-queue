@@ -1577,3 +1577,306 @@ func TestRoomHub_BroadcastRoomAutoQueueAdded_DoesNotLeakToGlobal(t *testing.T) {
 		t.Error("b unexpectedly received auto-queue broadcast for room a")
 	}
 }
+
+// --- R10b archive / member-removal broadcasts ---
+//
+// The four tests below pin the WS-side contracts for the R10b room
+// deletion / member removal backend runtime:
+//
+//   - room_archived fan-out to every client connected to the room
+//     (reason = "host_archived", archived_at carried in the payload).
+//   - room_member_removed is TARGETED: only the removed user's
+//     connections receive it; the per-room fan-out path is reserved
+//     for room_members_changed.
+//   - room_members_changed fans out to the REMAINING clients; the
+//     excluded user does not receive it (their connections are about
+//     to be closed).
+//   - CloseRemovedClient closes the removed user's connections with
+//     code 1008 (policy violation) and unregisters them from the
+//     hub's client set.
+//
+// Mirrors the R09f auto-queue broadcast envelope tests for sequencing
+// and drain discipline.
+
+// TestRoomHub_BroadcastRoomArchived_PerRoomEnvelope pins the per-room
+// room_archived envelope + reason "host_archived" + hub-loop seq
+// invariant. R10b addition.
+func TestRoomHub_BroadcastRoomArchived_PerRoomEnvelope(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("r10b-archive", &entity.Room{ID: 101, Slug: "r10b-archive", Status: entity.RoomStatusActive})
+	resolver.SetQueue(101, &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "S1"}}})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{"valid": {ID: 1, Role: entity.RoleHost, DisplayName: "H"}},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	conn := dialRoomWS(t, server, "r10b-archive", "valid")
+	defer conn.Close()
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, syncData, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read initial sync: %v", err)
+	}
+	var syncEnv struct {
+		Type   string `json:"type"`
+		SeqNum int64  `json:"seq_num"`
+	}
+	json.Unmarshal(syncData, &syncEnv)
+
+	now := time.Now()
+	hub.BroadcastRoomArchived("r10b-archive", "host_archived", now)
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read archive broadcast: %v", err)
+	}
+	var env struct {
+		Type   string           `json:"type"`
+		SeqNum int64            `json:"seq_num"`
+		Data   RoomArchivedData `json:"data"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal archive: %v", err)
+	}
+	if env.Type != EventRoomArchived {
+		t.Errorf("expected type %q, got %q", EventRoomArchived, env.Type)
+	}
+	if env.SeqNum <= syncEnv.SeqNum {
+		t.Errorf("archive seq (%d) must be strictly greater than sync seq (%d)", env.SeqNum, syncEnv.SeqNum)
+	}
+	if env.Data.Reason != "host_archived" {
+		t.Errorf("expected reason=host_archived, got %q", env.Data.Reason)
+	}
+	if !env.Data.ArchivedAt.Equal(now) {
+		t.Errorf("expected archived_at=%v, got %v", now, env.Data.ArchivedAt)
+	}
+}
+
+// TestRoomHub_BroadcastRoomMemberRemoved_TargetedDelivery pins that
+// the targeted room_member_removed envelope reaches ONLY the target
+// user's per-room WS connections (other clients in the same room
+// do not receive it; the per-room fan-out path is reserved for
+// room_members_changed).
+func TestRoomHub_BroadcastRoomMemberRemoved_TargetedDelivery(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("r10b-rm", &entity.Room{ID: 102, Slug: "r10b-rm", Status: entity.RoomStatusActive})
+	resolver.SetQueue(102, &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "S1"}}})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{
+			"u1": {ID: 1, Role: entity.RoleHost, DisplayName: "U1"},
+			"u2": {ID: 2, Role: entity.RoleGuest, DisplayName: "U2"},
+		},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	c1 := dialRoomWS(t, server, "r10b-rm", "u1")
+	defer c1.Close()
+	c2 := dialRoomWS(t, server, "r10b-rm", "u2")
+	defer c2.Close()
+
+	// Drain initial sync.
+	for _, c := range []*websocket.Conn{c1, c2} {
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, _, err := c.ReadMessage(); err != nil {
+			t.Fatalf("drain: %v", err)
+		}
+	}
+
+	hub.BroadcastRoomMemberRemoved("r10b-rm", 2 /*targetUserID*/, "host_removed")
+
+	// Only c2 (user 2) should receive the targeted envelope.
+	c2.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := c2.ReadMessage()
+	if err != nil {
+		t.Fatalf("c2 read targeted: %v", err)
+	}
+	var env struct {
+		Type string                `json:"type"`
+		Data RoomMemberRemovedData `json:"data"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Type != EventRoomMemberRemoved {
+		t.Errorf("expected type %q, got %q", EventRoomMemberRemoved, env.Type)
+	}
+	if env.Data.RoomSlug != "r10b-rm" || env.Data.UserID != 2 || env.Data.Reason != "host_removed" {
+		t.Errorf("unexpected targeted payload: %+v", env.Data)
+	}
+
+	// c1 must NOT receive the targeted envelope.
+	c1.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, _, err := c1.ReadMessage(); err == nil {
+		t.Errorf("c1 unexpectedly received the targeted envelope")
+	}
+}
+
+// TestRoomHub_BroadcastRoomMembersChanged_FanOutRemaining pins that
+// the room_members_changed envelope reaches remaining clients of the
+// room (the excluded user — the one being removed — does not receive
+// it because their connections are about to be closed).
+func TestRoomHub_BroadcastRoomMembersChanged_FanOutRemaining(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("r10b-changed", &entity.Room{ID: 103, Slug: "r10b-changed", Status: entity.RoomStatusActive})
+	resolver.SetQueue(103, &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "S1"}}})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{
+			"u1": {ID: 1, Role: entity.RoleHost, DisplayName: "U1"},
+			"u2": {ID: 2, Role: entity.RoleGuest, DisplayName: "U2"},
+		},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	c1 := dialRoomWS(t, server, "r10b-changed", "u1")
+	defer c1.Close()
+	c2 := dialRoomWS(t, server, "r10b-changed", "u2")
+	defer c2.Close()
+
+	// Drain initial sync.
+	for _, c := range []*websocket.Conn{c1, c2} {
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, _, err := c.ReadMessage(); err != nil {
+			t.Fatalf("drain: %v", err)
+		}
+	}
+
+	members := []entity.RoomMember{
+		{RoomID: 103, UserID: 1, Role: entity.RoomRoleHost},
+	}
+	hub.BroadcastRoomMembersChanged("r10b-changed", members, 2 /*excludeUserID*/)
+
+	// c1 receives the envelope.
+	c1.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := c1.ReadMessage()
+	if err != nil {
+		t.Fatalf("c1 read members-changed: %v", err)
+	}
+	var env struct {
+		Type string                 `json:"type"`
+		Data RoomMembersChangedData `json:"data"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Type != EventRoomMembersChanged {
+		t.Errorf("expected type %q, got %q", EventRoomMembersChanged, env.Type)
+	}
+	if env.Data.RoomSlug != "r10b-changed" {
+		t.Errorf("expected room_slug=r10b-changed, got %q", env.Data.RoomSlug)
+	}
+	if len(env.Data.Members) != 1 || env.Data.Members[0].UserID != 1 || env.Data.Members[0].Role != entity.RoomRoleHost {
+		t.Errorf("expected one host member, got %+v", env.Data.Members)
+	}
+
+	// c2 (the removed user) must NOT receive this envelope.
+	c2.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, _, err := c2.ReadMessage(); err == nil {
+		t.Errorf("c2 unexpectedly received the remaining-clients envelope")
+	}
+}
+
+// TestRoomHub_CloseRemovedClient_SendsCode1008 pins the close-frame
+// contract: the removed user's per-room WS connection is closed with
+// code 1008 (policy violation) AFTER the targeted room_member_removed
+// envelope has been sent. The hub removes the client from the
+// room's client set so subsequent broadcasts do not include it.
+func TestRoomHub_CloseRemovedClient_SendsCode1008(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("r10b-close", &entity.Room{ID: 104, Slug: "r10b-close", Status: entity.RoomStatusActive})
+	resolver.SetQueue(104, &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "S1"}}})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{
+			"u1": {ID: 1, Role: entity.RoleHost, DisplayName: "U1"},
+			"u2": {ID: 2, Role: entity.RoleGuest, DisplayName: "U2"},
+		},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	c1 := dialRoomWS(t, server, "r10b-close", "u1")
+	defer c1.Close()
+	c2 := dialRoomWS(t, server, "r10b-close", "u2")
+	// c2 will be closed by the test — do NOT defer c2.Close().
+
+	// Drain initial sync.
+	for _, c := range []*websocket.Conn{c1, c2} {
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, _, err := c.ReadMessage(); err != nil {
+			t.Fatalf("drain: %v", err)
+		}
+	}
+
+	// Send targeted envelope first, then close.
+	hub.BroadcastRoomMemberRemoved("r10b-close", 2, "host_removed")
+	// c2 reads the targeted frame.
+	c2.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := c2.ReadMessage(); err != nil {
+		t.Fatalf("c2 read targeted: %v", err)
+	}
+
+	// Close the removed user's connection.
+	hub.CloseRemovedClient("r10b-close", 2)
+
+	// Verify the hub removed the client from the room's client set.
+	if !waitFor(t, 2*time.Second, func() bool {
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		m, ok := hub.clients["r10b-close"]
+		if !ok {
+			return true
+		}
+		for _, cs := range m {
+			if cs != nil && cs.userID == 2 {
+				return false
+			}
+		}
+		return true
+	}) {
+		t.Fatalf("expected hub to unregister removed client, still present")
+	}
+
+	// c2 should observe the close frame. ReadMessage returns
+	// *websocket.CloseError with code 1008.
+	c2.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err := c2.ReadMessage()
+	if cerr, ok := err.(*websocket.CloseError); !ok || cerr.Code != websocket.ClosePolicyViolation {
+		t.Fatalf("expected close code %d, got err=%v", websocket.ClosePolicyViolation, err)
+	}
+}
