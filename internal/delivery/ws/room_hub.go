@@ -112,9 +112,10 @@ type RoomWSHub struct {
 	clients map[string]map[*websocket.Conn]*roomClientState // roomSlug -> clients
 	seqNum  map[string]int64                               // roomSlug -> next seq
 
-	broadcast  chan roomBroadcast
-	register   chan registerReq
-	unregister chan *roomClientState
+	broadcast       chan roomBroadcast
+	broadcastExcept chan roomBroadcastExcept
+	register        chan registerReq
+	unregister      chan *roomClientState
 
 	closed chan struct{}
 	once   sync.Once
@@ -149,6 +150,16 @@ type roomBroadcast struct {
 	data     interface{}
 }
 
+// roomBroadcastExcept is the internal envelope for BroadcastRoomMembersChanged:
+// it carries an excludeUserID so the hub loop can skip the removed user's
+// connections (which are about to be closed).
+type roomBroadcastExcept struct {
+	roomSlug      string
+	msgType       string
+	data          interface{}
+	excludeUserID int
+}
+
 // NewRoomWSHub constructs a RoomWSHub. The three resolvers are split
 // so each adapter in cmd/server is a single-function closure that
 // delegates to the appropriate repository / interactor. Each adapter
@@ -164,10 +175,11 @@ func NewRoomWSHub(roomResolver RoomBySlugResolver, memberResolver RoomMemberReso
 		pingInterval: roomPingInterval,
 		clients:      map[string]map[*websocket.Conn]*roomClientState{},
 		seqNum:       map[string]int64{},
-		broadcast:    make(chan roomBroadcast),
-		register:     make(chan registerReq),
-		unregister:   make(chan *roomClientState),
-		closed:       make(chan struct{}),
+		broadcast:       make(chan roomBroadcast),
+		broadcastExcept: make(chan roomBroadcastExcept),
+		register:        make(chan registerReq),
+		unregister:      make(chan *roomClientState),
+		closed:          make(chan struct{}),
 	}
 }
 
@@ -252,6 +264,34 @@ func (h *RoomWSHub) Run() {
 			}
 			h.mu.Unlock()
 			log.Printf("room ws: client disconnected from %s", cs.roomSlug)
+		case msg := <-h.broadcastExcept:
+			h.mu.Lock()
+			conns := make([]*roomClientState, 0, len(h.clients[msg.roomSlug]))
+			for _, cs := range h.clients[msg.roomSlug] {
+				if cs != nil && cs.userID != msg.excludeUserID {
+					conns = append(conns, cs)
+				}
+			}
+			h.mu.Unlock()
+
+			seq := h.nextSeq(msg.roomSlug)
+			payload := BroadcastMessage{
+				Type:      msg.msgType,
+				Data:      msg.data,
+				SeqNum:    seq,
+				Timestamp: time.Now(),
+			}
+			data, err := json.Marshal(payload)
+			if err != nil {
+				log.Printf("room ws: marshal failed: %v", err)
+				continue
+			}
+			for _, cs := range conns {
+				if err := cs.writeMessage(websocket.TextMessage, data); err != nil {
+					log.Printf("room ws: write failed (%s): %v", msg.roomSlug, err)
+					cs.unregisterAndClose(h)
+				}
+			}
 		case msg := <-h.broadcast:
 			// Snapshot clients under the lock; writes happen without the lock
 			// so a slow peer cannot stall the hub loop.
@@ -493,6 +533,114 @@ func (h *RoomWSHub) BroadcastRoomAutoQueueConfigChanged(roomSlug string, enabled
 	})
 }
 
+// --- R10b archive / member-removal broadcasts ---
+
+// BroadcastRoomArchived emits the existing room_archived wire value
+// on the per-room hub. It uses the existing RoomArchivedData payload
+// (R06) — R10b reuses the R06 envelope shape and only adds the
+// reason sentinel "host_archived" on top of the existing
+// "player_lease_expired" / "explicit" / "host_left" sentinels. The
+// global /ws archive broadcast continues to ride the R06 path
+// unchanged; this method is the per-room counterpart.
+//
+// R10b: the reason sentinel "host_archived" is new. The existing
+// entity.PlayerLeaseArchiveReason sentinels remain untouched.
+func (h *RoomWSHub) BroadcastRoomArchived(roomSlug string, reason string, archivedAt time.Time) {
+	h.dispatch(roomSlug, EventRoomArchived, RoomArchivedData{
+		RoomID:     0, // per-room clients identify the room by slug, not id
+		Reason:     reason,
+		ArchivedAt: archivedAt,
+	})
+}
+
+// BroadcastRoomMemberRemoved delivers a targeted room_member_removed
+// envelope to the per-room WS connections owned by targetUserID for
+// the given roomSlug. The envelope is sent BEFORE the server closes
+// those connections (the close-frame order is the close helper's
+// contract). R10b addition; rides /ws/rooms/{slug} only.
+func (h *RoomWSHub) BroadcastRoomMemberRemoved(roomSlug string, targetUserID int, reason string) {
+	// Snapshot the target connections under h.mu so a concurrent
+	// register/unregister cannot interleave.
+	h.mu.Lock()
+	conns := make([]*roomClientState, 0)
+	if m, ok := h.clients[roomSlug]; ok {
+		for _, cs := range m {
+			if cs != nil && cs.userID == targetUserID {
+				conns = append(conns, cs)
+			}
+		}
+	}
+	h.mu.Unlock()
+
+	// Stamp seq outside the broadcast path so the targeted frame
+	// carries a strictly greater seq than the latest broadcast. We
+	// bypass dispatch() (which is per-room fan-out) because the
+	// target set is a per-user subset.
+	seq := h.nextSeq(roomSlug)
+	payload := BroadcastMessage{
+		Type: EventRoomMemberRemoved,
+		Data: RoomMemberRemovedData{
+			RoomSlug: roomSlug,
+			UserID:   targetUserID,
+			Reason:   reason,
+		},
+		SeqNum:    seq,
+		Timestamp: time.Now(),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("room ws: marshal room_member_removed failed: %v", err)
+		return
+	}
+	for _, cs := range conns {
+		if err := cs.writeMessage(websocket.TextMessage, raw); err != nil {
+			log.Printf("room ws: write room_member_removed failed (%s): %v", roomSlug, err)
+			cs.unregisterAndClose(h)
+		}
+	}
+}
+
+// BroadcastRoomMembersChanged delivers a room_members_changed envelope
+// to every per-room WS client of roomSlug (excluding the removed
+// user's connections — they are being closed by the close helper).
+// R10b addition; rides /ws/rooms/{slug} only.
+//
+// excludeUserID is the user id of the removed client whose
+// connections are about to be closed; pass 0 to deliver to all
+// clients of the room.
+func (h *RoomWSHub) BroadcastRoomMembersChanged(roomSlug string, members []entity.RoomMember, excludeUserID int) {
+	out := make([]RoomMemberInfo, 0, len(members))
+	for _, m := range members {
+		out = append(out, RoomMemberInfo{UserID: m.UserID, Role: m.Role})
+	}
+	// Take a per-room fan-out path but skip the excluded user via
+	// the post-snapshot filter. dispatch() does NOT allocate seq;
+	// the hub loop stamps seq on dequeue.
+	h.dispatchToRoomExcept(roomSlug, EventRoomMembersChanged, RoomMembersChangedData{
+		RoomSlug: roomSlug,
+		Members:  out,
+	}, excludeUserID)
+}
+
+// dispatchToRoomExcept is like dispatch but lets the hub loop skip
+// connections owned by a specific user. Used by R10b to deliver
+// room_members_changed to remaining clients when the removed user's
+// connections are about to be closed.
+func (h *RoomWSHub) dispatchToRoomExcept(roomSlug string, msgType string, data interface{}, excludeUserID int) {
+	go func() {
+		select {
+		case <-h.closed:
+			return
+		case h.broadcastExcept <- roomBroadcastExcept{
+			roomSlug:      roomSlug,
+			msgType:       msgType,
+			data:          data,
+			excludeUserID: excludeUserID,
+		}:
+		}
+	}()
+}
+
 // --- RegisterHandler ---
 
 // RegisterHandler handles GET /ws/rooms/{slug}?session_token=<opaque>.
@@ -684,5 +832,48 @@ func (cs *roomClientState) unregisterAndClose(h *RoomWSHub) {
 	select {
 	case h.unregister <- cs:
 	default:
+	}
+}
+
+// closeWithCode closes a single per-room WS connection with a
+// specified close code + reason. R10b uses this to close the
+// removed client's connections with code 1008 (policy violation)
+// AFTER the targeted room_member_removed envelope has been sent.
+//
+// The close-frame send is wrapped in a short write deadline so a
+// wedged peer cannot stall the hub loop. After sending the close
+// frame we unregister the client so subsequent broadcasts do not
+// include it.
+func (h *RoomWSHub) closeWithCode(cs *roomClientState, code int, reason string) {
+	// Best-effort close-frame write under a deadline.
+	_ = cs.conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
+	msg := websocket.FormatCloseMessage(code, reason)
+	if err := cs.writeMessage(websocket.CloseMessage, msg); err != nil {
+		log.Printf("room ws: close frame send failed (%s): %v", cs.roomSlug, err)
+	}
+	// Unregister under the hub lock so concurrent broadcasts
+	// cannot re-add the conn after we remove it.
+	cs.unregisterAndClose(h)
+}
+
+// CloseRemovedClient is the R10b seam: after the targeted
+// room_member_removed envelope has been delivered, the handler
+// invokes this method to close the removed user's per-room
+// connections with code 1008 (policy violation) and unregister
+// them from the hub. Safe to call when no connections exist for
+// the targetUserID.
+func (h *RoomWSHub) CloseRemovedClient(roomSlug string, targetUserID int) {
+	h.mu.Lock()
+	conns := make([]*roomClientState, 0)
+	if m, ok := h.clients[roomSlug]; ok {
+		for _, cs := range m {
+			if cs != nil && cs.userID == targetUserID {
+				conns = append(conns, cs)
+			}
+		}
+	}
+	h.mu.Unlock()
+	for _, cs := range conns {
+		h.closeWithCode(cs, websocket.ClosePolicyViolation, "removed from room")
 	}
 }

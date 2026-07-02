@@ -77,6 +77,17 @@ const (
 	// fires after a successful per-room toggle (host/admin only).
 	EventRoomAutoQueueAdded         = "room_auto_queue_added"
 	EventRoomAutoQueueConfigChanged = "room_auto_queue_config_changed"
+	// R10b: additive on top of R07b/R07d/R09a/R09b/R09c/R09d/R09f.
+	// EventRoomMemberRemoved is delivered to the removed user's per-room
+	// WS connections BEFORE the server closes them. The wire value is
+	// "room_member_removed". Only rides /ws/rooms/{slug}; the global
+	// /ws 16-event inventory is unchanged.
+	EventRoomMemberRemoved = "room_member_removed"
+	// EventRoomMembersChanged is delivered to the remaining per-room WS
+	// clients after a successful member removal. The wire value is
+	// "room_members_changed". Only rides /ws/rooms/{slug}; the global
+	// /ws 16-event inventory is unchanged.
+	EventRoomMembersChanged = "room_members_changed"
 )
 
 // UserJoinedData contains only the new user info
@@ -455,4 +466,32 @@ type RoomAutoQueueConfigChangedData struct {
 	RoomSlug string `json:"room_slug"`
 	Enabled  bool   `json:"enabled"`
 	Strategy string `json:"strategy"`
+}
+
+// RoomMemberRemovedData is the targeted payload delivered to the
+// removed user before the server closes their per-room WS
+// connections. R10b addition; purely additive — the global /ws
+// 16-event inventory is unchanged.
+type RoomMemberRemovedData struct {
+	RoomSlug string `json:"room_slug"`
+	UserID   int    `json:"user_id"`
+	Reason   string `json:"reason"` // "host_removed"
+}
+
+// RoomMemberInfo is the per-member entry in the room_members_changed
+// payload. The entity has a JoinedAt field, but the wire shape
+// intentionally OMITS it (per R10a Decision 9) so the envelope is
+// small — clients needing joined_at can refetch via
+// GET /api/rooms/{slug}/members.
+type RoomMemberInfo struct {
+	UserID int                   `json:"user_id"`
+	Role   entity.RoomMemberRole `json:"role"`
+}
+
+// RoomMembersChangedData is broadcast to the remaining per-room WS
+// clients after a successful member removal. R10b addition; rides
+// /ws/rooms/{slug} only.
+type RoomMembersChangedData struct {
+	RoomSlug string           `json:"room_slug"`
+	Members  []RoomMemberInfo `json:"members"`
 }
