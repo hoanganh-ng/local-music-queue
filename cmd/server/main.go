@@ -255,6 +255,15 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	// path short-circuits without a broadcast when nil.
 	roomQueueInteractor.SetBroadcaster(roomWSHub)
 
+	// R10b: wire the per-room members broadcaster seam so RemoveMemberByHost
+	// can fan out the targeted room_member_removed envelope and the
+	// remaining-clients room_members_changed envelope without usecase/room
+	// importing delivery/ws. The adapter below satisfies the seam using
+	// the existing per-room hub methods (BroadcastRoomMemberRemoved,
+	// BroadcastRoomMembersChanged, CloseRemovedClient).
+	roomMembersAdapter := roomMembersBroadcasterAdapter{hub: roomWSHub}
+	roomInteractor.SetMembersBroadcaster(roomMembersAdapter)
+
 	// R09a: wire the lease-authorizer seam so direct playback mutations
 	// (status / sync / skip / ended) enforce the player-lease holder rule
 	// at the use-case layer. PlayerLeaseInteractor implements
@@ -329,6 +338,12 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	// from outside Hub.Run; for the in-ticker case the goroutine fan-out
 	// added in hub.go keeps the hub loop from deadlocking itself.
 	roomHandlers.SetArchiveBroadcaster(hubArchiveBroadcaster{hub: hub})
+
+	// R10b: the per-room archive broadcast on host archive, plus the
+	// targeted room_member_removed + remaining-clients room_members_changed
+	// broadcasts on member removal, all ride the per-room hub. The
+	// adapter above is the production seam.
+	roomHandlers.SetMemberBroadcaster(roomMembersAdapter)
 
 	// 5. Setup Routes
 	mux := http.NewServeMux()
@@ -415,6 +430,21 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 			return
 		}
 		roomHandlers.HandleRevokeInvite(w, r, r.PathValue("slug"), inviteID, actorFromCtx(r.Context()))
+	}))
+	// R10b: DELETE /api/rooms/{slug} — host-requested soft archive.
+	mux.HandleFunc("DELETE /api/rooms/{slug}", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomHandlers.HandleDeleteRoom(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	// R10b: DELETE /api/rooms/{slug}/members/{userId} — host-driven
+	// member removal. userId is parsed in main.go so a non-integer or
+	// <= 0 path value returns 400 with "invalid user id".
+	mux.HandleFunc("DELETE /api/rooms/{slug}/members/{userId}", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		userID, perr := strconv.Atoi(r.PathValue("userId"))
+		if perr != nil || userID <= 0 {
+			http.Error(w, "invalid user id", http.StatusBadRequest)
+			return
+		}
+		roomHandlers.HandleDeleteMember(w, r, r.PathValue("slug"), actorFromCtx(r.Context()), userID)
 	}))
 	mux.HandleFunc("POST /api/invites/{token}/redeem", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomHandlers.HandleRedeemInvite(w, r, r.PathValue("token"), actorFromCtx(r.Context()))
@@ -624,6 +654,54 @@ func (b hubArchiveBroadcaster) BroadcastRoomArchived(ev usecaseRoom.RoomArchived
 		Reason:     ev.Reason,
 		ArchivedAt: ev.ArchivedAt,
 	})
+}
+
+// roomMembersBroadcasterAdapter adapts *ws.RoomWSHub to the
+// room.RoomMembersBroadcaster interface so usecase/room stays free of
+// delivery/ws imports. R10b addition.
+type roomMembersBroadcasterAdapter struct {
+	hub *ws.RoomWSHub
+}
+
+// BroadcastRoomArchived implements room.RoomMembersBroadcaster.
+// Stamps the per-room room_archived envelope with the given reason
+// and time.Now(); the existing R06 envelope shape is reused.
+func (a roomMembersBroadcasterAdapter) BroadcastRoomArchived(roomSlug string, reason string) {
+	a.hub.BroadcastRoomArchived(roomSlug, reason, time.Now())
+}
+
+// BroadcastRoomMemberRemoved implements room.RoomMembersBroadcaster.
+// The per-room hub's BroadcastRoomMemberRemoved delivers the
+// targeted envelope to the target user's connections; the close
+// frame is sent separately by CloseRemovedClient.
+func (a roomMembersBroadcasterAdapter) BroadcastRoomMemberRemoved(roomSlug string, targetUserID int, reason string) {
+	a.hub.BroadcastRoomMemberRemoved(roomSlug, targetUserID, reason)
+}
+
+// BroadcastRoomMembersChanged implements room.RoomMembersBroadcaster.
+// The per-room hub's BroadcastRoomMembersChanged fans out to
+// remaining clients, excluding the target user whose connections
+// are about to be closed.
+func (a roomMembersBroadcasterAdapter) BroadcastRoomMembersChanged(roomSlug string, members []entity.RoomMember) {
+	if len(members) == 0 {
+		return
+	}
+	// Find the user id of the removed user by looking for any
+	// excluded user — for R10b this is the targetUserID passed
+	// alongside; the interactor passes a separate broadcast call
+	// that already excludes via the hub's broadcastExcept path. We
+	// pass excludeUserID=0 here because the hub's fan-out will
+	// include ALL remaining clients. The targeted client has
+	// already been excluded from the member list (it was deleted
+	// before the call).
+	a.hub.BroadcastRoomMembersChanged(roomSlug, members, 0)
+}
+
+// CloseRemovedClient implements room.RoomMembersBroadcaster. Sends
+// a close frame with code 1008 to the target user's per-room
+// connections and unregisters them from the hub.
+func (a roomMembersBroadcasterAdapter) CloseRemovedClient(roomSlug string, targetUserID int) {
+	a.hub.CloseRemovedClient(roomSlug, targetUserID)
 }
 
 // expiryAdapter is the server-owned seam that periodically calls
