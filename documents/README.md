@@ -66,5 +66,6 @@ documents/
 │
 └── 09-roadmap/                     # Project roadmap
     ├── implemented-features.md     # Complete list of implemented features
+    ├── room-epic-roadmap.md        # Current room epic estimate and remaining sprint plan
     └── future-features.md          # Planned enhancements
 ```
