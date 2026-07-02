@@ -341,3 +341,46 @@ func TestRoom_RemoveMemberByHost_TargetNotLeaseHolder_NoLeaseMutation(t *testing
 		t.Errorf("expected lease still active after non-holder removal, got err=%v", err)
 	}
 }
+
+// TestRoom_RemoveMember_ConcurrentDuplicateRemove_OneWins pins the
+// race-sensitive contract: two concurrent removes on the same target
+// produce exactly one success and one ErrMemberNotFound.
+func TestRoom_RemoveMember_ConcurrentDuplicateRemove_OneWins(t *testing.T) {
+	inter, cleanup := pgInter(t)
+	defer cleanup()
+	ctx := context.Background()
+	room, err := inter.CreateRoom(ctx, "lounge", "Lounge", 1)
+	if err != nil {
+		t.Fatalf("CreateRoom: %v", err)
+	}
+	if err := inter.Repo().AddMember(ctx, room.ID, 2, entity.RoomRoleGuest, time.Now()); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	results := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, err := inter.RemoveMemberByHost(ctx, "lounge", 1, 2)
+			results[idx] = err
+		}(i)
+	}
+	wg.Wait()
+
+	var success, notFound int
+	for _, e := range results {
+		switch {
+		case e == nil:
+			success++
+		case errors.Is(e, ErrMemberNotFound):
+			notFound++
+		default:
+			t.Errorf("unexpected error: %v", e)
+		}
+	}
+	if success != 1 || notFound != 1 {
+		t.Errorf("expected exactly one success and one ErrMemberNotFound, got success=%d notFound=%d", success, notFound)
+	}
+}
