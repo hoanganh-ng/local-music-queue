@@ -32,6 +32,13 @@ type RoomHandlers struct {
 	// nil is tolerated — the handler skips the broadcast rather than
 	// failing the request.
 	archiveBroadcaster room.RoomArchivedBroadcaster
+	// memberBroadcaster is implemented by *ws.RoomWSHub via a thin
+	// adapter in main.go. It fans out the targeted room_member_removed
+	// envelope to the removed client BEFORE the hub closes the
+	// connection, and the room_members_changed envelope to remaining
+	// clients. nil is tolerated — the handler skips the broadcasts
+	// rather than failing the request.
+	memberBroadcaster room.RoomMembersBroadcaster
 }
 
 // NewRoomHandlers constructs RoomHandlers with an interactor and the auth
@@ -45,6 +52,14 @@ func NewRoomHandlers(inter *room.Interactor, lease *room.PlayerLeaseInteractor, 
 // succeeds; it just doesn't broadcast.
 func (h *RoomHandlers) SetArchiveBroadcaster(b room.RoomArchivedBroadcaster) {
 	h.archiveBroadcaster = b
+}
+
+// SetMemberBroadcaster wires the broadcaster used to fan out the
+// targeted room_member_removed + room_members_changed envelopes on
+// a successful member removal. Optional — when unset the handler
+// still succeeds; it just doesn't broadcast.
+func (h *RoomHandlers) SetMemberBroadcaster(b room.RoomMembersBroadcaster) {
+	h.memberBroadcaster = b
 }
 
 // --- Request/response shapes ---
@@ -339,6 +354,76 @@ func (h *RoomHandlers) HandleReleasePlayer(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// HandleDeleteRoom: DELETE /api/rooms/{slug} — host-requested soft
+// archive. Idempotent on already-archived rooms (204, no mutation,
+// no broadcast). 404 on missing room. 400 on invalid slug. 403 on
+// non-host actor. Body is ignored.
+//
+// When this call actually transitions active → archived, a
+// room_archived envelope is dispatched through the per-room hub
+// with reason "host_archived". The existing global /ws archive
+// broadcast (R06) is intentionally NOT invoked from this path —
+// R10b uses the per-room hub only.
+func (h *RoomHandlers) HandleDeleteRoom(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
+	if actorUserID == 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if !entity.IsValidSlug(slug) {
+		http.Error(w, "invalid room slug", http.StatusBadRequest)
+		return
+	}
+	transitioned, err := h.inter.ArchiveRoomByHost(r.Context(), slug, actorUserID)
+	if err != nil {
+		writeRoomError(w, err)
+		return
+	}
+	if transitioned && h.memberBroadcaster != nil {
+		// memberBroadcaster is the per-room hub adapter; its
+		// BroadcastRoomArchived emits the per-room room_archived
+		// envelope. We reuse the same seam so the production wiring
+		// does not need to know about two distinct broadcaster
+		// interfaces.
+		h.memberBroadcaster.BroadcastRoomArchived(slug, "host_archived")
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// HandleDeleteMember: DELETE /api/rooms/{slug}/members/{userId} —
+// host-driven member removal. 400 on host-removes-self
+// (ErrHostCannotRemoveSelf), 400 on remove-host (ErrCannotRemoveHost),
+// 400 on invalid userId (handled in main.go via strconv.Atoi — the
+// handler itself trusts the parsed int). 404 on target not member.
+// 409 on archived room. 403 on non-host actor.
+//
+// On success the handler does NOT directly close the removed user's
+// per-room WS connections — the broadcaster seam fans out the
+// targeted room_member_removed envelope to the removed client's
+// connections BEFORE the hub closes them. The close-frame ordering
+// is enforced by the broadcaster implementation (the adapter in
+// main.go invokes the hub's CloseRemovedClient with code 1008 AFTER
+// BroadcastRoomMemberRemoved returns).
+//
+// body is ignored — the contract specifies no request body.
+func (h *RoomHandlers) HandleDeleteMember(w http.ResponseWriter, r *http.Request, slug string, actorUserID int, targetUserID int) {
+	if actorUserID == 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if _, err := h.inter.RemoveMemberByHost(r.Context(), slug, actorUserID, targetUserID); err != nil {
+		writeRoomError(w, err)
+		return
+	}
+	// Close the removed user's per-room WS connections with code
+	// 1008 AFTER the targeted room_member_removed envelope has been
+	// delivered (the broadcaster is responsible for the send-then-
+	// close order; see the adapter in main.go).
+	if h.memberBroadcaster != nil {
+		h.memberBroadcaster.CloseRemovedClient(slug, targetUserID)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // HandleGetPlayerLease: GET /api/rooms/{slug}/player/lease — any active
 // member may read the current lease.
 func (h *RoomHandlers) HandleGetPlayerLease(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
@@ -385,6 +470,10 @@ func writeRoomError(w http.ResponseWriter, err error) {
 		http.Error(w, "not found", http.StatusNotFound)
 	case errors.Is(err, room.ErrForbidden):
 		http.Error(w, "forbidden", http.StatusForbidden)
+	case errors.Is(err, room.ErrHostCannotRemoveSelf):
+		http.Error(w, "host cannot remove self", http.StatusBadRequest)
+	case errors.Is(err, room.ErrCannotRemoveHost):
+		http.Error(w, "cannot remove host", http.StatusBadRequest)
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
