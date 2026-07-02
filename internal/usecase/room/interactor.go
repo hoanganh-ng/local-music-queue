@@ -34,6 +34,12 @@ var (
 	ErrPlayerLeaseGone      = errors.New("player lease gone (past grace)")
 	ErrPlayerLeaseForbidden = errors.New("forbidden")
 	ErrNotLeaseHolder       = errors.New("not lease holder")
+
+	// R10b — explicit sentinels for the host-removes-self and remove-host
+	// cases, distinct from generic ErrForbidden so the HTTP layer maps them
+	// to 400 with a stable body string (per R10a Decision 4).
+	ErrHostCannotRemoveSelf = errors.New("host cannot remove self")
+	ErrCannotRemoveHost     = errors.New("cannot remove host")
 )
 
 // DefaultInviteExpiry is the documented default invite lifetime (ADR 001 §7).

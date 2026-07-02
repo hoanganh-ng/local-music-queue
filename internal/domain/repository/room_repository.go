@@ -60,4 +60,18 @@ type RoomRepository interface {
 	// ErrInviteExhausted. The transaction is rolled back on any error, so
 	// the member row never persists when the invite cannot be consumed.
 	RedeemInviteAtomic(ctx context.Context, inviteID int64, roomID int64, userID int, role entity.RoomMemberRole, maxUses int, now time.Time) (*entity.RoomMember, error)
+
+	// RemoveMemberAndEndLeaseAtomic deletes the (roomID, targetUserID)
+	// membership row and, if the target user holds the active lease for
+	// the room, ends the lease — both inside a single DB transaction so
+	// a concurrent playback command cannot observe the post-membership-
+	// delete state while the lease is still active. Returns:
+	//   - memberRemoved=true if the membership row was actually deleted
+	//     (false when no row matched — caller surfaces ErrMemberNotFound).
+	//   - leaseEnded=true if the target held the active lease and it was
+	//     ended in this call.
+	// When memberRemoved=false, leaseEnded is always false and the lease
+	// is NOT mutated (idempotent: a stale caller races another removal
+	// and observes ErrMemberNotFound without an unintended lease mutation).
+	RemoveMemberAndEndLeaseAtomic(ctx context.Context, roomID int64, targetUserID int, now time.Time) (memberRemoved bool, leaseEnded bool, err error)
 }

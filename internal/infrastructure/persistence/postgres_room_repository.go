@@ -370,6 +370,59 @@ func (r *PostgresRoomRepository) RedeemInviteAtomic(ctx context.Context, inviteI
 	return r.GetMember(ctx, roomID, userID)
 }
 
+// RemoveMemberAndEndLeaseAtomic deletes the (room_id, user_id) member row
+// and ends the active lease ONLY when claimed_by_user_id matches the
+// target, all in one transaction. memberRemoved is false when no row
+// matched (caller maps to ErrMemberNotFound / 404). When memberRemoved
+// is false, leaseEnded is always false and the lease is NOT mutated.
+func (r *PostgresRoomRepository) RemoveMemberAndEndLeaseAtomic(ctx context.Context, roomID int64, targetUserID int, now time.Time) (bool, bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Step 1: delete the membership row. RowsAffected is 0 → caller
+	// surfaces ErrMemberNotFound. We DO NOT touch the lease in this
+	// branch so a stale caller cannot accidentally mutate a lease it
+	// did not actually have authority over.
+	res, err := tx.ExecContext(ctx,
+		`DELETE FROM room_members WHERE room_id = $1 AND user_id = $2`,
+		roomID, targetUserID)
+	if err != nil {
+		return false, false, fmt.Errorf("delete member: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, false, fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return false, false, nil
+	}
+
+	// Step 2: end the lease ONLY when the target user holds the
+	// active lease. The conditional WHERE clause (claimed_by_user_id =
+	// $3) ensures we do not accidentally end someone else's lease
+	// when the room had a different active lease holder. RowsAffected
+	// is 0 when the target is not the active lease holder.
+	res, err = tx.ExecContext(ctx,
+		`UPDATE player_leases SET ended_at = $1
+		 WHERE room_id = $2 AND ended_at IS NULL AND claimed_by_user_id = $3`,
+		now, roomID, targetUserID)
+	if err != nil {
+		return false, false, fmt.Errorf("end lease: %w", err)
+	}
+	ln, err := res.RowsAffected()
+	if err != nil {
+		return false, false, fmt.Errorf("rows affected (lease): %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, false, fmt.Errorf("commit: %w", err)
+	}
+	return true, ln > 0, nil
+}
+
 // --- helpers ---
 
 func (r *PostgresRoomRepository) scanOne(ctx context.Context, query string, args ...interface{}) (*entity.Room, error) {
