@@ -1,6 +1,6 @@
 # R10a — Room deletion and membership removal (contract design)
 
-**Status:** implemented on `dev` (2026-07-02); pending Architect review / Product Owner acceptance. Documentation-only contract design sprint — no runtime change ships with this sprint.
+**Status:** **Accepted (2026-07-02)**. R10a is a documentation-only contract design sprint — no runtime change ships with this sprint.
 
 **Sprint name:** Room deletion and membership removal — R10a contract design
 
