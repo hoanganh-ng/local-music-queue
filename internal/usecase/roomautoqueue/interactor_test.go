@@ -121,6 +121,9 @@ func (noOpRoomRepo) CreateRoomAndHost(_ context.Context, _, _ string, _ int, _ t
 func (noOpRoomRepo) RedeemInviteAtomic(_ context.Context, _ int64, _ int64, _ int, _ entity.RoomMemberRole, _ int, _ time.Time) (*entity.RoomMember, error) {
 	panic("unused")
 }
+func (noOpRoomRepo) RemoveMemberAndEndLeaseAtomic(_ context.Context, _ int64, _ int, _ time.Time) (bool, bool, error) {
+	panic("unused")
+}
 
 type mockRoomAQRepo struct {
 	mu              sync.Mutex
