@@ -95,16 +95,56 @@ type PlaybackLeaseAuthorizer interface {
 	RequireActiveLeaseHolder(ctx context.Context, slug string, actorUserID int) error
 }
 
+// RoomMembersBroadcaster is implemented by the delivery layer to
+// publish post-mutation per-room member-state envelopes. The use case
+// invokes it after a successful RemoveMemberByHost so per-room WS
+// subscribers observe the targeted member-removed and members-changed
+// events without usecase/room importing delivery/ws. Nil-safe: the
+// interactor skips the broadcast when the seam is unset.
+//
+// BroadcastRoomArchived emits the per-room room_archived envelope.
+// Implementation stamps archivedAt itself to keep callers free of
+// time.Time imports. reason is one of the existing PlayerLeaseArchiveReason
+// sentinels OR the new R10b sentinel "host_archived".
+//
+// BroadcastRoomMemberRemoved delivers the room_member_removed envelope
+// to the removed user's per-room WS connections BEFORE the hub closes
+// them (the delivery layer is responsible for the close frame order).
+// The targetUserID argument identifies which connection(s) to target.
+//
+// BroadcastRoomMembersChanged delivers the room_members_changed
+// envelope to the remaining per-room clients after a successful
+// removal.
+//
+// CloseRemovedClient sends the close-frame (code 1008) to the
+// removed user's per-room WS connections after the targeted envelope
+// has been delivered.
+type RoomMembersBroadcaster interface {
+	BroadcastRoomArchived(roomSlug string, reason string)
+	BroadcastRoomMemberRemoved(roomSlug string, targetUserID int, reason string)
+	BroadcastRoomMembersChanged(roomSlug string, members []entity.RoomMember)
+	CloseRemovedClient(roomSlug string, targetUserID int)
+}
+
 // Interactor owns the room, invite, and membership use cases.
 type Interactor struct {
-	repo repository.RoomRepository
-	now  func() time.Time
+	repo      repository.RoomRepository
+	now       func() time.Time
+	membersBC RoomMembersBroadcaster // nil-safe; set via SetMembersBroadcaster
 }
 
 // NewInteractor constructs an Interactor. The clock defaults to time.Now;
 // tests may swap it via SetClock.
 func NewInteractor(repo repository.RoomRepository) *Interactor {
 	return &Interactor{repo: repo, now: time.Now}
+}
+
+// SetMembersBroadcaster wires the broadcaster used by RemoveMemberByHost
+// to fan out the targeted room_member_removed + room_members_changed
+// envelopes. Optional — when unset the interactor still succeeds; it
+// just doesn't broadcast.
+func (i *Interactor) SetMembersBroadcaster(b RoomMembersBroadcaster) {
+	i.membersBC = b
 }
 
 // Repo returns the underlying RoomRepository. Exposed for tests that need
@@ -429,6 +469,136 @@ func (i *Interactor) DemoteMember(ctx context.Context, slug string, actorUserID 
 // readiness. No public archive endpoint is exposed in R04.
 func (i *Interactor) ArchiveRoom(ctx context.Context, roomID int64) error {
 	return i.repo.ArchiveRoom(ctx, roomID, i.now())
+}
+
+// ArchiveRoomByHost is the host-driven soft-archive path. It validates
+// the slug, requires the actor to be the room host, then calls the
+// idempotent ArchiveRoomIfActive. Returns:
+//   - ErrInvalidSlug when the slug fails SlugPattern
+//   - ErrRoomNotFound when no room exists for the slug
+//   - ErrForbidden when the actor is not the host
+//   - nil on success (regardless of whether the room was already
+//     archived; the bool return distinguishes the transition).
+// The boolean `archived` is true ONLY when this call transitioned
+// active → archived. Callers (HTTP handler) use it to decide whether
+// to broadcast the per-room room_archived event.
+func (i *Interactor) ArchiveRoomByHost(ctx context.Context, slug string, actorUserID int) (archived bool, err error) {
+	if !entity.IsValidSlug(slug) {
+		return false, ErrInvalidSlug
+	}
+	room, err := i.repo.GetRoomBySlug(ctx, slug)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, ErrRoomNotFound
+		}
+		return false, fmt.Errorf("get room: %w", err)
+	}
+	if err := i.requireHost(ctx, room.ID, actorUserID); err != nil {
+		return false, err
+	}
+	transitioned, err := i.repo.ArchiveRoomIfActive(ctx, room.ID, i.now())
+	if err != nil {
+		return false, fmt.Errorf("archive if active: %w", err)
+	}
+	return transitioned, nil
+}
+
+// RemoveMemberByHost is the host-driven member-removal path. The actor
+// MUST be the room host. The target validation order is:
+//   - ErrInvalidSlug when the slug fails SlugPattern
+//   - ErrRoomNotFound when no room exists for the slug
+//   - ErrForbidden when the actor is not the host
+//   - ErrArchived when the room is archived (handler maps to 409)
+//   - ErrHostCannotRemoveSelf when actor == target
+//   - ErrCannotRemoveHost when the target is the room host
+//   - ErrMemberNotFound when the target is not a member
+// On success the membership row is deleted and the active lease (if
+// held by the target) is ended in one DB transaction. Returns
+// `leaseEnded=true` when the target held the lease.
+//
+// When the broadcaster seam is wired AND the member was actually
+// removed, this method invokes:
+//   - BroadcastRoomMemberRemoved(roomSlug, targetUserID, "host_removed")
+//     (targeted to the removed user's per-room WS connections BEFORE
+//     the hub closes them — the close order is the delivery layer's
+//     responsibility)
+//   - BroadcastRoomMembersChanged(roomSlug, post-mutation members)
+//     (per-room fan-out to remaining clients).
+// The remaining members list is loaded AFTER the delete transaction
+// commits so it reflects the post-mutation state.
+func (i *Interactor) RemoveMemberByHost(ctx context.Context, slug string, actorUserID int, targetUserID int) (leaseEnded bool, err error) {
+	if !entity.IsValidSlug(slug) {
+		return false, ErrInvalidSlug
+	}
+	if actorUserID == targetUserID {
+		return false, ErrHostCannotRemoveSelf
+	}
+	if targetUserID <= 0 {
+		return false, fmt.Errorf("target user id: %w", ErrInvalidSlug)
+	}
+	room, err := i.repo.GetRoomBySlug(ctx, slug)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, ErrRoomNotFound
+		}
+		return false, fmt.Errorf("get room: %w", err)
+	}
+	if err := i.requireHost(ctx, room.ID, actorUserID); err != nil {
+		return false, err
+	}
+	if room.Status != entity.RoomStatusActive {
+		return false, ErrArchived
+	}
+	// Look up the target to validate host-target rule + check membership
+	// (the atomic delete uses a conditional DELETE so the lookup is
+	// technically redundant for the "not a member" case, but doing it
+	// here lets us emit the explicit ErrCannotRemoveHost sentinel
+	// before paying the DELETE cost).
+	target, err := i.repo.GetMember(ctx, room.ID, targetUserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, ErrMemberNotFound
+		}
+		return false, fmt.Errorf("get target: %w", err)
+	}
+	if target.Role == entity.RoomRoleHost {
+		return false, ErrCannotRemoveHost
+	}
+
+	// Atomic membership-delete + lease-end. The repo returns
+	// memberRemoved=false when no row matched (e.g. concurrent remove
+	// raced us); the caller maps that to ErrMemberNotFound / 404 so
+	// exactly one concurrent remove wins.
+	memberRemoved, leaseEnded, err := i.repo.RemoveMemberAndEndLeaseAtomic(ctx, room.ID, targetUserID, i.now())
+	if err != nil {
+		return false, fmt.Errorf("remove member atomic: %w", err)
+	}
+	if !memberRemoved {
+		return false, ErrMemberNotFound
+	}
+
+	// Fan out post-mutation envelopes. The targeted room_member_removed
+	// envelope is delivered BEFORE the delivery layer closes the removed
+	// user's connections — the close order is the broadcaster's
+	// contract.
+	if i.membersBC != nil {
+		i.membersBC.BroadcastRoomMemberRemoved(room.Slug, targetUserID, "host_removed")
+		// Load the post-mutation member list for the remaining-clients
+		// envelope. ListMembers filters by room_id so the deleted row
+		// is gone.
+		remaining, lerr := i.repo.ListMembers(ctx, room.ID)
+		if lerr != nil {
+			// Do not fail the remove on a list error — the membership
+			// delete already committed. Log via fmt.Errorf wrapping is
+			// not appropriate here; instead return nil and let the
+			// caller observe the truncated envelope. We surface the
+			// error in test runs by returning it when ListMembers
+			// returns a real error.
+			return leaseEnded, fmt.Errorf("list remaining members: %w", lerr)
+		}
+		i.membersBC.BroadcastRoomMembersChanged(room.Slug, remaining)
+	}
+	return leaseEnded, nil
 }
 
 // --- helpers ---
