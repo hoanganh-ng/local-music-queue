@@ -397,12 +397,11 @@ func (h *RoomHandlers) HandleDeleteRoom(w http.ResponseWriter, r *http.Request, 
 // 409 on archived room. 403 on non-host actor.
 //
 // On success the handler does NOT directly close the removed user's
-// per-room WS connections — the broadcaster seam fans out the
-// targeted room_member_removed envelope to the removed client's
-// connections BEFORE the hub closes them. The close-frame ordering
-// is enforced by the broadcaster implementation (the adapter in
-// main.go invokes the hub's CloseRemovedClient with code 1008 AFTER
-// BroadcastRoomMemberRemoved returns).
+// per-room WS connections — the interactor's broadcaster seam fans
+// out the targeted room_member_removed envelope AND closes the
+// removed client's connections with code 1008, in that order. The
+// close-frame ordering is enforced inside usecase/room so the HTTP
+// handler stays transport-only.
 //
 // body is ignored — the contract specifies no request body.
 func (h *RoomHandlers) HandleDeleteMember(w http.ResponseWriter, r *http.Request, slug string, actorUserID int, targetUserID int) {
@@ -413,13 +412,6 @@ func (h *RoomHandlers) HandleDeleteMember(w http.ResponseWriter, r *http.Request
 	if _, err := h.inter.RemoveMemberByHost(r.Context(), slug, actorUserID, targetUserID); err != nil {
 		writeRoomError(w, err)
 		return
-	}
-	// Close the removed user's per-room WS connections with code
-	// 1008 AFTER the targeted room_member_removed envelope has been
-	// delivered (the broadcaster is responsible for the send-then-
-	// close order; see the adapter in main.go).
-	if h.memberBroadcaster != nil {
-		h.memberBroadcaster.CloseRemovedClient(slug, targetUserID)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

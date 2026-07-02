@@ -524,6 +524,12 @@ func (i *Interactor) ArchiveRoomByHost(ctx context.Context, slug string, actorUs
 //     responsibility)
 //   - BroadcastRoomMembersChanged(roomSlug, post-mutation members)
 //     (per-room fan-out to remaining clients).
+//   - CloseRemovedClient(roomSlug, targetUserID) — closes the removed
+//     user's per-room WS connections with code 1008 AFTER the targeted
+//     room_member_removed envelope has been delivered. Folding this
+//     into the interactor keeps the WS-side-effect responsibility
+//     inside the usecase seam so HTTP handlers stay transport-only and
+//     usecase tests can pin the targeted close-frame fan-out.
 // The remaining members list is loaded AFTER the delete transaction
 // commits so it reflects the post-mutation state.
 func (i *Interactor) RemoveMemberByHost(ctx context.Context, slug string, actorUserID int, targetUserID int) (leaseEnded bool, err error) {
@@ -597,6 +603,11 @@ func (i *Interactor) RemoveMemberByHost(ctx context.Context, slug string, actorU
 			return leaseEnded, fmt.Errorf("list remaining members: %w", lerr)
 		}
 		i.membersBC.BroadcastRoomMembersChanged(room.Slug, remaining)
+		// Close the removed user's per-room WS connections with code
+		// 1008 AFTER the targeted room_member_removed envelope has been
+		// delivered. The broadcaster is responsible for the
+		// send-then-close order (see the *ws.RoomWSHub adapter).
+		i.membersBC.CloseRemovedClient(room.Slug, targetUserID)
 	}
 	return leaseEnded, nil
 }

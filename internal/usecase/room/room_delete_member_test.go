@@ -91,7 +91,9 @@ func TestRoom_ArchiveRoomByHost_ActiveRoom_ReturnsTransitioned(t *testing.T) {
 	if r.Status != entity.RoomStatusArchived {
 		t.Errorf("expected archived, got %s", r.Status)
 	}
-	_ = room
+	if room == nil {
+		t.Errorf("expected non-nil room from CreateRoom, got nil")
+	}
 }
 
 func TestRoom_ArchiveRoomByHost_AlreadyArchived_IdempotentNoTransition(t *testing.T) {
@@ -174,6 +176,14 @@ func TestRoom_RemoveMemberByHost_RemovesGuest(t *testing.T) {
 	if len(rec.membersChanged) != 1 {
 		t.Errorf("expected exactly one members-changed broadcast, got %d", len(rec.membersChanged))
 	}
+	if got := len(rec.membersChanged[0].Members); got != 1 {
+		t.Errorf("expected post-mutation snapshot to have 1 member (host), got %d", got)
+	} else if rec.membersChanged[0].Members[0].UserID != 1 {
+		t.Errorf("expected surviving member to be host (user 1), got %d", rec.membersChanged[0].Members[0].UserID)
+	}
+	if len(rec.closed) != 1 || rec.closed[0].TargetUserID != 2 {
+		t.Errorf("expected exactly one CloseRemovedClient call for target=2, got %+v", rec.closed)
+	}
 }
 
 func TestRoom_RemoveMemberByHost_RemovesAdmin(t *testing.T) {
@@ -223,7 +233,9 @@ func TestRoom_RemoveMemberByHost_CannotRemoveHost(t *testing.T) {
 	// Pragmatic coverage: pin the non-host-actor branch (admin attempts
 	// to remove the host → ErrForbidden) and rely on the production
 	// code path for the sentinel itself.
-	_ = room
+	if room == nil {
+		t.Fatalf("expected non-nil room from CreateRoom, got nil")
+	}
 	if err := inter.Repo().AddMember(ctx, room.ID, 2, entity.RoomRoleAdmin, time.Now()); err != nil {
 		t.Fatalf("AddMember admin: %v", err)
 	}
