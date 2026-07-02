@@ -1,6 +1,6 @@
 # R10a — Room deletion and membership removal (contract design)
 
-**Status:** **Accepted (2026-07-02)**. R10a is a documentation-only contract design sprint — no runtime change ships with this sprint.
+**Status:** **Accepted (2026-07-02)** — R10a is the contract design. R10b runtime implementation is implemented on `dev` (2026-07-02); Product Owner acceptance pending.
 
 **Sprint name:** Room deletion and membership removal — R10a contract design
 
@@ -410,3 +410,41 @@ R10a is a docs-only contract design. The verification block is:
 ## Execution note
 
 This document is the contract design for the **first approved slice** of room deletion and membership removal. R10a is intentionally documentation-only — it shapes the contract that the future R10b runtime implementation MUST conform to. After R10a is accepted by the Product Owner, R10b (a separate future sprint) implements the runtime per the Decision 1–11 contract and the Decision 11 test matrix. The original R10 stub is now superseded by this R10a + future R10b split; R10c+ may introduce hard delete / retention / admin audit views as separate slices.
+
+## Implementation summary (R10b)
+
+**Sprint goal:** R10b implements the R10a contract — `DELETE /api/rooms/{slug}` + `DELETE /api/rooms/{slug}/members/{userId}` endpoints, atomic lease end, per-room archive broadcast, targeted member-removed + remaining-clients members-changed envelopes, close-code 1008.
+
+### Endpoint contracts implemented
+
+- `DELETE /api/rooms/{slug}` — host-only soft archive behind `roomAuth`. Idempotent `204` on already-archived rooms (no mutation, no broadcast). `404` on missing room, `400` on invalid slug, `401`/`403` per existing middleware. Successful active → archived transition invokes `RoomRepository.ArchiveRoomIfActive` (R06) and dispatches `room_archived` on `/ws/rooms/{slug}` with `reason: "host_archived"`.
+- `DELETE /api/rooms/{slug}/members/{userId}` — host-only member removal behind `roomAuth`. `400 Bad Request` for `ErrHostCannotRemoveSelf` (host trying to remove self) and `ErrCannotRemoveHost` (target is the host of the room); `404` when target is not a member; `409` when the room is archived. Membership row delete + active-lease end happen in a single DB transaction (`RemoveMemberAndEndLeaseAtomic` seam).
+
+### WebSocket event envelopes
+
+- `room_archived` — **reuses** the existing R06 wire value + payload (`room_id`, `reason`, `archived_at`). R10b adds explicit per-room hub support (`*ws.RoomWSHub.BroadcastRoomArchived`) so clients connected to `/ws/rooms/{slug}` receive the archive event with `reason: "host_archived"` on a successful host-driven archive. The global `/ws` archive broadcast continues to ride the R06 path unchanged.
+- `room_member_removed` — **new** envelope, delivered to the removed user's per-room WebSocket connections **before** the server closes them. Payload shape: `{ room_slug: string, user_id: int, reason: "host_removed" }`.
+- `room_members_changed` — **new** envelope, broadcast to all remaining clients connected to `/ws/rooms/{slug}` after a successful member removal. Payload shape: `{ room_slug: string, members: [{ user_id: int, role: "host"|"admin"|"guest" }] }`. `joined_at` is intentionally omitted from the wire; clients can fetch via the existing `GET /api/rooms/{slug}/members` if needed.
+
+All three envelopes ride the existing per-room seq counter allocated by the existing `nextSeq` hub-loop mechanism. The 16-event global `/ws` inventory is byte-for-byte unchanged.
+
+### WebSocket close code
+
+The server closes the removed client's per-room WebSocket connections with **close code `1008` (policy violation)**. Rationale: distinguishes a host-driven removal-driven close from a benign disconnect (e.g. user closed their tab), so the client can surface a clearer message. The `closeWithCode` helper documents this rationale in `internal/delivery/ws/room_hub.go`.
+
+### Files touched (R10b)
+
+- `internal/domain/repository/room_repository.go` — `RemoveMemberAndEndLeaseAtomic` seam + `ErrHostCannotRemoveSelf` + `ErrCannotRemoveHost` sentinels (interface contract).
+- `internal/infrastructure/persistence/postgres_room_repository.go` — PostgreSQL implementation of the atomic transaction (membership delete + lease end, single transaction).
+- `internal/usecase/room/interactor.go` — `ArchiveRoomByHost` + `RemoveMemberByHost` interactor methods, `RoomMembersBroadcaster` seam, `CloseRemovedClient` helper moved from handler into the interactor for test isolation, host-removal sentinel mapping.
+- `internal/delivery/http/room_handlers.go` — `DELETE /api/rooms/{slug}` + `DELETE /api/rooms/{slug}/members/{userId}` HTTP handlers, status-code mapping (400 / 404 / 409 / 204).
+- `internal/delivery/ws/events.go` — `room_member_removed` + `room_members_changed` event-name constants and payload types.
+- `internal/delivery/ws/room_hub.go` — per-room hub support: `BroadcastRoomArchived(roomSlug, RoomArchivedEvent)` (reuses existing R06 wire value + payload), `BroadcastRoomMemberRemoved(...)`, `BroadcastRoomMembersChanged(...)`, removed-client close path with code 1008.
+- `cmd/server/main.go` — production wiring: per-room members broadcaster adapter connected to `*ws.RoomWSHub`, DELETE routes registered.
+- `internal/usecase/room/room_delete_member_test.go` — usecase Decision 11 subset tests (archive + remove-member happy paths + sentinel paths) + concurrent duplicate-remove race test.
+- `internal/delivery/http/room_delete_members_test.go` — HTTP handler tests covering 204 / 400 / 404 / 409 / 401 / 403 for both endpoints.
+- `internal/delivery/ws/room_hub_test.go` — WebSocket hub tests for archive + member-removal envelopes (removed-client-before-close, remaining-clients-after-removal, archive delivered to per-room clients, archive NOT delivered on idempotent re-call).
+
+### Verification results
+
+[filled in Task 11]
