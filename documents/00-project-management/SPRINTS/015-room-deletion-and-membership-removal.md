@@ -1,6 +1,6 @@
 # R10a — Room deletion and membership removal (contract design)
 
-**Status:** planned (contract design only — work not yet started; no runtime change ships with this sprint)
+**Status:** implemented on `dev` (2026-07-02); pending Architect review / Product Owner acceptance. Documentation-only contract design sprint — no runtime change ships with this sprint.
 
 **Sprint name:** Room deletion and membership removal — R10a contract design
 
@@ -132,9 +132,10 @@ Both endpoints take **no request body** in R10b. A non-empty body is not a 400; 
 | `DELETE /api/rooms/{slug}` | Caller not host | `403 Forbidden` | empty (existing `requireHost` mapping) |
 | `DELETE /api/rooms/{slug}` | Room not found | `404 Not Found` | empty |
 | `DELETE /api/rooms/{slug}/members/{userId}` | Member removed | `204 No Content` | empty |
-| `DELETE /api/rooms/{slug}/members/{userId}` | Slug or userId invalid | `400 Bad Request` | `{ "error": "invalid room slug" }` |
-| `DELETE /api/rooms/{slug}/members/{userId}` | Actor is host removing self | `400 Bad Request` | `{ "error": "host cannot remove self" }` |
-| `DELETE /api/rooms/{slug}/members/{userId}` | Target is the host | `400 Bad Request` | `{ "error": "cannot remove host" }` |
+| `DELETE /api/rooms/{slug}/members/{userId}` | Slug invalid | `400 Bad Request` | `{ "error": "invalid room slug" }` |
+| `DELETE /api/rooms/{slug}/members/{userId}` | `userId` invalid (non-integer / `<= 0`) | `400 Bad Request` | `{ "error": "invalid user id" }` |
+| `DELETE /api/rooms/{slug}/members/{userId}` | Actor is host removing self | `400 Bad Request` | `{ "error": "host cannot remove self" }` (use case returns explicit `ErrHostCannotRemoveSelf` sentinel) |
+| `DELETE /api/rooms/{slug}/members/{userId}` | Target is the host | `400 Bad Request` | `{ "error": "cannot remove host" }` (use case returns explicit `ErrCannotRemoveHost` sentinel) |
 | `DELETE /api/rooms/{slug}/members/{userId}` | Caller not authenticated | `401 Unauthorized` | empty |
 | `DELETE /api/rooms/{slug}/members/{userId}` | Caller not host | `403 Forbidden` | empty |
 | `DELETE /api/rooms/{slug}/members/{userId}` | Target not a member | `404 Not Found` | empty |
@@ -177,8 +178,9 @@ Both endpoints take **no request body** in R10b. A non-empty body is not a 400; 
 #### Effect of `DELETE /api/rooms/{slug}` (room archive) on an active lease
 
 - Archiving a room ends any active lease **idempotently**, via the existing `PlayerLeaseInteractor.Release`-style flow OR by direct `EndLease` + `ArchiveRoomIfActive`. The R06 contract guarantees idempotence: ending a lease on an already-archived room is a no-op.
-- The existing R06 `room_archived` broadcast path is reused as-is. **R10b does NOT introduce a new archive event name.**
-- The future R10b runtime should prefer calling the existing `RoomRepository.ArchiveRoomIfActive` path (which is idempotent) directly, rather than re-implementing the lease-end + archive dance from R06. The "cleanest" wiring is for the new use case to call `ArchiveRoomIfActive` after the optional `EndLease`, but the implementation choice is left to R10b.
+- The **wire value** `room_archived` and the `RoomArchivedData` payload (`room_id`, `reason`, `archived_at`) are unchanged and are reused by R10b. **R10b does NOT introduce a new archive event-name / wire value.**
+- **Broadcast-path caveat:** the existing R06 archive broadcast is wired through the **global** `*ws.Hub.BroadcastRoomArchived` (R06) and rides the global `/ws` endpoint — it is NOT currently delivered to per-room clients on `/ws/rooms/{slug}`. R10b MUST add explicit per-room hub support so that room clients on `/ws/rooms/{slug}` receive `room_archived` with `reason: "host_archived"` on a successful host-driven archive. Concretely, R10b MUST add a `BroadcastRoomArchived(roomSlug, RoomArchivedEvent)` (or equivalent narrow seam) on `*ws.RoomWSHub` that emits the existing `room_archived` wire value with the existing payload shape. R10b MUST NOT bypass the per-room hub and MUST NOT require clients to subscribe to the global `/ws` endpoint to learn that their room was archived.
+- The future R10b runtime should prefer calling the existing `RoomRepository.ArchiveRoomIfActive` path (which is idempotent) directly, rather than re-implementing the lease-end + archive dance from R06. The "cleanest" wiring is for the new use case to call `ArchiveRoomIfActive` after the optional `EndLease`, then invoke the new per-room hub broadcast, but the implementation choice is left to R10b.
 
 #### Race-sensitive invariant
 
@@ -203,13 +205,14 @@ Both endpoints take **no request body** in R10b. A non-empty body is not a 400; 
 
 ### Decision 9 — WebSocket event contracts
 
-R10a does **not** introduce new event-name constants in `internal/delivery/ws/events.go`. The future R10b implementation reuses the existing per-room event surface and adds **zero new event types** to either `/ws` or `/ws/rooms/{slug}`.
+R10a does **not** introduce new event-name constants in `internal/delivery/ws/events.go`. The future R10b implementation WILL introduce **two new per-room event types / envelopes** on `/ws/rooms/{slug}`: `room_member_removed` (delivered to the removed client before close) and `room_members_changed` (delivered to remaining clients). The global `/ws` inventory remains unchanged. R10b does NOT add any new event types to the global `/ws` endpoint, and it does NOT modify the existing 16-event global inventory or any pre-existing per-room event (R07b/R07d/R09a/R09b/R09c/R09d/R09f). The two new per-room envelopes are the only additive WebSocket surface R10b introduces, and their wire-value names and payload shapes are fixed by this contract.
 
 #### Room archive / delete (`DELETE /api/rooms/{slug}`)
 
-- The existing R06 `room_archived` event is broadcast on `/ws/rooms/{slug}` exactly when the call actually transitioned the room from `active` to `archived` (not on the idempotent re-call of an already-archived room). The event payload (`RoomArchivedData` — `room_id`, `reason`, `archived_at`) is **unchanged**.
+- The R06 `room_archived` **wire value** (`room_archived`) and its payload (`RoomArchivedData` — `room_id`, `reason`, `archived_at`) are unchanged and reused by R10b.
+- The existing R06 archive broadcast path is wired through the **global** `*ws.Hub.BroadcastRoomArchived` (R06) and rides the global `/ws` endpoint. R10b MUST add explicit per-room hub support so that room clients on `/ws/rooms/{slug}` receive `room_archived` exactly when the call actually transitioned the room from `active` to `archived` (not on the idempotent re-call of an already-archived room). The new per-room broadcast uses the same wire value and the same payload shape as R06. The global `/ws` archive broadcast continues to ride the R06 path unchanged.
 - The reason string for a host-driven archive is a new sentinel: `"host_archived"`. The existing R06 sentinels (`"lease_expired"`, `"explicit"`) are unchanged.
-- Connected clients receive `room_archived` and may navigate away (existing R06 client-side behavior).
+- Connected per-room clients receive `room_archived` and may navigate away (existing R06 client-side behavior).
 
 #### Member removal (`DELETE /api/rooms/{slug}/members/{userId}`)
 
@@ -305,8 +308,8 @@ R10a documents the test matrix the future R10b runtime must satisfy. R10a does N
 - `TestDeleteRoom_InvalidSlug` — slug pattern violation; returns `ErrInvalidSlug`.
 - `TestRemoveMember_RemovesGuestMember` — host removes a guest; membership row deleted; no audit row (or one, if the optional table is in scope).
 - `TestRemoveMember_RemovesAdminMember` — host removes an admin; membership row deleted.
-- `TestRemoveMember_HostCannotRemoveSelf` — actor is host; actor is the target; returns `ErrForbidden` (or a new sentinel `ErrHostCannotRemoveSelf`).
-- `TestRemoveMember_CannotRemoveHost` — target is the host of the room; returns `ErrForbidden` (or a new sentinel `ErrCannotRemoveHost`).
+- `TestRemoveMember_HostCannotRemoveSelf` — actor is host; actor is the target; returns the explicit sentinel `ErrHostCannotRemoveSelf` (NOT generic `ErrForbidden`). Handler maps this sentinel to `400 Bad Request` with `{ "error": "host cannot remove self" }`.
+- `TestRemoveMember_CannotRemoveHost` — target is the host of the room; returns the explicit sentinel `ErrCannotRemoveHost` (NOT generic `ErrForbidden`). Handler maps this sentinel to `400 Bad Request` with `{ "error": "cannot remove host" }`.
 - `TestRemoveMember_TargetNotMember` — target user has no `room_members` row; returns `ErrMemberNotFound`.
 - `TestRemoveMember_RoomArchived_Returns409Sentinel` — room is archived; returns `ErrArchived`.
 - `TestRemoveMember_EndsActiveLease_WhenTargetIsLeaseHolder` — target holds lease; the lease is ended in the same transaction as the membership delete.
@@ -336,13 +339,14 @@ R10a documents the test matrix the future R10b runtime must satisfy. R10a does N
 - `TestRemoveMember_409_OnArchivedRoom`.
 - `TestRemoveMember_401_OnMissingToken`.
 - `TestRemoveMember_400_OnInvalidSlug`.
+- `TestRemoveMember_400_OnInvalidUserId` — `userId` is non-integer or `<= 0`; returns `400` with `{ "error": "invalid user id" }`.
 
 #### WebSocket hub tests (`internal/delivery/ws`)
 
 - `TestRoomMemberRemoved_DeliveredToRemovedClient_BeforeClose` — connect a client, run a removal, observe the `room_member_removed` envelope, then observe the connection close.
 - `TestRoomMembersChanged_DeliveredToRemainingClients_AfterRemoval` — two connected clients, remove one, the other receives `room_members_changed` with the new member list.
-- `TestRoomArchived_DeliveredToAllClients_OnHostArchive` — host archives the room; all clients receive `room_archived` with `reason: "host_archived"`.
-- `TestRoomArchived_NotDelivered_OnIdempotentReCall` — re-call archive on archived room; no `room_archived` is broadcast.
+- `TestRoomArchived_DeliveredToAllPerRoomClients_OnHostArchive` — host archives the room; all clients connected to `/ws/rooms/{slug}` (per-room hub) receive `room_archived` with `reason: "host_archived"`; the global `/ws` archive broadcast continues to ride the R06 path unchanged.
+- `TestRoomArchived_NotDelivered_OnIdempotentReCall` — re-call archive on archived room; no `room_archived` is broadcast on either the global `/ws` or the per-room `/ws/rooms/{slug}`.
 - `TestRemovedClient_CannotReconnect_ToPerRoomWS` — removed user reconnects to `/ws/rooms/{slug}`; receives `403`.
 
 #### Race-sensitive tests (run with `-race`)
@@ -362,7 +366,7 @@ The future R10b implementation MUST, at minimum:
 3. Implement the soft-archive path via `RoomRepository.ArchiveRoomIfActive` (idempotent).
 4. Implement the member-removal path via a new `room.Interactor.RemoveMember` (or equivalent), wrapping the membership row delete + lease end + audit row insert (if in scope) in a single transaction.
 5. Add the `room_member_removed` and `room_members_changed` per-room WebSocket envelopes documented above.
-6. Reuse the existing R06 `room_archived` envelope for room archive (no new event name).
+6. Reuse the existing R06 `room_archived` **wire value** and payload for room archive (no new event name). Add explicit per-room hub support on `*ws.RoomWSHub` so room clients on `/ws/rooms/{slug}` receive `room_archived` with `reason: "host_archived"` on a successful host-driven archive. The global `/ws` archive broadcast continues to ride the R06 path unchanged.
 7. Reuse the existing R09a `RequireActiveLeaseHolder` semantics — the playback interactor path is unchanged; the lease row simply disappears when the lease holder is removed.
 8. Leave active vote sessions to natural expiry (no forced resolve / cancel).
 9. Document the chosen WebSocket close code (1000 or 1008) in the R10b implementation summary.
