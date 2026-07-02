@@ -353,7 +353,7 @@ The closure pass added two new tests and modified one production method; no glob
 
 ## Implementation summary (R09g)
 
-R09g is the frontend integration slice that exposes the R09f backend runtime in the existing room frontend. Implemented on `dev` on 2026-07-01; **Product Owner acceptance pending**. R09g lands:
+R09g is the frontend integration slice that exposes the R09f backend runtime in the existing room frontend. Implemented on `dev` on 2026-07-01 and **accepted by the Product Owner on 2026-07-01**. R09g lands:
 
 - **Two frontend API methods (`frontend/src/services/api.js`):** `getRoomAutoQueueStatus(slug)` targets `GET /api/rooms/{slug}/autoqueue/status` and `setRoomAutoQueueEnabled(slug, enabled)` targets `POST /api/rooms/{slug}/autoqueue/toggle` with body exactly `{ enabled }`. No client-supplied identity fields, no strategy field — the toggle body shape is the contract; missing/extra fields are NOT sent.
 - **Per-room store slice (`frontend/src/store/index.js`):** extends `_ensureRoomEntry` to seed `roomQueues[slug].autoQueueConfig = { enabled: false, strategy: 'related' }` (mirrors the R09f backend default). Adds three mutators: `setRoomAutoQueueConfig(slug, enabled, strategy)` (replaces the per-room slice), `applyRoomAutoQueueAdded(slug, payload)` (prefers `payload.state` when present; fallback stamps `current_index` / `current_song` / `status` / `elapsed`), and `applyRoomAutoQueueConfigChanged(slug, payload)` (replaces only the per-room `autoQueueConfig`). All three mutators are isolated — they MUST NOT touch `globalStore.queueState`, `currentUser`, `voteSessions`, or `autoQueueConfig` (pinned by tests).
