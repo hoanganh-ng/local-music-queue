@@ -79,11 +79,17 @@ export function createRoomWsClient(slug, { onMessage, onGap, onOpen, onClose, on
           try { onError(err) } catch (e) { /* swallow */ }
         }
       }
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         ws = null
         if (disposed) return
         if (typeof onClose === 'function') {
-          try { onClose() } catch (e) { /* swallow */ }
+          // Pass the raw CloseEvent so callers can inspect the close
+          // code (e.g. 1008 = policy violation on host-driven removal).
+          // The CloseEvent is intentionally narrow: it carries `code`,
+          // `reason`, and `wasClean`. Callers that don't care about
+          // the close code continue to work unchanged because the
+          // previous contract accepted an argument-less onClose().
+          try { onClose(event) } catch (e) { /* swallow */ }
         }
       }
     },

@@ -390,18 +390,50 @@ async function seedRoomAutoQueueConfigFromRest() {
   }
 }
 
+// R10c: seed the per-room member list from the GET /members read
+// surface. room_members_changed is the authoritative delta after a
+// removal, but it does not fire BEFORE the first removal — so the
+// host remove-member UI must have an authoritative initial source.
+// 401/403/404/409 surface as a clear toast but do NOT block the rest
+// of the room from rendering; the panel just renders the seeded
+// "no members loaded yet" empty state. Archived rooms map to 409
+// (read-only authoritative surface; the host panel is hidden anyway).
+async function seedRoomMembersFromRest() {
+  try {
+    const res = await api.getRoomMembers(slug.value)
+    globalStore.applyRoomMembersChanged(slug.value, res)
+  } catch (e) {
+    const status = e?.status
+    if (status === 401) toast.error('You are signed out. Log in again.')
+    else if (status === 403) toast.error('You are not a member of this room.')
+    else if (status === 404) toast.error('Room not found.')
+    else if (status === 409) toast.error('Room is archived or in conflict.')
+  }
+}
+
 function buildRoomClient(targetSlug) {
   // R10c: a 1008 close means the host removed this client. We
   // surface a disabled/removed view and do NOT silently reconnect
   // — the backend will reject subsequent /ws/rooms/{slug} connects
   // because the membership row is gone. The onClose path is also
-  // used for benign disconnects, so the rule is: any close while
-  // a removal-driven flag is set is a no-op for the underlying
-  // socket; a close WITHOUT a removal flag is the normal "user
-  // navigated away / network blip" path. We still flag the
-  // connection as not connected so the UI gates controls.
-  const onClose = () => {
+  // used for benign disconnects, so the rule is:
+  //   - close code 1008 (policy violation) → mark the current
+  //     viewer removed unless the room is already archived
+  //     (the R10b broadcast order sends room_archived first; a
+  //     1008 without an archived state means the removal was
+  //     targeted at the current viewer, not a global archive).
+  //   - any other close (1000 normal, 1006 abnormal, etc.) is a
+  //     benign disconnect — flip connected=false only and let the
+  //     user navigate. No silent reconnect.
+  const onClose = (event) => {
     globalStore.setRoomQueueConnected(targetSlug, false)
+    const code = event && typeof event.code === 'number' ? event.code : null
+    const entry = globalStore.roomQueues[targetSlug]
+    const alreadyArchived = !!(entry && entry.archived)
+    if (code === 1008 && !alreadyArchived) {
+      globalStore.markRoomRemovedAsCurrentUser(targetSlug)
+      toast.info('You have been removed from this room.')
+    }
   }
   const options = {
     onMessage: applyMessage,
@@ -439,6 +471,7 @@ onMounted(async () => {
   globalStore.setRoomQueueConnected(target, false)
   await seedStateFromRest()
   await seedRoomAutoQueueConfigFromRest()
+  await seedRoomMembersFromRest()
   wsClient = buildRoomClient(target)
   wsClient.connect()
 })
@@ -448,12 +481,13 @@ watch(slug, async (newSlug) => {
   teardownCurrentClient()
   connectedSlug = newSlug
   globalStore.setRoomQueueConnected(newSlug, false)
-  // Mirror the mount path: REST-seed the new room's queue AND its
-  // auto-queue config before opening the room WebSocket so the UI
-  // is consistent with the next room's state even if the WS
-  // initial sync is delayed.
+  // Mirror the mount path: REST-seed the new room's queue, its
+  // auto-queue config, AND its member list before opening the room
+  // WebSocket so the UI is consistent with the next room's state
+  // even if the WS initial sync is delayed.
   await seedStateFromRest()
   await seedRoomAutoQueueConfigFromRest()
+  await seedRoomMembersFromRest()
   wsClient = buildRoomClient(newSlug)
   wsClient.connect()
 })

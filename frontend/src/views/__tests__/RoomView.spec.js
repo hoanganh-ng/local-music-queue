@@ -54,6 +54,7 @@ const apiMock = vi.hoisted(() => ({
   // R10c
   deleteRoom: vi.fn(),
   removeRoomMember: vi.fn(),
+  getRoomMembers: vi.fn(),
 }))
 vi.mock('../../services/api', () => ({ api: apiMock }))
 
@@ -778,12 +779,159 @@ describe('RoomView', () => {
     await router.push('/rooms/lobby')
     await flushPromises()
     const inst = wsFactoryMock.lastInstance
-    inst.onClose()
+    // Benign close (code 1006 — abnormal closure, e.g. network blip)
+    // must only flip connected=false. No silent reconnect, no removal
+    // flag flip.
+    inst.onClose({ code: 1006, reason: '', wasClean: false })
     expect(globalStore.roomQueues.lobby.connected).toBe(false)
+    expect(globalStore.roomQueues.lobby.removed).toBe(false)
     // No automatic connect() call should happen on a benign close.
     // (The remove flow only sends a 1008 — the RoomView does not
     // retry; the user must re-navigate.)
     expect(inst.connect).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  // --- R10c member-list initial fetch ---
+
+  it('fetches room members on mount and stores the initial list', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({
+      members: [
+        { user_id: 1, role: 'host' },
+        { user_id: 2, role: 'guest' },
+      ],
+    })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    expect(apiMock.getRoomMembers).toHaveBeenCalledWith('lobby')
+    expect(globalStore.roomQueues.lobby.members).toEqual([
+      { user_id: 1, role: 'host' },
+      { user_id: 2, role: 'guest' },
+    ])
+    wrapper.unmount()
+  })
+
+  it('re-fetches room members when the room slug changes', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [{ user_id: 1, role: 'host' }] })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    apiMock.getRoomMembers.mockClear()
+    apiMock.getRoomMembers.mockResolvedValue({ members: [{ user_id: 5, role: 'host' }] })
+    await router.push('/rooms/lounge')
+    await flushPromises()
+    expect(apiMock.getRoomMembers).toHaveBeenCalledWith('lounge')
+    expect(globalStore.roomQueues.lounge.members).toEqual([{ user_id: 5, role: 'host' }])
+    wrapper.unmount()
+  })
+
+  it('initial members fetch failure surfaces 401/403/404/409 via toast without throwing', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    for (const status of [401, 403, 404, 409]) {
+      apiMock.getRoomMembers.mockRejectedValueOnce(Object.assign(new Error(`err ${status}`), { status }))
+      const { wrapper, router } = mountRoomView()
+      await router.push('/rooms/lobby')
+      await flushPromises()
+      expect(toastMock.error).toHaveBeenCalled()
+      toastMock.error.mockClear()
+      wrapper.unmount()
+    }
+  })
+
+  it('host can perform the first removal after the initial members fetch (no room_members_changed before)', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({
+      members: [
+        { user_id: 1, role: 'host' },
+        { user_id: 2, role: 'guest' },
+      ],
+    })
+    apiMock.removeRoomMember.mockResolvedValue(null)
+    globalStore.setUser({ id: 1, display_name: 'Host', role: 'host' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const vm = wrapper.vm
+    // No room_members_changed event has fired yet — the host panel
+    // must still be able to remove member 2 because the initial
+    // REST fetch populated the list.
+    expect(globalStore.roomQueues.lobby.members.map((m) => m.user_id)).toEqual([1, 2])
+    await vm.removeRoomMember({ user_id: 2, role: 'guest' })
+    expect(apiMock.removeRoomMember).toHaveBeenCalledWith('lobby', 2)
+    confirmSpy.mockRestore()
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  // --- R10c 1008 close → removed state ---
+
+  it('onClose with code 1008 marks the current viewer removed and renders the removed banner', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [{ user_id: 1, role: 'host' }] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'guest' })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const inst = wsFactoryMock.lastInstance
+    // 1008 = policy violation: the host removed this client.
+    inst.onClose({ code: 1008, reason: 'removed from room', wasClean: false })
+    await flushPromises()
+    expect(globalStore.roomQueues.lobby.removed).toBe(true)
+    const html = wrapper.html()
+    expect(html).toContain('removed-banner')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('onClose with code 1008 is a no-op when the room is already archived (archived banner stays)', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [{ user_id: 1, role: 'host' }] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'guest' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.markRoomArchived('lobby')
+    await flushPromises()
+    const inst = wsFactoryMock.lastInstance
+    inst.onClose({ code: 1008, reason: 'removed from room', wasClean: false })
+    await flushPromises()
+    // 1008 in an already-archived context is interpreted as part of
+    // the global archive close — we MUST NOT also flip the
+    // removed flag (would render both banners and confuse the user).
+    expect(globalStore.roomQueues.lobby.removed).toBe(false)
+    const html = wrapper.html()
+    expect(html).toContain('archived-banner')
+    expect(html).not.toContain('removed-banner')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('onClose with code 1000 (normal closure) does NOT flip removed', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [{ user_id: 1, role: 'host' }] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'guest' })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const inst = wsFactoryMock.lastInstance
+    inst.onClose({ code: 1000, reason: '', wasClean: true })
+    await flushPromises()
+    expect(globalStore.roomQueues.lobby.removed).toBe(false)
     wrapper.unmount()
     globalStore.clearUser()
   })

@@ -327,5 +327,18 @@ export const api = {
     return this.request(`/rooms/${encodeURIComponent(slug)}/members/${encodeURIComponent(String(userId))}`, {
       method: 'DELETE'
     })
+  },
+
+  // R10c member-list read surface. GET /api/rooms/{slug}/members behind
+  // roomAuth. Returns { members: [{ user_id, role }, ...] } — the same
+  // shape as the room_members_changed WebSocket envelope, minus
+  // joined_at (intentionally omitted per R10a Decision 9). Any active
+  // member may read; the backend enforces active-room + active-membership
+  // (archived maps to 409, non-member maps to 403). No mutation, no
+  // broadcast, no client-supplied identity fields.
+  async getRoomMembers(slug) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}/members`, {
+      method: 'GET'
+    })
   }
 }

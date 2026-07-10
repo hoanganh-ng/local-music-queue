@@ -153,6 +153,14 @@ func (h *RoomHandlers) HandleGetRoom(w http.ResponseWriter, r *http.Request, slu
 
 // HandleListMembers: GET /api/rooms/{slug}/members — any active member may
 // list members per ADR 001. Active-membership gate is enforced by the interactor.
+//
+// R10c: response shape changed from a bare []entity.RoomMember to a
+// {"members": [{user_id, role}]} wrapper that matches the R10b
+// room_members_changed envelope. joined_at is intentionally OMITTED
+// from the wire (per R10a Decision 9 — the entity has it; the wire
+// does not). The active room is required (archived rooms return 409
+// via the interactor's ErrArchived mapping). No mutation, no broadcast,
+// no client-supplied identity fields.
 func (h *RoomHandlers) HandleListMembers(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
 	if actorUserID == 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -163,10 +171,27 @@ func (h *RoomHandlers) HandleListMembers(w http.ResponseWriter, r *http.Request,
 		writeRoomError(w, err)
 		return
 	}
-	if members == nil {
-		members = []entity.RoomMember{}
+	out := make([]roomMemberWire, 0, len(members))
+	for _, m := range members {
+		out = append(out, roomMemberWire{UserID: m.UserID, Role: string(m.Role)})
 	}
-	writeJSON(w, http.StatusOK, members)
+	writeJSON(w, http.StatusOK, roomMembersListResp{Members: out})
+}
+
+// roomMemberWire is the per-member entry shape returned by
+// HandleListMembers and used by the room_members_changed envelope.
+// Matches the R10b ws.RoomMemberInfo field tags exactly.
+type roomMemberWire struct {
+	UserID int    `json:"user_id"`
+	Role   string `json:"role"`
+}
+
+// roomMembersListResp is the response body for GET /api/rooms/{slug}/members.
+// The wrapper mirrors the room_members_changed data payload so the
+// frontend can route both through the same applyRoomMembersChanged
+// store mutator without an extra shape adapter.
+type roomMembersListResp struct {
+	Members []roomMemberWire `json:"members"`
 }
 
 // HandlePromoteMember: POST /api/rooms/{slug}/members/{userId}/promote —

@@ -224,4 +224,27 @@ describe('Room Queue API', () => {
       await expect(api.removeRoomMember('lobby', 7)).rejects.toMatchObject({ status })
     }
   })
+
+  // --- R10c member-list read surface ---
+
+  it('getRoomMembers targets GET /rooms/{slug}/members with bearer when valid', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    const mockFetch = mockFetchOk({ members: [{ user_id: 1, role: 'host' }] })
+    const res = await api.getRoomMembers('lobby')
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/members$/)
+    expect(init.method).toBe('GET')
+    expect(init.body === undefined || init.body === '' || init.body === null).toBe(true)
+    expect(init.headers['Authorization']).toBe('Bearer tok')
+    expect(res).toEqual({ members: [{ user_id: 1, role: 'host' }] })
+  })
+
+  it('getRoomMembers propagates APIError on 401 / 403 / 404 / 409', async () => {
+    for (const status of [401, 403, 404, 409]) {
+      const mockFetch = vi.fn().mockResolvedValue({ status, ok: false, text: async () => `err ${status}` })
+      global.fetch = mockFetch
+      await expect(api.getRoomMembers('lobby')).rejects.toMatchObject({ status })
+    }
+  })
 })
