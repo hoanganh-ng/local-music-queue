@@ -35,8 +35,9 @@ type memberRemovedCall struct {
 }
 
 type membersChangedCall struct {
-	RoomSlug string
-	Members  []entity.RoomMember
+	RoomSlug      string
+	Members       []entity.RoomMember
+	ExcludeUserID int
 }
 
 func (r *recordingBroadcaster) BroadcastRoomArchived(slug, reason string) {
@@ -51,12 +52,12 @@ func (r *recordingBroadcaster) BroadcastRoomMemberRemoved(slug string, target in
 	r.memberRemoved = append(r.memberRemoved, memberRemovedCall{slug, target, reason})
 }
 
-func (r *recordingBroadcaster) BroadcastRoomMembersChanged(slug string, members []entity.RoomMember) {
+func (r *recordingBroadcaster) BroadcastRoomMembersChanged(slug string, members []entity.RoomMember, excludeUserID int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cp := make([]entity.RoomMember, len(members))
 	copy(cp, members)
-	r.membersChanged = append(r.membersChanged, membersChangedCall{slug, cp})
+	r.membersChanged = append(r.membersChanged, membersChangedCall{slug, cp, excludeUserID})
 }
 
 func (r *recordingBroadcaster) CloseRemovedClient(slug string, target int) {
@@ -175,6 +176,9 @@ func TestRoom_RemoveMemberByHost_RemovesGuest(t *testing.T) {
 	}
 	if len(rec.membersChanged) != 1 {
 		t.Errorf("expected exactly one members-changed broadcast, got %d", len(rec.membersChanged))
+	}
+	if rec.membersChanged[0].ExcludeUserID != 2 {
+		t.Errorf("expected members-changed ExcludeUserID=2 (target), got %d", rec.membersChanged[0].ExcludeUserID)
 	}
 	if got := len(rec.membersChanged[0].Members); got != 1 {
 		t.Errorf("expected post-mutation snapshot to have 1 member (host), got %d", got)
@@ -382,5 +386,106 @@ func TestRoom_RemoveMember_ConcurrentDuplicateRemove_OneWins(t *testing.T) {
 	}
 	if success != 1 || notFound != 1 {
 		t.Errorf("expected exactly one success and one ErrMemberNotFound, got success=%d notFound=%d", success, notFound)
+	}
+}
+
+// TestRoom_ArchiveRoomByHost_EndsActiveLease pins the R10a Decision 7
+// invariant: DELETE /api/rooms/{slug} (i.e. ArchiveRoomByHost) MUST end
+// any active lease for the room. The lease row's ended_at must be set
+// after the archive call returns.
+func TestRoom_ArchiveRoomByHost_EndsActiveLease(t *testing.T) {
+	inter, db, cleanup := pgInterWithDB(t)
+	defer cleanup()
+	leaseRepo := persistence.NewPostgresPlayerLeaseRepository(db)
+	pi := NewPlayerLeaseInteractor(leaseRepo, inter.repo, db, 60*time.Second, 30*time.Second)
+	ctx := context.Background()
+
+	room, err := inter.CreateRoom(ctx, "lounge", "Lounge", 1)
+	if err != nil {
+		t.Fatalf("CreateRoom: %v", err)
+	}
+	// Seed an active lease for the room.
+	if _, err := pi.leaseRepo.Claim(ctx, room.ID, 1, time.Now(), 60*time.Second); err != nil {
+		t.Fatalf("seed lease: %v", err)
+	}
+	// Sanity: lease is active before archive.
+	if _, err := pi.leaseRepo.GetByRoom(ctx, room.ID); err != nil {
+		t.Fatalf("expected active lease pre-archive, got err=%v", err)
+	}
+
+	transitioned, err := inter.ArchiveRoomByHost(ctx, "lounge", 1)
+	if err != nil {
+		t.Fatalf("ArchiveRoomByHost: %v", err)
+	}
+	if !transitioned {
+		t.Errorf("expected transitioned=true, got false")
+	}
+	// Lease MUST be ended (GetByRoom returns ErrNoRows for ended leases).
+	if _, err := pi.leaseRepo.GetByRoom(ctx, room.ID); !errors.Is(err, errIsNotFound()) {
+		t.Errorf("expected active lease ended after archive, got err=%v", err)
+	}
+}
+
+// TestRoom_ArchiveRoomByHost_NoLease_NoOp pins that ArchiveRoomByHost
+// does not error when there is no active lease (idempotent end).
+func TestRoom_ArchiveRoomByHost_NoLease_NoOp(t *testing.T) {
+	inter, _, cleanup := pgInterWithDB(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if _, err := inter.CreateRoom(ctx, "lounge", "Lounge", 1); err != nil {
+		t.Fatalf("CreateRoom: %v", err)
+	}
+	transitioned, err := inter.ArchiveRoomByHost(ctx, "lounge", 1)
+	if err != nil {
+		t.Fatalf("ArchiveRoomByHost (no lease): %v", err)
+	}
+	if !transitioned {
+		t.Errorf("expected transitioned=true on active room with no lease, got false")
+	}
+}
+
+// TestRoom_ArchiveRoomByHost_IdempotentEndsLease pins that a second
+// archive call on an already-archived room stays idempotent (no error,
+// no broadcast) AND does not re-end an already-ended lease.
+func TestRoom_ArchiveRoomByHost_IdempotentEndsLease(t *testing.T) {
+	inter, db, cleanup := pgInterWithDB(t)
+	defer cleanup()
+	leaseRepo := persistence.NewPostgresPlayerLeaseRepository(db)
+	pi := NewPlayerLeaseInteractor(leaseRepo, inter.repo, db, 60*time.Second, 30*time.Second)
+	rec := &recordingBroadcaster{}
+	inter.SetMembersBroadcaster(rec)
+	ctx := context.Background()
+
+	room, err := inter.CreateRoom(ctx, "lounge", "Lounge", 1)
+	if err != nil {
+		t.Fatalf("CreateRoom: %v", err)
+	}
+	if _, err := pi.leaseRepo.Claim(ctx, room.ID, 1, time.Now(), 60*time.Second); err != nil {
+		t.Fatalf("seed lease: %v", err)
+	}
+	// First archive: ends lease + transitions to archived + broadcasts.
+	if _, err := inter.ArchiveRoomByHost(ctx, "lounge", 1); err != nil {
+		t.Fatalf("first archive: %v", err)
+	}
+	if _, err := pi.leaseRepo.GetByRoom(ctx, room.ID); !errors.Is(err, errIsNotFound()) {
+		t.Fatalf("expected lease ended after first archive, got err=%v", err)
+	}
+	firstArchivedCount := len(rec.archived)
+
+	// Second archive: must NOT broadcast, must NOT error.
+	transitioned, err := inter.ArchiveRoomByHost(ctx, "lounge", 1)
+	if err != nil {
+		t.Fatalf("second archive: %v", err)
+	}
+	if transitioned {
+		t.Errorf("expected transitioned=false on idempotent re-archive, got true")
+	}
+	if len(rec.archived) != firstArchivedCount {
+		t.Errorf("expected NO additional archive broadcast on idempotent re-archive, got %d new calls", len(rec.archived)-firstArchivedCount)
+	}
+	// Lease still ended (no-op end on already-ended lease).
+	if _, err := pi.leaseRepo.GetByRoom(ctx, room.ID); !errors.Is(err, errIsNotFound()) {
+		t.Errorf("expected lease still ended on idempotent re-archive, got err=%v", err)
 	}
 }

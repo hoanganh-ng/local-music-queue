@@ -437,11 +437,14 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	}))
 	// R10b: DELETE /api/rooms/{slug}/members/{userId} — host-driven
 	// member removal. userId is parsed in main.go so a non-integer or
-	// <= 0 path value returns 400 with "invalid user id".
+	// <= 0 path value returns 400 with the R10a JSON body shape
+	// `{"error": "invalid user id"}`.
 	mux.HandleFunc("DELETE /api/rooms/{slug}/members/{userId}", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		userID, perr := strconv.Atoi(r.PathValue("userId"))
 		if perr != nil || userID <= 0 {
-			http.Error(w, "invalid user id", http.StatusBadRequest)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid user id"}` + "\n"))
 			return
 		}
 		roomHandlers.HandleDeleteMember(w, r, r.PathValue("slug"), actorFromCtx(r.Context()), userID)
@@ -681,20 +684,15 @@ func (a roomMembersBroadcasterAdapter) BroadcastRoomMemberRemoved(roomSlug strin
 // BroadcastRoomMembersChanged implements room.RoomMembersBroadcaster.
 // The per-room hub's BroadcastRoomMembersChanged fans out to
 // remaining clients, excluding the target user whose connections
-// are about to be closed.
-func (a roomMembersBroadcasterAdapter) BroadcastRoomMembersChanged(roomSlug string, members []entity.RoomMember) {
+// are about to be closed. The seam carries excludeUserID through
+// to the hub so the production adapter honors the targeted
+// fan-out — without this, the room_members_changed envelope would
+// race the close-frame path and potentially reach the removed user.
+func (a roomMembersBroadcasterAdapter) BroadcastRoomMembersChanged(roomSlug string, members []entity.RoomMember, excludeUserID int) {
 	if len(members) == 0 {
 		return
 	}
-	// Find the user id of the removed user by looking for any
-	// excluded user — for R10b this is the targetUserID passed
-	// alongside; the interactor passes a separate broadcast call
-	// that already excludes via the hub's broadcastExcept path. We
-	// pass excludeUserID=0 here because the hub's fan-out will
-	// include ALL remaining clients. The targeted client has
-	// already been excluded from the member list (it was deleted
-	// before the call).
-	a.hub.BroadcastRoomMembersChanged(roomSlug, members, 0)
+	a.hub.BroadcastRoomMembersChanged(roomSlug, members, excludeUserID)
 }
 
 // CloseRemovedClient implements room.RoomMembersBroadcaster. Sends

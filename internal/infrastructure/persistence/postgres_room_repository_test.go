@@ -212,3 +212,88 @@ func TestPostgresRoom_CountHosts(t *testing.T) {
 		t.Errorf("expected 1 host, got %d", n)
 	}
 }
+
+// TestPostgresRoom_EndActiveLease_Ends pins the R10a Decision 7
+// invariant at the repo level: EndActiveLease must set ended_at on an
+// active lease and return leaseEnded=true.
+func TestPostgresRoom_EndActiveLease_Ends(t *testing.T) {
+	repo, db := newRoomRepo(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO users (id, email, display_name, role, priority_balance, created_at, updated_at)
+		 VALUES (1, 'h@example.com', 'Host', 'host', 0, $1, $1)`, now,
+	); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	room, err := repo.CreateRoomAndHost(ctx, "lounge", "Lounge", 1, now)
+	if err != nil {
+		t.Fatalf("CreateRoomAndHost: %v", err)
+	}
+
+	// Seed an active lease directly.
+	leaseEnd := now.Add(60 * time.Second)
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO player_leases (room_id, claimed_by_user_id, claimed_at, last_heartbeat_at, expires_at, ended_at)
+		 VALUES ($1, 1, $2, $2, $3, NULL)`,
+		room.ID, now, leaseEnd,
+	); err != nil {
+		t.Fatalf("seed lease: %v", err)
+	}
+
+	ended, err := repo.EndActiveLease(ctx, room.ID, now)
+	if err != nil {
+		t.Fatalf("EndActiveLease: %v", err)
+	}
+	if !ended {
+		t.Errorf("expected leaseEnded=true, got false")
+	}
+
+	// ended_at must be set.
+	var endedAt sql.NullTime
+	if err := db.QueryRowContext(ctx,
+		`SELECT ended_at FROM player_leases WHERE room_id = $1`, room.ID,
+	).Scan(&endedAt); err != nil {
+		t.Fatalf("scan lease: %v", err)
+	}
+	if !endedAt.Valid {
+		t.Errorf("expected ended_at set, got NULL")
+	}
+}
+
+// TestPostgresRoom_EndActiveLease_NoLease_NoOp pins that EndActiveLease
+// returns (false, nil) when no active lease exists. Idempotent.
+func TestPostgresRoom_EndActiveLease_NoLease_NoOp(t *testing.T) {
+	repo, db := newRoomRepo(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO users (id, email, display_name, role, priority_balance, created_at, updated_at)
+		 VALUES (1, 'h@example.com', 'Host', 'host', 0, $1, $1)`, now,
+	); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	room, err := repo.CreateRoomAndHost(ctx, "lounge", "Lounge", 1, now)
+	if err != nil {
+		t.Fatalf("CreateRoomAndHost: %v", err)
+	}
+
+	ended, err := repo.EndActiveLease(ctx, room.ID, now)
+	if err != nil {
+		t.Fatalf("EndActiveLease (no lease): %v", err)
+	}
+	if ended {
+		t.Errorf("expected leaseEnded=false (no active lease), got true")
+	}
+
+	// Second call stays no-op.
+	ended, err = repo.EndActiveLease(ctx, room.ID, now)
+	if err != nil {
+		t.Fatalf("EndActiveLease (second): %v", err)
+	}
+	if ended {
+		t.Errorf("expected leaseEnded=false on second call, got true")
+	}
+}

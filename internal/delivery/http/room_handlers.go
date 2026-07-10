@@ -364,18 +364,21 @@ func (h *RoomHandlers) HandleReleasePlayer(w http.ResponseWriter, r *http.Reques
 // with reason "host_archived". The existing global /ws archive
 // broadcast (R06) is intentionally NOT invoked from this path —
 // R10b uses the per-room hub only.
+//
+// R10a contract: error responses for invalid slug use a JSON body
+// `{"error": "invalid room slug"}`. Successes return 204 (empty).
 func (h *RoomHandlers) HandleDeleteRoom(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
 	if actorUserID == 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if !entity.IsValidSlug(slug) {
-		http.Error(w, "invalid room slug", http.StatusBadRequest)
+		writeRoomJSONError(w, "invalid room slug", http.StatusBadRequest)
 		return
 	}
 	transitioned, err := h.inter.ArchiveRoomByHost(r.Context(), slug, actorUserID)
 	if err != nil {
-		writeRoomError(w, err)
+		writeDeleteRoomError(w, err)
 		return
 	}
 	if transitioned && h.memberBroadcaster != nil {
@@ -403,14 +406,23 @@ func (h *RoomHandlers) HandleDeleteRoom(w http.ResponseWriter, r *http.Request, 
 // close-frame ordering is enforced inside usecase/room so the HTTP
 // handler stays transport-only.
 //
+// R10a contract: error responses for invalid slug, invalid user id,
+// host-removes-self, remove-host, and archived room all use JSON
+// bodies of the shape `{"error": "<stable message>"}`. Successes
+// return 204 (empty).
+//
 // body is ignored — the contract specifies no request body.
 func (h *RoomHandlers) HandleDeleteMember(w http.ResponseWriter, r *http.Request, slug string, actorUserID int, targetUserID int) {
 	if actorUserID == 0 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	if !entity.IsValidSlug(slug) {
+		writeRoomJSONError(w, "invalid room slug", http.StatusBadRequest)
+		return
+	}
 	if _, err := h.inter.RemoveMemberByHost(r.Context(), slug, actorUserID, targetUserID); err != nil {
-		writeRoomError(w, err)
+		writeDeleteMemberError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -475,4 +487,53 @@ func writeJSON(w http.ResponseWriter, status int, body interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// writeRoomJSONError writes a JSON error body `{"error": "<msg>"}`
+// with the given status. Used by the R10b DELETE endpoints to
+// conform to the R10a contract's documented error-body shape.
+func writeRoomJSONError(w http.ResponseWriter, msg string, status int) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// writeDeleteRoomError maps use-case sentinel errors to JSON error
+// bodies per the R10a contract for DELETE /api/rooms/{slug}.
+func writeDeleteRoomError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, room.ErrInvalidSlug):
+		writeRoomJSONError(w, "invalid room slug", http.StatusBadRequest)
+	case errors.Is(err, room.ErrRoomNotFound):
+		http.Error(w, "not found", http.StatusNotFound)
+	case errors.Is(err, room.ErrForbidden),
+		errors.Is(err, room.ErrPlayerLeaseForbidden),
+		errors.Is(err, room.ErrNotLeaseHolder):
+		http.Error(w, "forbidden", http.StatusForbidden)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// writeDeleteMemberError maps use-case sentinel errors to JSON error
+// bodies per the R10a contract for DELETE /api/rooms/{slug}/members/{userId}.
+func writeDeleteMemberError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, room.ErrInvalidSlug):
+		writeRoomJSONError(w, "invalid room slug", http.StatusBadRequest)
+	case errors.Is(err, room.ErrHostCannotRemoveSelf):
+		writeRoomJSONError(w, "host cannot remove self", http.StatusBadRequest)
+	case errors.Is(err, room.ErrCannotRemoveHost):
+		writeRoomJSONError(w, "cannot remove host", http.StatusBadRequest)
+	case errors.Is(err, room.ErrArchived):
+		writeRoomJSONError(w, "room archived", http.StatusConflict)
+	case errors.Is(err, room.ErrMemberNotFound):
+		http.Error(w, "not found", http.StatusNotFound)
+	case errors.Is(err, room.ErrRoomNotFound):
+		http.Error(w, "not found", http.StatusNotFound)
+	case errors.Is(err, room.ErrForbidden),
+		errors.Is(err, room.ErrPlayerLeaseForbidden),
+		errors.Is(err, room.ErrNotLeaseHolder):
+		http.Error(w, "forbidden", http.StatusForbidden)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }

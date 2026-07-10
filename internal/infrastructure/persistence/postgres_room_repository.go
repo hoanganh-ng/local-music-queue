@@ -151,6 +151,27 @@ func (r *PostgresRoomRepository) ArchiveRoomIfActive(ctx context.Context, roomID
 	return n > 0, nil
 }
 
+// EndActiveLease ends any active lease for the room. Idempotent:
+// returns (false, nil) when no active lease exists. R10b: this is the
+// narrowest seam that satisfies the R10a Decision 7 "archive ends active
+// lease idempotently" invariant. Implemented as a single UPDATE filtered
+// on `ended_at IS NULL` so concurrent archive callers cannot race a
+// stale ended_at, and so calling on an already-archived room is a no-op.
+func (r *PostgresRoomRepository) EndActiveLease(ctx context.Context, roomID int64, now time.Time) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE player_leases SET ended_at = $1
+		 WHERE room_id = $2 AND ended_at IS NULL`,
+		now, roomID)
+	if err != nil {
+		return false, fmt.Errorf("end active lease: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("rows affected (lease): %w", err)
+	}
+	return n > 0, nil
+}
+
 // AddMember inserts a membership row. Caller is responsible for invariant
 // checks (one host per room).
 func (r *PostgresRoomRepository) AddMember(ctx context.Context, roomID int64, userID int, role entity.RoomMemberRole, now time.Time) error {

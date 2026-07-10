@@ -114,7 +114,11 @@ type PlaybackLeaseAuthorizer interface {
 //
 // BroadcastRoomMembersChanged delivers the room_members_changed
 // envelope to the remaining per-room clients after a successful
-// removal.
+// removal. excludeUserID is the user id of the removed client whose
+// connections are about to be closed; production wiring MUST carry
+// targetUserID through this seam so the room_members_changed envelope
+// does NOT reach the removed client (which is being torn down by the
+// close-frame path). Pass 0 to deliver to all clients.
 //
 // CloseRemovedClient sends the close-frame (code 1008) to the
 // removed user's per-room WS connections after the targeted envelope
@@ -122,7 +126,7 @@ type PlaybackLeaseAuthorizer interface {
 type RoomMembersBroadcaster interface {
 	BroadcastRoomArchived(roomSlug string, reason string)
 	BroadcastRoomMemberRemoved(roomSlug string, targetUserID int, reason string)
-	BroadcastRoomMembersChanged(roomSlug string, members []entity.RoomMember)
+	BroadcastRoomMembersChanged(roomSlug string, members []entity.RoomMember, excludeUserID int)
 	CloseRemovedClient(roomSlug string, targetUserID int)
 }
 
@@ -482,6 +486,13 @@ func (i *Interactor) ArchiveRoom(ctx context.Context, roomID int64) error {
 // The boolean `archived` is true ONLY when this call transitioned
 // active → archived. Callers (HTTP handler) use it to decide whether
 // to broadcast the per-room room_archived event.
+//
+// R10a Decision 7 requires "archive ends any active lease idempotently".
+// We end the active lease via repo.EndActiveLease BEFORE the
+// ArchiveRoomIfActive call so a lease can never outlive its room.
+// The lease end is idempotent (no-op when no active lease exists) so a
+// re-call on an already-archived room stays idempotent and still
+// returns (false, nil).
 func (i *Interactor) ArchiveRoomByHost(ctx context.Context, slug string, actorUserID int) (archived bool, err error) {
 	if !entity.IsValidSlug(slug) {
 		return false, ErrInvalidSlug
@@ -495,6 +506,12 @@ func (i *Interactor) ArchiveRoomByHost(ctx context.Context, slug string, actorUs
 	}
 	if err := i.requireHost(ctx, room.ID, actorUserID); err != nil {
 		return false, err
+	}
+	// End any active lease for this room BEFORE the archive transition
+	// so a lease can never outlive its room. Idempotent: returns
+	// (false, nil) when no active lease exists.
+	if _, err := i.repo.EndActiveLease(ctx, room.ID, i.now()); err != nil {
+		return false, fmt.Errorf("end active lease: %w", err)
 	}
 	transitioned, err := i.repo.ArchiveRoomIfActive(ctx, room.ID, i.now())
 	if err != nil {
@@ -602,7 +619,7 @@ func (i *Interactor) RemoveMemberByHost(ctx context.Context, slug string, actorU
 			// returns a real error.
 			return leaseEnded, fmt.Errorf("list remaining members: %w", lerr)
 		}
-		i.membersBC.BroadcastRoomMembersChanged(room.Slug, remaining)
+		i.membersBC.BroadcastRoomMembersChanged(room.Slug, remaining, targetUserID)
 		// Close the removed user's per-room WS connections with code
 		// 1008 AFTER the targeted room_member_removed envelope has been
 		// delivered. The broadcaster is responsible for the

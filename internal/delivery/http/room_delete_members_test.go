@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -141,7 +142,8 @@ func TestRoomHandler_DeleteMember_204OnSuccess(t *testing.T) {
 	}
 }
 
-// TestRoomHandler_DeleteMember_400OnHostRemovesSelf.
+// TestRoomHandler_DeleteMember_400OnHostRemovesSelf: JSON body
+// `{"error": "host cannot remove self"}` per R10a contract.
 func TestRoomHandler_DeleteMember_400OnHostRemovesSelf(t *testing.T) {
 	rh, _, db := newRoomHandlers(t)
 	host := seedUser(t, db, "h@example.com", entity.RoleHost)
@@ -154,9 +156,10 @@ func TestRoomHandler_DeleteMember_400OnHostRemovesSelf(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d body=%s", rr.Code, rr.Body.String())
 	}
-	if rr.Body.String() != "host cannot remove self\n" {
-		t.Errorf("unexpected body: %s", rr.Body.String())
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("expected Content-Type application/json, got %q", got)
 	}
+	assertJSONError(t, rr.Body.Bytes(), "host cannot remove self")
 }
 
 // TestRoomHandler_DeleteMember_404OnTargetNotMember.
@@ -225,6 +228,84 @@ func TestRoomHandler_DeleteMember_400OnInvalidUserId(t *testing.T) {
 	t.Skip("covered at route registration in main.go (strconv.Atoi + <=0 gate)")
 }
 
+// TestRoomHandler_DeleteRoom_400OnInvalidSlug_JSONBody pins the
+// R10a contract: invalid slug returns 400 with JSON body
+// `{"error": "invalid room slug"}`.
+func TestRoomHandler_DeleteRoom_400OnInvalidSlug_JSONBody(t *testing.T) {
+	rh, _, _ := newRoomHandlers(t)
+	req := httptest.NewRequest(http.MethodDelete, "/api/rooms/BadSlug", nil)
+	rr := httptest.NewRecorder()
+	rh.HandleDeleteRoom(rr, req, "BadSlug", 1)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 on invalid slug, got %d", rr.Code)
+	}
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("expected Content-Type application/json, got %q", got)
+	}
+	assertJSONError(t, rr.Body.Bytes(), "invalid room slug")
+}
+
+// TestRoomHandler_DeleteMember_409OnArchivedRoom_JSONBody pins the
+// R10a contract: archived room returns 409 with JSON body
+// `{"error": "room archived"}`.
+func TestRoomHandler_DeleteMember_409OnArchivedRoom_JSONBody(t *testing.T) {
+	rh, _, db := newRoomHandlers(t)
+	host := seedUser(t, db, "h@example.com", entity.RoleHost)
+	guest := seedUser(t, db, "g@example.com", entity.RoleGuest)
+	if _, err := rh.inter.CreateRoom(context.Background(), "lounge", "Lounge", host); err != nil {
+		t.Fatalf("CreateRoom: %v", err)
+	}
+	roomObj, _ := rh.inter.Repo().GetRoomBySlug(context.Background(), "lounge")
+	if err := rh.inter.Repo().AddMember(context.Background(), roomObj.ID, guest, entity.RoomRoleGuest, time.Now()); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+	if err := rh.inter.Repo().ArchiveRoom(context.Background(), roomObj.ID, time.Now()); err != nil {
+		t.Fatalf("ArchiveRoom: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/api/rooms/lounge/members/"+strconv.Itoa(guest), nil)
+	rr := httptest.NewRecorder()
+	rh.HandleDeleteMember(rr, req, "lounge", host, guest)
+	if rr.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d", rr.Code)
+	}
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("expected Content-Type application/json, got %q", got)
+	}
+	assertJSONError(t, rr.Body.Bytes(), "room archived")
+}
+
+// TestRoomHandler_DeleteMember_400OnInvalidSlug_JSONBody pins the
+// R10a contract: invalid slug returns 400 with JSON body
+// `{"error": "invalid room slug"}` for the DELETE member endpoint.
+func TestRoomHandler_DeleteMember_400OnInvalidSlug_JSONBody(t *testing.T) {
+	rh, _, _ := newRoomHandlers(t)
+	req := httptest.NewRequest(http.MethodDelete, "/api/rooms/BadSlug/members/2", nil)
+	rr := httptest.NewRecorder()
+	rh.HandleDeleteMember(rr, req, "BadSlug", 1, 2)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rr.Code)
+	}
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("expected Content-Type application/json, got %q", got)
+	}
+	assertJSONError(t, rr.Body.Bytes(), "invalid room slug")
+}
+
+// assertJSONError decodes a JSON error body of the shape
+// `{"error": "<msg>"}` and asserts the error string matches want.
+func assertJSONError(t *testing.T, body []byte, want string) {
+	t.Helper()
+	var env struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("expected JSON error body, got %q (unmarshal: %v)", string(body), err)
+	}
+	if env.Error != want {
+		t.Errorf("expected error=%q, got %q", want, env.Error)
+	}
+}
+
 // recordingMembersBroadcaster is a thread-safe stub for
 // room.RoomMembersBroadcaster used by the handler tests.
 type recordingMembersBroadcaster struct {
@@ -241,8 +322,9 @@ type bcMemberRemoved struct {
 }
 
 type bcMembersChanged struct {
-	RoomSlug string
-	Members  []entity.RoomMember
+	RoomSlug      string
+	Members       []entity.RoomMember
+	ExcludeUserID int
 }
 
 func (r *recordingMembersBroadcaster) BroadcastRoomArchived(roomSlug, reason string) {
@@ -251,10 +333,10 @@ func (r *recordingMembersBroadcaster) BroadcastRoomArchived(roomSlug, reason str
 func (r *recordingMembersBroadcaster) BroadcastRoomMemberRemoved(roomSlug string, target int, reason string) {
 	r.memberRemoved = append(r.memberRemoved, bcMemberRemoved{roomSlug, target, reason})
 }
-func (r *recordingMembersBroadcaster) BroadcastRoomMembersChanged(roomSlug string, members []entity.RoomMember) {
+func (r *recordingMembersBroadcaster) BroadcastRoomMembersChanged(roomSlug string, members []entity.RoomMember, excludeUserID int) {
 	cp := make([]entity.RoomMember, len(members))
 	copy(cp, members)
-	r.membersChanged = append(r.membersChanged, bcMembersChanged{roomSlug, cp})
+	r.membersChanged = append(r.membersChanged, bcMembersChanged{roomSlug, cp, excludeUserID})
 }
 func (r *recordingMembersBroadcaster) CloseRemovedClient(roomSlug string, target int) {
 	r.closed = append(r.closed, bcMemberRemoved{roomSlug, target, ""})

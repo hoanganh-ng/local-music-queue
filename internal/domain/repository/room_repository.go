@@ -32,6 +32,14 @@ type RoomRepository interface {
 	// archived twice).
 	ArchiveRoomIfActive(ctx context.Context, roomID int64, now time.Time) (bool, error)
 
+	// EndActiveLease ends any active lease for the room (idempotent:
+	// returns false when no active lease exists). Used by the host-driven
+	// archive path to satisfy R10a's "archive ends active lease idempotently"
+	// invariant without coupling ArchiveRoomIfActive to the lease repo.
+	// Implemented as a single UPDATE against player_leases so concurrent
+	// archive callers cannot race a stale ended_at.
+	EndActiveLease(ctx context.Context, roomID int64, now time.Time) (leaseEnded bool, err error)
+
 	// Members
 	AddMember(ctx context.Context, roomID int64, userID int, role entity.RoomMemberRole, now time.Time) error
 	GetMember(ctx context.Context, roomID int64, userID int) (*entity.RoomMember, error)
