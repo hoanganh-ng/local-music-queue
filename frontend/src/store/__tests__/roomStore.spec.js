@@ -224,4 +224,63 @@ describe('Room queue store (isolated)', () => {
     expect(globalStore.autoQueueConfig).toEqual(before.autoQueueConfig)
     expect(globalStore.currentUser).toBe(before.currentUser)
   })
+
+  // --- R10c room deletion + member removal mutators ---
+
+  it('_ensureRoomEntry seeds archived/removed/members to {false,false,[]}', () => {
+    globalStore.setRoomQueueConnected('lobby', true)
+    expect(globalStore.roomQueues.lobby.archived).toBe(false)
+    expect(globalStore.roomQueues.lobby.removed).toBe(false)
+    expect(globalStore.roomQueues.lobby.members).toEqual([])
+  })
+
+  it('markRoomArchived flips archived=true on the per-room entry', () => {
+    globalStore.markRoomArchived('lobby')
+    expect(globalStore.roomQueues.lobby.archived).toBe(true)
+  })
+
+  it('markRoomRemovedAsCurrentUser flips removed=true on the per-room entry', () => {
+    globalStore.markRoomRemovedAsCurrentUser('lobby')
+    expect(globalStore.roomQueues.lobby.removed).toBe(true)
+  })
+
+  it('applyRoomMembersChanged replaces the per-room members list from payload.members', () => {
+    globalStore.applyRoomMembersChanged('lobby', {
+      room_slug: 'lobby',
+      members: [
+        { user_id: 1, role: 'host' },
+        { user_id: 2, role: 'admin' },
+        { user_id: 3, role: 'guest' },
+      ],
+    })
+    expect(globalStore.roomQueues.lobby.members).toEqual([
+      { user_id: 1, role: 'host' },
+      { user_id: 2, role: 'admin' },
+      { user_id: 3, role: 'guest' },
+    ])
+  })
+
+  it('applyRoomMembersChanged leaves the cached list intact when payload.members is missing', () => {
+    globalStore.applyRoomMembersChanged('lobby', {
+      members: [{ user_id: 1, role: 'host' }],
+    })
+    globalStore.applyRoomMembersChanged('lobby', { room_slug: 'lobby' }) // no members key
+    expect(globalStore.roomQueues.lobby.members).toEqual([{ user_id: 1, role: 'host' }])
+  })
+
+  it('R10c mutators are isolated to roomQueues[slug] and NEVER touch global queueState / autoQueueConfig / voteSessions / currentUser', () => {
+    const before = {
+      queueState: JSON.parse(JSON.stringify(globalStore.queueState)),
+      voteSessions: { ...globalStore.voteSessions },
+      autoQueueConfig: { ...globalStore.autoQueueConfig },
+      currentUser: globalStore.currentUser,
+    }
+    globalStore.markRoomArchived('lobby')
+    globalStore.markRoomRemovedAsCurrentUser('lobby')
+    globalStore.applyRoomMembersChanged('lobby', { members: [{ user_id: 1, role: 'host' }] })
+    expect(globalStore.queueState).toEqual(before.queueState)
+    expect(globalStore.voteSessions).toEqual(before.voteSessions)
+    expect(globalStore.autoQueueConfig).toEqual(before.autoQueueConfig)
+    expect(globalStore.currentUser).toBe(before.currentUser)
+  })
 })

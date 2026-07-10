@@ -246,6 +246,14 @@ export const globalStore = reactive({
         lastError: null,
         connected: false,
         autoQueueConfig: { enabled: false, strategy: 'related' },
+        // R10c: room deletion + member removal local view. Both
+        // default to false; the R10b WS events flip them on the
+        // authoritative transition. members holds the cached
+        // membership list (user_id + role) for the remove-member UI;
+        // an empty array means "not yet received".
+        archived: false,
+        removed: false,
+        members: [],
       }
     }
     return this.roomQueues[slug]
@@ -485,6 +493,49 @@ export const globalStore = reactive({
     this._ensureRoomEntry(slug).autoQueueConfig = {
       enabled: !!payload.enabled,
       strategy: payload.strategy || 'related',
+    }
+  },
+
+  // --- R10c room deletion + member removal mutators ---
+  //
+  // Two boolean slices per room capture the local view of the
+  // authoritative backend state:
+  //
+  //   - archived: the room has been soft-archived by the host. Once
+  //     set true the UI must render an archived/disabled surface
+  //     (no queue mutation, no playback control, no auto-queue
+  //     toggle) regardless of any other room state.
+  //   - removed: the current viewer was removed by the host. The UI
+  //     must render a clear "removed from room" surface and disable
+  //     every destructive control. The connection must NOT silently
+  //     reconnect — see RoomView.applyMessage handling.
+  //
+  // Both default to false so reads before the first status event
+  // still render an enabled room.
+  markRoomArchived(slug) {
+    this._ensureRoomEntry(slug).archived = true
+  },
+
+  markRoomRemovedAsCurrentUser(slug) {
+    this._ensureRoomEntry(slug).removed = true
+  },
+
+  // R10c: applies a room_members_changed event for slug by replacing
+  // the cached member list. payload.members is the wire shape from
+  // the per-room hub: [{ user_id, role }, ...] (joined_at is omitted
+  // by design — see the R10a contract). If the payload omits members
+  // we leave the prior list intact (no destructive clear). The mutator
+  // is isolated to globalStore.roomQueues[slug] and MUST NOT touch
+  // the global roomQueues keys for other rooms, the global queueState,
+  // voteSessions, autoQueueConfig, or currentUser.
+  applyRoomMembersChanged(slug, payload) {
+    if (!slug || !payload) return
+    const entry = this._ensureRoomEntry(slug)
+    if (Array.isArray(payload.members)) {
+      entry.members = payload.members.map((m) => ({
+        user_id: typeof m?.user_id === 'number' ? m.user_id : Number(m?.user_id),
+        role: m?.role || 'guest',
+      }))
     }
   },
 })

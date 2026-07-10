@@ -51,6 +51,9 @@ const apiMock = vi.hoisted(() => ({
   roomSongEnded: vi.fn(),
   getRoomAutoQueueStatus: vi.fn(),
   setRoomAutoQueueEnabled: vi.fn(),
+  // R10c
+  deleteRoom: vi.fn(),
+  removeRoomMember: vi.fn(),
 }))
 vi.mock('../../services/api', () => ({ api: apiMock }))
 
@@ -434,5 +437,354 @@ describe('RoomView', () => {
     // global autoQueueConfig MUST remain unchanged.
     expect(globalStore.autoQueueConfig).toEqual({ enabled: false, strategy: 'related' })
     wrapper.unmount()
+  })
+
+  // --- R10c room deletion + member removal ---
+
+  it('host-panel is hidden for non-host users', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 'u2', display_name: 'Guest', role: 'guest' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const html = wrapper.html()
+    expect(html).not.toContain('host-panel')
+    expect(html).not.toContain('archive-room-btn')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('host-panel is hidden for admin users (host-only is per R10a/R10c)', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 'u3', display_name: 'Admin', role: 'admin' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const html = wrapper.html()
+    expect(html).not.toContain('host-panel')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('host-panel is visible to the host when connected', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 'u1', display_name: 'Host', role: 'host' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    globalStore.applyRoomMembersChanged('lobby', {
+      members: [
+        { user_id: 1, role: 'host' },
+        { user_id: 2, role: 'guest' },
+        { user_id: 3, role: 'admin' },
+      ],
+    })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    // Re-assert connected (mount path resets it; mock ws.onopen never fires).
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const html = wrapper.html()
+    expect(html).toContain('host-panel')
+    expect(html).toContain('archive-room-btn')
+    // Host row entry MUST NOT show a Remove button (cannot remove host).
+    // Self entry MUST NOT show a Remove button (cannot remove self).
+    // The guest entry MUST show a Remove button.
+    expect(html).toContain('remove-member-2')
+    expect(html).not.toContain('remove-member-1')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('host-panel is hidden when the room is archived (archived banner is shown)', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 'u1', display_name: 'Host', role: 'host' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    globalStore.markRoomArchived('lobby')
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const html = wrapper.html()
+    expect(html).not.toContain('host-panel')
+    expect(html).toContain('archived-banner')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('host-panel is hidden when the current viewer was removed (removed banner is shown)', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 'u1', display_name: 'Host', role: 'host' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    globalStore.markRoomRemovedAsCurrentUser('lobby')
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const html = wrapper.html()
+    expect(html).not.toContain('host-panel')
+    expect(html).toContain('removed-banner')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('deleteRoom calls api.deleteRoom with the slug and flips archived=true on 204', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.deleteRoom.mockResolvedValue(null)
+    globalStore.setUser({ id: 'u1', display_name: 'Host', role: 'host' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    // Bypass the window.confirm() prompt.
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const vm = wrapper.vm
+    await vm.deleteRoom()
+    expect(apiMock.deleteRoom).toHaveBeenCalledWith('lobby')
+    expect(globalStore.roomQueues.lobby.archived).toBe(true)
+    confirmSpy.mockRestore()
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('deleteRoom aborts cleanly when the user cancels the confirmation', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.deleteRoom.mockResolvedValue(null)
+    globalStore.setUser({ id: 'u1', display_name: 'Host', role: 'host' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const vm = wrapper.vm
+    await vm.deleteRoom()
+    expect(apiMock.deleteRoom).not.toHaveBeenCalled()
+    expect(globalStore.roomQueues.lobby.archived).toBe(false)
+    confirmSpy.mockRestore()
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('deleteRoom surfaces 400/401/403/404/409 via toast without throwing', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 'u1', display_name: 'Host', role: 'host' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const vm = wrapper.vm
+    for (const status of [400, 401, 403, 404, 409]) {
+      apiMock.deleteRoom.mockRejectedValueOnce(Object.assign(new Error(`err ${status}`), { status }))
+      await vm.deleteRoom()
+      expect(toastMock.error).toHaveBeenCalled()
+      toastMock.error.mockClear()
+    }
+    confirmSpy.mockRestore()
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('removeRoomMember calls api.removeRoomMember with (slug, userId)', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.removeRoomMember.mockResolvedValue(null)
+    globalStore.setUser({ id: 'u1', display_name: 'Host', role: 'host' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    globalStore.applyRoomMembersChanged('lobby', {
+      members: [
+        { user_id: 1, role: 'host' },
+        { user_id: 2, role: 'guest' },
+      ],
+    })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const vm = wrapper.vm
+    await vm.removeRoomMember({ user_id: 2, role: 'guest' })
+    expect(apiMock.removeRoomMember).toHaveBeenCalledWith('lobby', 2)
+    confirmSpy.mockRestore()
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('removeRoomMember rejects host and self targets locally without calling the API', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 1, display_name: 'Host', role: 'host' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    globalStore.applyRoomMembersChanged('lobby', {
+      members: [
+        { user_id: 1, role: 'host' },
+        { user_id: 1, role: 'host' }, // duplicate for self-match tests
+      ],
+    })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const vm = wrapper.vm
+    // Host target
+    await vm.removeRoomMember({ user_id: 1, role: 'host' })
+    expect(apiMock.removeRoomMember).not.toHaveBeenCalled()
+    confirmSpy.mockRestore()
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('removeRoomMember surfaces 400/401/403/404/409 via toast without throwing', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 1, display_name: 'Host', role: 'host' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    globalStore.applyRoomMembersChanged('lobby', {
+      members: [{ user_id: 1, role: 'host' }, { user_id: 2, role: 'guest' }],
+    })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const vm = wrapper.vm
+    for (const status of [400, 401, 403, 404, 409]) {
+      apiMock.removeRoomMember.mockRejectedValueOnce(Object.assign(new Error(`err ${status}`), { status }))
+      await vm.removeRoomMember({ user_id: 2, role: 'guest' })
+      expect(toastMock.error).toHaveBeenCalled()
+      toastMock.error.mockClear()
+    }
+    confirmSpy.mockRestore()
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('handles room_archived event by flipping archived=true and rendering the archived banner', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 2, display_name: 'Guest', role: 'guest' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    // Re-assert connected because RoomView's mount path resets it to false
+    // before the mock ws.onopen fires (the test mock never calls onOpen).
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const inst = wsFactoryMock.lastInstance
+    inst.onMessage({ type: 'room_archived', data: { room_id: 1, reason: 'host_archived', archived_at: '2026-07-10T00:00:00Z' } })
+    await flushPromises()
+    expect(globalStore.roomQueues.lobby.archived).toBe(true)
+    const html = wrapper.html()
+    expect(html).toContain('archived-banner')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('handles room_member_removed event for the current viewer by flipping removed=true', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 42, display_name: 'Me', role: 'guest' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const inst = wsFactoryMock.lastInstance
+    inst.onMessage({ type: 'room_member_removed', data: { room_slug: 'lobby', user_id: 42, reason: 'host_removed' } })
+    await flushPromises()
+    expect(globalStore.roomQueues.lobby.removed).toBe(true)
+    const html = wrapper.html()
+    expect(html).toContain('removed-banner')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('handles room_member_removed for a NON-current viewer without flipping removed=true', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'guest' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const inst = wsFactoryMock.lastInstance
+    inst.onMessage({ type: 'room_member_removed', data: { room_slug: 'lobby', user_id: 99, reason: 'host_removed' } })
+    expect(globalStore.roomQueues.lobby.removed).toBe(false)
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('handles room_members_changed by replacing the per-room members list', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'guest' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const inst = wsFactoryMock.lastInstance
+    inst.onMessage({
+      type: 'room_members_changed',
+      data: {
+        room_slug: 'lobby',
+        members: [
+          { user_id: 1, role: 'host' },
+          { user_id: 2, role: 'admin' },
+          { user_id: 3, role: 'guest' },
+        ],
+      },
+    })
+    expect(globalStore.roomQueues.lobby.members).toEqual([
+      { user_id: 1, role: 'host' },
+      { user_id: 2, role: 'admin' },
+      { user_id: 3, role: 'guest' },
+    ])
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('room_archived event disables room controls via the canMutate gate', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 2, display_name: 'Guest', role: 'guest' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    // Re-assert connected (mount path resets to false; mock never calls onOpen).
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    expect(wrapper.vm.canMutate).toBe(true)
+    const inst = wsFactoryMock.lastInstance
+    inst.onMessage({ type: 'room_archived', data: { room_id: 1, reason: 'host_archived', archived_at: '2026-07-10T00:00:00Z' } })
+    await flushPromises()
+    expect(wrapper.vm.canMutate).toBe(false)
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('onClose for the per-room ws only flips connected=false (does NOT silently reconnect)', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 2, display_name: 'Guest', role: 'guest' })
+    globalStore.setRoomQueueConnected('lobby', true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const inst = wsFactoryMock.lastInstance
+    inst.onClose()
+    expect(globalStore.roomQueues.lobby.connected).toBe(false)
+    // No automatic connect() call should happen on a benign close.
+    // (The remove flow only sends a 1008 — the RoomView does not
+    // retry; the user must re-navigate.)
+    expect(inst.connect).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+    globalStore.clearUser()
   })
 })

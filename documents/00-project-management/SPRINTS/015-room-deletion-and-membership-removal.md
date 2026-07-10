@@ -1,6 +1,6 @@
 # R10a — Room deletion and membership removal (contract design)
 
-**Status:** **Accepted (2026-07-02)** — R10a is the contract design. R10b runtime implementation is implemented on `dev` (2026-07-02); Product Owner acceptance pending.
+**Status:** **Accepted (2026-07-02)** — R10a is the contract design. R10b runtime implementation is implemented on `dev` (2026-07-02) and **accepted by the Product Owner on 2026-07-10**.
 
 **Sprint name:** Room deletion and membership removal — R10a contract design
 

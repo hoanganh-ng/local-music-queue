@@ -303,5 +303,29 @@ export const api = {
     return this.request(`/rooms/${encodeURIComponent(slug)}/playback/prev`, {
       method: 'POST'
     })
+  },
+
+  // --- R10c: room deletion and membership removal (frontend) ---
+  //
+  // Both methods target the R10b HTTP routes behind roomAuth.
+  // Identity fields (user_id / requested_by / etc.) are intentionally
+  // NOT honored on the wire — the backend ignores them and uses the
+  // bearer-token-resolved user as the source of truth. No request body.
+  //
+  //   - deleteRoom: host-only soft archive. Idempotent 204 on
+  //     already-archived rooms (no mutation, no broadcast).
+  //   - removeRoomMember: host-only member removal. 400 for
+  //     ErrHostCannotRemoveSelf + ErrCannotRemoveHost; 404 when
+  //     target is not a member; 409 on archived room.
+  async deleteRoom(slug) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}`, {
+      method: 'DELETE'
+    })
+  },
+
+  async removeRoomMember(slug, userId) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}/members/${encodeURIComponent(String(userId))}`, {
+      method: 'DELETE'
+    })
   }
 }

@@ -169,4 +169,59 @@ describe('Room Queue API', () => {
     expect(body).toEqual({ enabled: true })
     expect(JSON.stringify(body)).not.toMatch(/(user_id|requested_by|added_by|user_role|strategy)/)
   })
+
+  // --- R10c room deletion + member removal API ---
+
+  it('deleteRoom targets DELETE /rooms/{slug} with NO request body', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ status: 204, ok: true, json: async () => '' })
+    global.fetch = mockFetch
+    await api.deleteRoom('lobby')
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby$/)
+    expect(init.method).toBe('DELETE')
+    // No body shape — must be undefined or empty string.
+    expect(init.body === undefined || init.body === '' || init.body === null).toBe(true)
+    expect(init.headers['Content-Type']).toBe('application/json')
+  })
+
+  it('removeRoomMember targets DELETE /rooms/{slug}/members/{userId} with NO request body', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ status: 204, ok: true, json: async () => '' })
+    global.fetch = mockFetch
+    await api.removeRoomMember('lobby', 42)
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/members\/42$/)
+    expect(init.method).toBe('DELETE')
+    expect(init.body === undefined || init.body === '' || init.body === null).toBe(true)
+    expect(init.headers['Content-Type']).toBe('application/json')
+  })
+
+  it('deleteRoom returns null on 204 (no JSON body to parse)', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ status: 204, ok: true, json: async () => '' })
+    global.fetch = mockFetch
+    const res = await api.deleteRoom('lobby')
+    expect(res).toBeNull()
+  })
+
+  it('removeRoomMember returns null on 204', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ status: 204, ok: true, json: async () => '' })
+    global.fetch = mockFetch
+    const res = await api.removeRoomMember('lobby', 7)
+    expect(res).toBeNull()
+  })
+
+  it('deleteRoom propagates APIError on 400 / 401 / 403 / 404 / 409', async () => {
+    for (const status of [400, 401, 403, 404, 409]) {
+      const mockFetch = vi.fn().mockResolvedValue({ status, ok: false, text: async () => `err ${status}` })
+      global.fetch = mockFetch
+      await expect(api.deleteRoom('lobby')).rejects.toMatchObject({ status })
+    }
+  })
+
+  it('removeRoomMember propagates APIError on 400 / 401 / 403 / 404 / 409', async () => {
+    for (const status of [400, 401, 403, 404, 409]) {
+      const mockFetch = vi.fn().mockResolvedValue({ status, ok: false, text: async () => `err ${status}` })
+      global.fetch = mockFetch
+      await expect(api.removeRoomMember('lobby', 7)).rejects.toMatchObject({ status })
+    }
+  })
 })
