@@ -477,7 +477,7 @@ func (i *Interactor) ArchiveRoom(ctx context.Context, roomID int64) error {
 
 // ArchiveRoomByHost is the host-driven soft-archive path. It validates
 // the slug, requires the actor to be the room host, then calls the
-// idempotent ArchiveRoomIfActive. Returns:
+// repo-owned atomic archive-and-end-lease operation. Returns:
 //   - ErrInvalidSlug when the slug fails SlugPattern
 //   - ErrRoomNotFound when no room exists for the slug
 //   - ErrForbidden when the actor is not the host
@@ -487,12 +487,13 @@ func (i *Interactor) ArchiveRoom(ctx context.Context, roomID int64) error {
 // active → archived. Callers (HTTP handler) use it to decide whether
 // to broadcast the per-room room_archived event.
 //
-// R10a Decision 7 requires "archive ends any active lease idempotently".
-// We end the active lease via repo.EndActiveLease BEFORE the
-// ArchiveRoomIfActive call so a lease can never outlive its room.
-// The lease end is idempotent (no-op when no active lease exists) so a
-// re-call on an already-archived room stays idempotent and still
-// returns (false, nil).
+// R10b narrow fix: the archive transition AND the active-lease end
+// run in one repo-owned DB transaction
+// (repo.ArchiveRoomIfActiveAndEndLease). The lease end is conditional
+// on the room actually transitioning — already-archived rooms never
+// mutate their lease (idempotent: stale active lease on an
+// already-archived room is left untouched). A concurrent lease claim
+// cannot slip between the two operations because they share a tx.
 func (i *Interactor) ArchiveRoomByHost(ctx context.Context, slug string, actorUserID int) (archived bool, err error) {
 	if !entity.IsValidSlug(slug) {
 		return false, ErrInvalidSlug
@@ -507,15 +508,9 @@ func (i *Interactor) ArchiveRoomByHost(ctx context.Context, slug string, actorUs
 	if err := i.requireHost(ctx, room.ID, actorUserID); err != nil {
 		return false, err
 	}
-	// End any active lease for this room BEFORE the archive transition
-	// so a lease can never outlive its room. Idempotent: returns
-	// (false, nil) when no active lease exists.
-	if _, err := i.repo.EndActiveLease(ctx, room.ID, i.now()); err != nil {
-		return false, fmt.Errorf("end active lease: %w", err)
-	}
-	transitioned, err := i.repo.ArchiveRoomIfActive(ctx, room.ID, i.now())
+	transitioned, _, err := i.repo.ArchiveRoomIfActiveAndEndLease(ctx, room.ID, i.now())
 	if err != nil {
-		return false, fmt.Errorf("archive if active: %w", err)
+		return false, fmt.Errorf("archive and end lease: %w", err)
 	}
 	return transitioned, nil
 }

@@ -172,6 +172,74 @@ func (r *PostgresRoomRepository) EndActiveLease(ctx context.Context, roomID int6
 	return n > 0, nil
 }
 
+// ArchiveRoomIfActiveAndEndLease runs the room archive transition AND
+// the active lease end inside a single DB transaction. R10b narrow
+// fix: a concurrent lease claim cannot slip between the archive and
+// the lease end, and the lease is NOT mutated when the room is
+// already archived (idempotent: stale active lease on an
+// already-archived room is left untouched).
+//
+// Order matters:
+//   - Step 1: conditional UPDATE on rooms (`WHERE id = $1 AND status =
+//     'active'`). RowsAffected is 0 when the room is already archived.
+//     We check this BEFORE touching the lease so an already-archived
+//     room never mutates its lease.
+//   - Step 2 (only when Step 1 affected a row): UPDATE on player_leases
+//     to end the active lease. The lease end runs inside the same tx
+//     so a concurrent claim either runs against the pre-archive state
+//     (where the archive has not yet committed) or against the
+//     post-archive state (where the room is archived and the
+//     PlayerLeaseInteractor.resolveActiveRoom path rejects the claim
+//     via ErrArchived). Either way the post-state is consistent: no
+//     archived room has an active lease.
+func (r *PostgresRoomRepository) ArchiveRoomIfActiveAndEndLease(ctx context.Context, roomID int64, now time.Time) (bool, bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Step 1: archive the room. The conditional WHERE prevents
+	// mutation when the room is already archived.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE rooms SET status = 'archived', updated_at = $1
+		 WHERE id = $2 AND status = 'active'`,
+		now, roomID)
+	if err != nil {
+		return false, false, fmt.Errorf("archive room: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, false, fmt.Errorf("rows affected (room): %w", err)
+	}
+	if n == 0 {
+		// Already archived — idempotent no-op; lease is NOT mutated.
+		return false, false, nil
+	}
+
+	// Step 2: end any active lease for this room. The WHERE on
+	// `ended_at IS NULL` ensures we only mutate the active row. This
+	// runs inside the same tx as the archive transition so a
+	// concurrent Claim that arrives after this tx commits observes an
+	// archived room (and the PlayerLeaseInteractor rejects it).
+	res, err = tx.ExecContext(ctx,
+		`UPDATE player_leases SET ended_at = $1
+		 WHERE room_id = $2 AND ended_at IS NULL`,
+		now, roomID)
+	if err != nil {
+		return false, false, fmt.Errorf("end active lease: %w", err)
+	}
+	ln, err := res.RowsAffected()
+	if err != nil {
+		return false, false, fmt.Errorf("rows affected (lease): %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, false, fmt.Errorf("commit: %w", err)
+	}
+	return true, ln > 0, nil
+}
+
 // AddMember inserts a membership row. Caller is responsible for invariant
 // checks (one host per room).
 func (r *PostgresRoomRepository) AddMember(ctx context.Context, roomID int64, userID int, role entity.RoomMemberRole, now time.Time) error {

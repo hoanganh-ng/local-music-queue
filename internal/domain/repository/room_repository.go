@@ -40,6 +40,31 @@ type RoomRepository interface {
 	// archive callers cannot race a stale ended_at.
 	EndActiveLease(ctx context.Context, roomID int64, now time.Time) (leaseEnded bool, err error)
 
+	// ArchiveRoomIfActiveAndEndLease is the R10b narrow atomic seam for
+	// host archive + active lease consistency. It runs the archive
+	// transition AND the lease-end inside a single DB transaction so a
+	// concurrent lease claim cannot slip in between them. The lease
+	// end is conditional on the room actually transitioning
+	// active → archived; when the room is already archived
+	// (transitioned=false), the lease is NOT mutated.
+	//
+	// Returns:
+	//   - transitioned=true when the room was active and is now archived.
+	//     leaseEnded=true when an active lease was ended in the same
+	//     transaction.
+	//   - transitioned=false when the room was already archived.
+	//     leaseEnded is always false in this branch and the lease is
+	//     NOT mutated (idempotent: a stale active lease on an
+	//     already-archived room is left untouched).
+	//
+	// Concurrency: the archive transition uses a conditional UPDATE
+	// (`WHERE id = $1 AND status = 'active'`) and the lease end runs
+	// inside the same tx, so a concurrent lease Claim (which INSERTs
+	// into player_leases) cannot observe an archived room with an
+	// ended lease as its post-state: the tx either commits both
+	// transitions together or commits neither.
+	ArchiveRoomIfActiveAndEndLease(ctx context.Context, roomID int64, now time.Time) (transitioned bool, leaseEnded bool, err error)
+
 	// Members
 	AddMember(ctx context.Context, roomID int64, userID int, role entity.RoomMemberRole, now time.Time) error
 	GetMember(ctx context.Context, roomID int64, userID int) (*entity.RoomMember, error)

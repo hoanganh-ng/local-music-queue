@@ -87,6 +87,9 @@ func (noOpRoomRepo) ArchiveRoomIfActive(_ context.Context, _ int64, _ time.Time)
 func (noOpRoomRepo) EndActiveLease(_ context.Context, _ int64, _ time.Time) (bool, error) {
 	panic("unused")
 }
+func (noOpRoomRepo) ArchiveRoomIfActiveAndEndLease(_ context.Context, _ int64, _ time.Time) (bool, bool, error) {
+	panic("unused")
+}
 func (noOpRoomRepo) AddMember(_ context.Context, _ int64, _ int, _ entity.RoomMemberRole, _ time.Time) error {
 	panic("unused")
 }
