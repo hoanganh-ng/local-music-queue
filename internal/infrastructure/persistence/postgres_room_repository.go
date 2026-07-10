@@ -174,10 +174,10 @@ func (r *PostgresRoomRepository) EndActiveLease(ctx context.Context, roomID int6
 
 // ArchiveRoomIfActiveAndEndLease runs the room archive transition AND
 // the active lease end inside a single DB transaction. R10b narrow
-// fix: a concurrent lease claim cannot slip between the archive and
-// the lease end, and the lease is NOT mutated when the room is
-// already archived (idempotent: stale active lease on an
-// already-archived room is left untouched).
+// fix: the archive transition and the active-lease end are atomic for
+// leases visible to the archive transaction. The lease is NOT mutated
+// when the room is already archived (idempotent: stale active lease on
+// an already-archived room is left untouched).
 //
 // Order matters:
 //   - Step 1: conditional UPDATE on rooms (`WHERE id = $1 AND status =
@@ -185,13 +185,13 @@ func (r *PostgresRoomRepository) EndActiveLease(ctx context.Context, roomID int6
 //     We check this BEFORE touching the lease so an already-archived
 //     room never mutates its lease.
 //   - Step 2 (only when Step 1 affected a row): UPDATE on player_leases
-//     to end the active lease. The lease end runs inside the same tx
-//     so a concurrent claim either runs against the pre-archive state
-//     (where the archive has not yet committed) or against the
-//     post-archive state (where the room is archived and the
-//     PlayerLeaseInteractor.resolveActiveRoom path rejects the claim
-//     via ErrArchived). Either way the post-state is consistent: no
-//     archived room has an active lease.
+//     to end the active lease. The lease end runs inside the same tx.
+//
+// Concurrency scope: this method does NOT lock the room row against a
+// concurrent lease Claim. A Claim whose room-existence check resolves
+// the room as active BEFORE this tx commits may INSERT a lease row
+// that survives this tx. Full archive-vs-claim serialization is
+// deferred to a future lease-hardening sprint.
 func (r *PostgresRoomRepository) ArchiveRoomIfActiveAndEndLease(ctx context.Context, roomID int64, now time.Time) (bool, bool, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {

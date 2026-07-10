@@ -42,9 +42,8 @@ type RoomRepository interface {
 
 	// ArchiveRoomIfActiveAndEndLease is the R10b narrow atomic seam for
 	// host archive + active lease consistency. It runs the archive
-	// transition AND the lease-end inside a single DB transaction so a
-	// concurrent lease claim cannot slip in between them. The lease
-	// end is conditional on the room actually transitioning
+	// transition AND the lease-end inside a single DB transaction. The
+	// lease end is conditional on the room actually transitioning
 	// active → archived; when the room is already archived
 	// (transitioned=false), the lease is NOT mutated.
 	//
@@ -57,12 +56,13 @@ type RoomRepository interface {
 	//     NOT mutated (idempotent: a stale active lease on an
 	//     already-archived room is left untouched).
 	//
-	// Concurrency: the archive transition uses a conditional UPDATE
-	// (`WHERE id = $1 AND status = 'active'`) and the lease end runs
-	// inside the same tx, so a concurrent lease Claim (which INSERTs
-	// into player_leases) cannot observe an archived room with an
-	// ended lease as its post-state: the tx either commits both
-	// transitions together or commits neither.
+	// Concurrency scope: this method makes the room transition and the
+	// lease-end atomic for leases visible to the archive transaction.
+	// It does NOT lock the room row against a concurrent lease Claim;
+	// a Claim that observes the room as active before this tx commits
+	// may INSERT a lease row that survives this tx. Full
+	// archive-vs-claim serialization is deferred to a future
+	// lease-hardening sprint.
 	ArchiveRoomIfActiveAndEndLease(ctx context.Context, roomID int64, now time.Time) (transitioned bool, leaseEnded bool, err error)
 
 	// Members

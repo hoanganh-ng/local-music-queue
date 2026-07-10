@@ -492,8 +492,9 @@ func (i *Interactor) ArchiveRoom(ctx context.Context, roomID int64) error {
 // (repo.ArchiveRoomIfActiveAndEndLease). The lease end is conditional
 // on the room actually transitioning — already-archived rooms never
 // mutate their lease (idempotent: stale active lease on an
-// already-archived room is left untouched). A concurrent lease claim
-// cannot slip between the two operations because they share a tx.
+// already-archived room is left untouched). The atomicity covers
+// leases visible to the archive transaction; full archive-vs-claim
+// serialization is deferred to a future lease-hardening sprint.
 func (i *Interactor) ArchiveRoomByHost(ctx context.Context, slug string, actorUserID int) (archived bool, err error) {
 	if !entity.IsValidSlug(slug) {
 		return false, ErrInvalidSlug
