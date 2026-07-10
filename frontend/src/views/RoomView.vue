@@ -171,7 +171,7 @@
             >(self)</span>
           </li>
         </ul>
-        <p v-else class="empty">No members loaded yet — the next room_members_changed event will populate this list.</p>
+        <p v-else class="empty">No members loaded yet.</p>
       </section>
 
       <!-- R10c: archived / removed banners. Rendered instead of the

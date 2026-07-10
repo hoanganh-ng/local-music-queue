@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -204,6 +205,87 @@ func TestRoomHandler_ListMembers_NonMember403(t *testing.T) {
 	rh.HandleListMembers(rr, req, "lounge", outsider)
 	if rr.Code != http.StatusForbidden {
 		t.Errorf("expected 403 for non-member, got %d", rr.Code)
+	}
+}
+
+// R10d: focused success-path test for HandleListMembers. Active room
+// with an active actor member. Asserts 200, the wrapped response body
+// shape {"members": [{"user_id": <number>, "role": "host"|"admin"|"guest"}]},
+// and that joined_at is NOT present anywhere in the JSON response
+// (per R10a Decision 9: joined_at is intentionally omitted from the wire).
+func TestRoomHandler_ListMembers_ActiveRoomSuccess(t *testing.T) {
+	rh, _, db := newRoomHandlers(t)
+	host := seedUser(t, db, "h-list-success@example.com", entity.RoleHost)
+	admin := seedUser(t, db, "a-list-success@example.com", entity.RoleGuest)
+	guest := seedUser(t, db, "g-list-success@example.com", entity.RoleGuest)
+
+	ctx := context.Background()
+	if _, err := rh.inter.CreateRoom(ctx, "lounge", "Lounge", host); err != nil {
+		t.Fatalf("CreateRoom: %v", err)
+	}
+	room, err := rh.inter.Repo().GetRoomBySlug(ctx, "lounge")
+	if err != nil {
+		t.Fatalf("GetRoomBySlug: %v", err)
+	}
+	now := time.Now()
+	if err := rh.inter.Repo().AddMember(ctx, room.ID, admin, entity.RoomRoleAdmin, now.Add(time.Millisecond)); err != nil {
+		t.Fatalf("AddMember admin: %v", err)
+	}
+	if err := rh.inter.Repo().AddMember(ctx, room.ID, guest, entity.RoomRoleGuest, now.Add(2*time.Millisecond)); err != nil {
+		t.Fatalf("AddMember guest: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/rooms/lounge/members", nil)
+	rr := httptest.NewRecorder()
+	rh.HandleListMembers(rr, req, "lounge", host) // active actor member (host)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// joined_at MUST NOT appear anywhere in the wire body (per R10a
+	// Decision 9: the entity has it, the wire does not).
+	rawBody := rr.Body.String()
+	if strings.Contains(rawBody, "joined_at") {
+		t.Errorf("response body must not contain joined_at, got: %s", rawBody)
+	}
+
+	// Response shape: {"members": [{"user_id": <int>, "role": "host"|"admin"|"guest"}]}
+	var resp struct {
+		Members []struct {
+			UserID int    `json:"user_id"`
+			Role   string `json:"role"`
+		} `json:"members"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v body=%s", err, rawBody)
+	}
+	if len(resp.Members) != 3 {
+		t.Fatalf("expected 3 members, got %d body=%s", len(resp.Members), rawBody)
+	}
+	// ListMembers is ORDER BY joined_at ASC; host was inserted first via
+	// CreateRoom, then admin, then guest.
+	expected := []struct {
+		userID int
+		role   string
+	}{
+		{host, "host"},
+		{admin, "admin"},
+		{guest, "guest"},
+	}
+	for i, want := range expected {
+		got := resp.Members[i]
+		if got.UserID != want.userID {
+			t.Errorf("members[%d].user_id: got %d, want %d", i, got.UserID, want.userID)
+		}
+		if got.Role != want.role {
+			t.Errorf("members[%d].role: got %q, want %q", i, got.Role, want.role)
+		}
+		switch got.Role {
+		case "host", "admin", "guest":
+		default:
+			t.Errorf("members[%d].role: got %q, want one of host|admin|guest", i, got.Role)
+		}
 	}
 }
 
