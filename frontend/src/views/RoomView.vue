@@ -125,10 +125,14 @@
       <!-- R11a: room chat panel. Plain-text messages between active
            room members. The history list is rendered as text only
            (never v-html) so any future sender-side HTML is
-           inert. Send is disabled when the viewer is unauthenticated,
-           the room is archived, the viewer was removed, the WS is
-           disconnected, the input is empty/whitespace-only, or a
-           previous send is in flight. -->
+           inert. The input is disabled when the viewer is
+           unauthenticated, the room is archived, the viewer was
+           removed, the WS is disconnected, or a previous send is
+           in flight; it is NOT disabled when the draft merely
+           exceeds the code-point cap — the user must remain able
+           to shorten their own draft. Send is disabled whenever
+           the input is disabled OR the draft is empty/whitespace
+           OR the draft exceeds the cap. -->
       <section
         v-if="!isRoomDisabled"
         class="chat-panel glass-panel"
@@ -159,14 +163,13 @@
             class="chat-input"
             data-testid="chat-input"
             placeholder="Say something…"
-            :disabled="!canChat"
-            :maxlength="500"
+            :disabled="!canEditChat"
           />
           <button
             type="submit"
             class="chat-send-btn"
             data-testid="chat-send"
-            :disabled="!canChat || !chatDraft.trim() || chatDraftOverLimit"
+            :disabled="!canSendChat"
           >Send</button>
         </form>
         <p
@@ -293,15 +296,21 @@ const addUrl = ref('')
 // briefly double-render before the cache de-dupes on seq).
 const chatDraft = ref('')
 const chatSendInFlight = ref(false)
-// R11a (corrective pass): chatHistoryFetched prevents the initial
-// GET /chat/messages history fetch from running more than once per
-// connection (it must NOT run before wsClient.connect() or the
-// viewer can permanently miss messages sent between the GET and
-// the WS registration). The fetch is triggered AFTER the first
-// room_queue_sync arrives — the sync event is the per-room hub's
-// confirmation that the client is registered. Subsequent slug
-// changes reset the flag so the next room re-seeds.
+// R11a (corrective pass): the chat-history seed has two pieces of
+// per-connection state:
+//   - chatHistoryFetched: true once a GET /chat/messages has
+//     RESOLVED SUCCESSFULLY for this connection. It suppresses
+//     further seeds from later room_queue_sync events.
+//   - chatHistoryFetchInFlight: true while a GET is in-flight.
+//     It prevents a second sync from triggering a duplicate
+//     network request while we wait for the first one.
+// On failure we keep chatHistoryFetched=false so a later
+// room_queue_sync is allowed to retry; the in-flight flag is cleared
+// unconditionally in a finally so a future sync is never permanently
+// gated. Both flags are reset on teardown and on slug change so the
+// next room re-seeds with the same retry semantics.
 let chatHistoryFetched = false
+let chatHistoryFetchInFlight = false
 let wsClient = null
 let suppressSeqGap = false
 // Track the slug we actually connected to so unmount can clean it up
@@ -318,36 +327,40 @@ const chatMessages = computed(() => {
   return (s && Array.isArray(s.messages)) ? s.messages : []
 })
 
-// R11a: canChat gates the send button. Disabled when:
-//   - the viewer is unauthenticated (no current user)
-//   - the per-room WS is not connected (no live fan-out + 409
-//     for archived rooms; the parent already hides the panel
-//     in the archived branch)
-//   - the room is archived or the viewer was removed
-//   - a previous send is in flight
-//   - the draft exceeds the documented Unicode code-point cap
-// Note: text-level empty/whitespace check is applied inline in
-// the template's :disabled binding so the button greys out as
-// the user types.
-const canChat = computed(
+// R11a (corrective pass): the send button is gated by two concepts:
+//   - canEditChat: the viewer is allowed to interact with the
+//     input (auth + connected + active member + not archived/
+//     removed + no send in flight). The input is NOT disabled just
+//     because the draft is over the code-point cap — the user must
+//     remain able to shorten their draft.
+//   - canSendChat: canEditChat + non-empty trimmed draft + <=500
+//     code points. Drives the Send button's disabled binding.
+// Splitting these two is required because the previous `canChat`
+// covered both and that locked the input when the draft exceeded
+// the cap, blocking the user from editing down.
+const canEditChat = computed(
   () => !!currentUser.value
     && roomState.value.connected
     && !roomState.value.archived
     && !roomState.value.removed
     && !chatSendInFlight.value
-    && !chatDraftOverLimit.value
 )
+const canSendChat = computed(
+  () => canEditChat.value
+    && !chatDraftOverLimit.value
+    && !!chatDraft.value.trim()
+)
+// Backwards-compatible alias for tests that pin `vm.canChat`.
+const canChat = canSendChat
 
-// R11a: chat code-point cap. The native maxlength="500" attribute
-// counts UTF-16 code units, which under-counts BMP code points
-// (1 per code unit) and over-counts surrogate pairs (2 per
-// surrogate for emoji and CJK extensions). Array.from(str) splits
-// a string into its Unicode code points, so the resulting length
-// is the user-perceived character count — matching the
-// utf8.RuneCountInString server-side cap. When the draft exceeds
-// the cap, canChat flips to false and the over-limit hint is
-// rendered. Server validation is still authoritative; this is a
-// UI affordance only.
+// R11a: chat code-point cap. The native maxlength attribute is
+// intentionally NOT applied (it counts UTF-16 code units, which
+// under-counts BMP code points and over-counts surrogate pairs).
+// Array.from(str) splits a string into its Unicode code points
+// so the resulting length matches the user-perceived character
+// count and pairs with the utf8.RuneCountInString server-side cap.
+// Server validation is still authoritative; this is a UI affordance
+// only.
 const chatMaxCodePoints = 500
 const chatDraftCodePoints = computed(() => Array.from(chatDraft.value || '').length)
 const chatDraftOverLimit = computed(() => chatDraftCodePoints.value > chatMaxCodePoints)
@@ -362,13 +375,19 @@ function applyMessage(msg) {
       // chat-history GET. Running the GET BEFORE wsClient.connect()
       // creates a permanent race where a message sent in the
       // window between the GET and the WS registration is
-      // missed. The flag is reset on every slug change so each
-      // room re-seeds exactly once per connection.
-      if (!chatHistoryFetched) {
-        chatHistoryFetched = true
-        // Fire and forget; failures are surfaced through the
-        // cache (the prior messages remain intact) and via
-        // standard 4xx/5xx toasts.
+      // missed. Two flags gate the seed:
+      //   - chatHistoryFetched: false until a GET has resolved
+      //     successfully. Set to true only AFTER the seeded
+      //     messages are merged into the store. A failed GET
+      //     leaves this false so a later room_queue_sync may
+      //     retry.
+      //   - chatHistoryFetchInFlight: true while a GET is
+      //     pending. Prevents a duplicate network call from a
+      //     second sync arriving while the first is still in
+      //     flight.
+      // Both flags are reset on teardown and on slug change so
+      // the next room re-seeds with the same retry semantics.
+      if (!chatHistoryFetched && !chatHistoryFetchInFlight) {
         seedRoomChatMessagesFromRest(slug.value)
       }
       break
@@ -460,10 +479,14 @@ function applyMessage(msg) {
       globalStore.applyRoomMembersChanged(slug.value, msg.data)
       break
     // R11a: room chat. Append the post-mutation message to the
-    // room-local cache. The store mutator caps the cache at
-    // MaxRoomChatMessages so an over-eager burst cannot blow up
-    // the local view. The cache is seeded by the initial REST
-    // GET on mount + slug change.
+    // room-local cache via the merge-aware store mutator. The
+    // mutator caps the cache at MaxRoomChatMessages, sorts oldest
+    // → newest by created_at (with id as the deterministic
+    // tie-breaker), and dedupes by id so a POST response and a
+    // subsequent room_chat_message_created WS event for the same
+    // id collapse to one row. The cache is seeded by the
+    // post-WS-registration REST GET that fires from the first
+    // room_queue_sync event.
     case 'room_chat_message_created':
       globalStore.applyRoomChatMessageCreated(slug.value, msg.data)
       break
@@ -478,27 +501,46 @@ async function onGap() {
   const targetSlug = slug.value
   if (!targetSlug) return
   globalStore.setRoomQueueRecoveryInFlight(targetSlug, true)
-  try {
-    const fresh = await api.getRoomQueue(targetSlug)
-    // Re-check the slug on resolution — the user may have
-    // navigated away while the GET was in flight.
-    if (targetSlug !== slug.value) return
-    globalStore.setRoomQueueState(targetSlug, fresh)
-    globalStore.setRoomQueueSeq(targetSlug, 0)
-    suppressSeqGap = true
-    // Re-enable gap detection on the next inbound message.
-    setTimeout(() => { suppressSeqGap = false }, 50)
-    // R11a (corrective pass): on every per-room sequence gap,
-    // also fetch the recent chat history and MERGE it into the
-    // local cache. The store merge is by id, so any messages
-    // already received via the room_chat_message_created WS
-    // events stay present (no destructive clear on a successful
-    // recovery). A failed chat recovery logs the error and
-    // keeps the prior messages intact.
+  // R11a (corrective pass): queue recovery and chat history
+  // recovery are TWO INDEPENDENT operations on every accepted
+  // onGap. They each succeed or fail on their own; one failure
+  // MUST NOT skip the other. The existing queue error/toast
+  // behavior is preserved.
+  const queuePromise = (async () => {
+    try {
+      const fresh = await api.getRoomQueue(targetSlug)
+      // Re-check the slug on resolution — the user may have
+      // navigated away while the GET was in flight.
+      if (targetSlug !== slug.value) return { ok: false, stale: true }
+      globalStore.setRoomQueueState(targetSlug, fresh)
+      globalStore.setRoomQueueSeq(targetSlug, 0)
+      suppressSeqGap = true
+      // Re-enable gap detection on the next inbound message.
+      setTimeout(() => { suppressSeqGap = false }, 50)
+      return { ok: true }
+    } catch (e) {
+      // Stale-slug guard — a recovery GET that resolves after a
+      // slug change must not surface toasts or write to a stale
+      // entry.
+      if (targetSlug !== slug.value) return { ok: false, stale: true }
+      const status = e?.status
+      const reason = e?.message || ''
+      const message = status === 401 ? 'You are signed out. Log in again.'
+        : status === 403 ? `You are not a member of this room (${reason || 'forbidden'}).`
+        : status === 404 ? 'Room not found.'
+        : status === 409 ? 'Room is archived or in conflict.'
+        : 'Could not resync room queue.'
+      globalStore.setRoomQueueError(targetSlug, message)
+      toast.error(message)
+      return { ok: false, stale: false }
+    }
+  })()
+  const chatPromise = (async () => {
     try {
       const chat = await api.getRoomChatMessages(targetSlug, 50)
-      if (targetSlug !== slug.value) return
+      if (targetSlug !== slug.value) return { ok: false, stale: true }
       globalStore.setRoomChatMessages(targetSlug, chat.messages || [])
+      return { ok: true }
     } catch (chatErr) {
       // The chat recovery is best-effort. The prior chat
       // messages remain in the store. A toast is intentionally
@@ -506,21 +548,11 @@ async function onGap() {
       // failure and a per-recovery chat toast would be noise.
       // eslint-disable-next-line no-console
       console.warn('room chat history recovery failed', chatErr)
+      return { ok: false, stale: targetSlug !== slug.value }
     }
-  } catch (e) {
-    // Stale-slug guard — a recovery GET that resolves after a
-    // slug change must not surface toasts or write to a stale
-    // entry.
-    if (targetSlug !== slug.value) return
-    const status = e?.status
-    const reason = e?.message || ''
-    const message = status === 401 ? 'You are signed out. Log in again.'
-      : status === 403 ? `You are not a member of this room (${reason || 'forbidden'}).`
-      : status === 404 ? 'Room not found.'
-      : status === 409 ? 'Room is archived or in conflict.'
-      : 'Could not resync room queue.'
-    globalStore.setRoomQueueError(targetSlug, message)
-    toast.error(message)
+  })()
+  try {
+    await Promise.allSettled([queuePromise, chatPromise])
   } finally {
     globalStore.setRoomQueueRecoveryInFlight(targetSlug, false)
   }
@@ -580,41 +612,50 @@ async function seedRoomMembersFromRest() {
   }
 }
 
-// R11a: seed the room chat history from GET /chat/messages. The
-// history is bounded server-side (default 50, max 100) and ordered
-// oldest → newest. 400/401/403/404/409 surface as a clear toast
-// but do NOT block the rest of the room from rendering; the panel
-// just renders the seeded "no messages yet" empty state. Archived
-// rooms map to 409 and the panel is hidden by the parent
-// `v-if="!isRoomDisabled"`, so the seed becomes a no-op for the
-// archived surface.
-//
-// The function accepts an explicit targetSlug so the caller can
-// pin the history to the slug it was invoked for, even if the
-// route's reactive slug has drifted in the meantime (e.g. the
-// caller mounted the WS client for slug A, the user navigated
-// to slug B before the GET returned, and we MUST NOT apply the
-// stale response to slug B's cache).
+// R11a (corrective pass): seed the room chat history from
+// GET /chat/messages. The history is bounded server-side
+// (default 50, max 100) and ordered oldest → newest. The function
+// accepts an explicit targetSlug so the caller can pin the history
+// to the slug it was invoked for, even if the route's reactive
+// slug has drifted in the meantime. The two retry-semantics flags
+// are managed here so all callers (applyMessage on sync, recovery
+// on gap) get the same retry / no-double-fetch behavior:
+//   - chatHistoryFetchInFlight is set true BEFORE the await and
+//     cleared in a finally so a second sync that arrives during
+//     the await NEVER triggers a second network request.
+//   - chatHistoryFetched is set true ONLY after the messages are
+//     merged into the store. A failed GET leaves it false so the
+//     next sync may retry.
+// The function returns void; it is fire-and-forget from
+// applyMessage. 401/403/404/409 surface as a clear toast for the
+// currently-viewed room only; stale GETs (the user navigated away)
+// must not produce a toast.
 async function seedRoomChatMessagesFromRest(targetSlug) {
-  // Defensive: never seed an empty / missing slug.
   if (!targetSlug) return
+  if (chatHistoryFetched) return
+  if (chatHistoryFetchInFlight) return
+  chatHistoryFetchInFlight = true
   try {
     const res = await api.getRoomChatMessages(targetSlug, 50)
-    // Re-check the slug on resolution — the user may have
-    // navigated away while the GET was in flight.
     if (targetSlug !== slug.value) return
     globalStore.setRoomChatMessages(targetSlug, res.messages || [])
+    chatHistoryFetched = true
   } catch (e) {
     // Only surface toasts for the currently-viewed room; a stale
     // GET for a slug the user already left must not pollute the
     // current room's toast stream.
-    if (targetSlug !== slug.value) return
-    const status = e?.status
-    if (status === 401) toast.error('You are signed out. Log in again.')
-    else if (status === 403) toast.error('You are not a member of this room.')
-    else if (status === 404) toast.error('Room not found.')
-    else if (status === 409) toast.error('Room is archived or in conflict.')
-    else if (status === 400) toast.error('Invalid chat request.')
+    if (targetSlug === slug.value) {
+      const status = e?.status
+      if (status === 401) toast.error('You are signed out. Log in again.')
+      else if (status === 403) toast.error('You are not a member of this room.')
+      else if (status === 404) toast.error('Room not found.')
+      else if (status === 409) toast.error('Room is archived or in conflict.')
+      else if (status === 400) toast.error('Invalid chat request.')
+    }
+    // chatHistoryFetched stays false so a later room_queue_sync
+    // is allowed to retry.
+  } finally {
+    chatHistoryFetchInFlight = false
   }
 }
 
@@ -669,10 +710,12 @@ function teardownCurrentClient() {
     globalStore.clearRoomQueueState(connectedSlug)
     connectedSlug = null
   }
-  // R11a (corrective pass): the chat seed flag is per-WS-client;
-  // a teardown must reset it so the next mount / slug change can
-  // re-seed the next room's history after its first sync.
+  // R11a (corrective pass): the chat seed flags are per-WS-client;
+  // a teardown must reset BOTH so the next mount / slug change can
+  // re-seed the next room's history after its first sync and any
+  // half-finished GET does not leave the next room stuck.
   chatHistoryFetched = false
+  chatHistoryFetchInFlight = false
 }
 
 onMounted(async () => {
@@ -686,6 +729,7 @@ onMounted(async () => {
   // room_queue_sync event (see applyMessage) after the per-room
   // hub confirms the client is registered.
   chatHistoryFetched = false
+  chatHistoryFetchInFlight = false
   globalStore.setRoomQueueConnected(target, false)
   await seedStateFromRest()
   await seedRoomAutoQueueConfigFromRest()
@@ -699,10 +743,14 @@ watch(slug, async (newSlug) => {
   teardownCurrentClient()
   connectedSlug = newSlug
   // R11a (corrective pass): reset the per-connection chat seed
-  // flag so the new room re-seeds exactly once after the first
-  // room_queue_sync event. The flag is intentionally per-mount,
-  // not per-slug, so the seed is tied to the WS client lifetime.
+  // flags so the new room re-seeds exactly once after the first
+  // room_queue_sync event. The flags are intentionally
+  // per-mount, not per-slug, so the seed is tied to the WS client
+  // lifetime. chatHistoryFetchInFlight is reset so a stuck
+  // half-finished GET against the OLD slug cannot permanently
+  // gate the NEW room from seeding.
   chatHistoryFetched = false
+  chatHistoryFetchInFlight = false
   globalStore.setRoomQueueConnected(newSlug, false)
   // Mirror the mount path: REST-seed the new room's queue, its
   // auto-queue config, AND its member list before opening the
@@ -738,30 +786,22 @@ async function addSong() {
 
 // R11a: send a plain-text chat message. The send-in-flight guard
 // prevents a double-POST if the user double-clicks before the
-// first response lands. On success the input is cleared; the
-// authoritative cache update comes from the
-// room_chat_message_created WS event so the same code path is
-// shared between self-sent and peer-sent messages. The POST
-// response is intentionally NOT applied directly to the local
-// store so a delayed/replayed WS event does not produce a
-// duplicate row (the store mutator does not de-dupe; the WS
-// fan-out is the single authoritative source of post-mutation
-// state, mirroring the R07c queue pattern).
+// first response lands. On success the input is cleared. The
+// POST response body is { message: { ... } } (same shape as the
+// room_chat_message_created WS data payload); the response is
+// applied to the local cache immediately via the merge-aware
+// store mutator so the sender sees the persisted row even if the
+// WS fan-out never lands (e.g. the connection drops between POST
+// success and the hub broadcast). The store merge dedupes by id,
+// so a later room_chat_message_created WS event for the same id
+// collapses to one row.
 async function sendChat() {
-  if (!canChat.value) return
+  if (!canSendChat.value) return
   const trimmed = chatDraft.value.trim()
   if (!trimmed) return
   chatSendInFlight.value = true
   const targetSlug = slug.value
   try {
-    // R11a (corrective pass): the POST response body is
-    // { message: { ... } } (same shape as the WS data field).
-    // Apply it to the local cache immediately so the sender
-    // sees the persisted row even if the WS event never lands
-    // (e.g. the connection drops between POST success and the
-    // hub fan-out). The store merge is by id, so a later
-    // room_chat_message_created WS event for the same id
-    // dedupes to one row.
     const body = await api.sendRoomChatMessage(targetSlug, trimmed)
     if (body && body.message && targetSlug === slug.value) {
       globalStore.applyRoomChatMessageFromPost(targetSlug, body)

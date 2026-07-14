@@ -1,6 +1,6 @@
 # R11 – Room chat feature
 
-**Status:** R11a implemented on `dev` (2026-07-14) with a corrective pass (2026-07-14) for the chat bootstrap / recovery consistency defects, restored approved POST contract, display-name-failure short-circuit, and 500-code-point cap. R11a is current/pending Product Owner review (not accepted, not closed). R11b+ deferred.
+**Status:** R11a implemented on `dev` (2026-07-14) with a corrective pass (2026-07-14) and a final corrective pass (2026-07-14) for the chat bootstrap / recovery guarantees, the 500-Unicode-code-point input behavior, and the stale-comment sweep. R11a is current/pending Product Owner review (not accepted, not closed). R11b+ deferred.
 
 **Sprint name:** Room chat feature
 
@@ -148,6 +148,17 @@ R11a landed on `dev` but a narrow review pass surfaced four contract / consisten
 6. **Generic 500 with no internal-detail leak.** Unexpected errors from the chat use case are mapped to a generic "internal server error" body; the detailed error is logged server-side via `log.Printf` with the route slug and the actor id (no request body, header, cookie, or bearer token). `ErrSenderNotFound` keeps a 500 with a stable body string for the missing-user invariant violation.
 
 The corrective pass touches the same files as the original R11a landing and does NOT introduce new runtime surface, new migrations, new WebSocket events, or new REST routes. The full backend + frontend test suite is re-verified; the corrective pass is part of R11a (not a separate sprint) and R11a is still current/pending Product Owner review.
+
+### Final corrective pass (2026-07-14, still pending Product Owner acceptance)
+
+A focused second pass closed four frontend-only defects on top of the prior corrective pass. The sprint is NOT advanced; R11a is still current/pending review. Backend, migration, REST, WS, and store contracts are unchanged.
+
+1. **Retry the initial history seed after failure.** The post-sync chat seed is gated on two per-connection flags: `chatHistoryFetched` (true only after a successful merge) and `chatHistoryFetchInFlight` (true while a GET is pending). A failed GET leaves `chatHistoryFetched=false` so a later `room_queue_sync` is allowed to retry; `chatHistoryFetchInFlight` is cleared in `finally` so a future sync is never permanently gated. A second sync arriving while the first GET is in flight is suppressed by the in-flight flag — exactly one network request for the seed. Both flags are reset on teardown and on slug change.
+2. **Recover chat independently when a sequence gap occurs.** `onGap` now attempts queue recovery AND chat history recovery through two independent async operations that each succeed or fail on their own. A queue failure does NOT skip the chat history fetch and merge. A chat failure does NOT clear existing chat messages or block queue recovery. Existing queue error/toast behavior is preserved. Each operation re-checks the target slug on resolution so a stale GET (the user navigated away) does not pollute the new room.
+3. **Correct the frontend 500-code-point input behavior.** The native `maxlength="500"` attribute (which counts UTF-16 code units and broke valid 500-emoji messages) has been removed. The input stays enabled when the draft exceeds 500 code points so the user can shorten it. The view exposes two separate gates: `canEditChat` (auth + connected + active member + not archived/removed + no send in flight) and `canSendChat` (`canEditChat` + non-empty + ≤ 500 code points). Server validation remains authoritative. An over-limit hint is rendered when the draft exceeds the cap.
+4. **Stale-comment sweep.** Comments that still claimed the POST returned a bare list entry, that the POST response was not applied to the local store, that the store did not deduplicate, that the limit was measured in bytes or generic chars, or that `strings.TrimSpace` removed zero-width spaces, were corrected against the post-corrective-pass runtime contracts. No behavior changes were made during this sweep.
+
+The final corrective pass is part of R11a (not a separate sprint). It adds no new files, no new runtime surface, no new migrations, no new WebSocket events, and no new REST routes. The full frontend test suite (294 tests) is verified; `git diff --check` is clean; the frontend build is clean. R11b+, R10f+, R12, R13, and R14 are unchanged.
 
 ### Deferred R11b+ scope (NOT in R11a)
 

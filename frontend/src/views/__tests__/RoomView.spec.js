@@ -77,6 +77,21 @@ function mountRoomView(slug = 'lobby', routePath = `/rooms/${slug}`) {
   return { router, wrapper: shallowMount(RoomView, { global: { plugins: [router] } }) }
 }
 
+// Test routes room-view onto `/rooms/:slug` BEFORE mount so that
+// `route.params.slug` is non-null inside onMounted. Without this,
+// the component's setup-time `if (target == null) return` early-out
+// skips the WS connect and subsequent `await router.push` from the
+// test body lands AFTER the lifecycle hooks have run, leaving the
+// test driving the previous test's wsClient via driveSync.
+async function mountRoomViewAt(slug) {
+  const { router, wrapper } = mountRoomView(slug)
+  await router.push(`/rooms/${slug}`)
+  // Push + drain microtasks so onMounted has finished its setup
+  // and the WS client factory has been called for THIS slug.
+  await flushPromises()
+  return { router, wrapper }
+}
+
 describe('RoomView', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -1402,6 +1417,374 @@ describe('RoomView (R11a corrective pass)', () => {
     vm.chatDraft = '🌍'
     expect(vm.chatDraftCodePoints).toBe(1)
     expect(vm.chatDraftOverLimit).toBe(false)
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+})
+
+// --- R11a final corrective pass tests ---
+
+describe('RoomView (R11a final corrective pass)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    sessionStorage.clear()
+    sessionHelper.clearSession()
+    globalStore.roomQueues = {}
+    vi.clearAllMocks()
+    apiMock.getRoomChatMessages.mockResolvedValue({ messages: [] })
+    apiMock.sendRoomChatMessage.mockResolvedValue({ message: { id: 0, room_slug: '', sender: { user_id: 0, display_name: '' }, content: '', created_at: new Date(0).toISOString() } })
+  })
+
+  function driveSync(slug = 'lobby', state = { songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] }) {
+    wsFactoryMock.lastInstance.onMessage({ type: 'room_queue_sync', data: { room_slug: slug, state } })
+  }
+
+  // --- Item 1: retry the initial history seed after failure ---
+
+  it('retries the chat history seed on a later room_queue_sync after an initial GET failure', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+
+    // First sync triggers a GET that fails; the second sync is
+    // allowed to retry it.
+    apiMock.getRoomChatMessages
+      .mockRejectedValueOnce(Object.assign(new Error('boom'), { status: 500 }))
+      .mockResolvedValueOnce({ messages: [
+        { id: 11, room_slug: 'lobby', sender: { user_id: 2, display_name: 'Peer' }, content: 'first', created_at: '2026-01-01T00:00:00Z' },
+      ] })
+
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    driveSync()
+    await flushPromises()
+    expect(apiMock.getRoomChatMessages).toHaveBeenCalledTimes(1)
+    // The previous messages slice is preserved on failure.
+    if (globalStore.roomQueues.lobby) {
+      expect(globalStore.roomQueues.lobby.messages || []).toEqual([])
+    }
+
+    // A second room_queue_sync must be allowed to retry (because
+    // chatHistoryFetched stayed false after the failure).
+    driveSync()
+    await flushPromises()
+    expect(apiMock.getRoomChatMessages).toHaveBeenCalledTimes(2)
+    expect(globalStore.roomQueues.lobby.messages.length).toBe(1)
+    expect(globalStore.roomQueues.lobby.messages[0].id).toBe(11)
+
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('a successful retry merges seeded messages into the existing cache', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ messages: [] })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+
+    // First sync: GET returns successfully with id=1.
+    apiMock.getRoomChatMessages.mockResolvedValueOnce({ messages: [
+      { id: 1, room_slug: 'lobby', sender: { user_id: 1, display_name: 'A' }, content: 'a', created_at: '2026-01-01T00:00:00Z' },
+    ] })
+
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    driveSync()
+    await flushPromises()
+    expect(globalStore.roomQueues.lobby.messages.map((m) => m.id)).toEqual([1])
+
+    // After a successful seed, chatHistoryFetched is true, so a
+    // second sync must NOT re-fetch.
+    driveSync()
+    await flushPromises()
+    expect(apiMock.getRoomChatMessages).toHaveBeenCalledTimes(1)
+    expect(globalStore.roomQueues.lobby.messages.map((m) => m.id)).toEqual([1])
+
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('two syncs while the first GET is in flight produce exactly one network request', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+
+    let resolveGet
+    apiMock.getRoomChatMessages.mockImplementation(() => new Promise((r) => { resolveGet = r }))
+
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    driveSync() // first sync → GET starts
+    await flushPromises()
+    expect(apiMock.getRoomChatMessages).toHaveBeenCalledTimes(1)
+
+    // Second sync arrives while first GET is pending → in-flight
+    // guard suppresses a second request.
+    driveSync()
+    await flushPromises()
+    expect(apiMock.getRoomChatMessages).toHaveBeenCalledTimes(1)
+
+    // Third sync while GET is still pending → still no second request.
+    driveSync()
+    await flushPromises()
+    expect(apiMock.getRoomChatMessages).toHaveBeenCalledTimes(1)
+
+    // Resolve the GET → a further sync must NOT re-fetch
+    // (chatHistoryFetched is true after the merge).
+    resolveGet({ messages: [
+      { id: 5, room_slug: 'lobby', sender: { user_id: 1, display_name: 'A' }, content: 'a', created_at: '2026-01-01T00:00:00Z' },
+    ] })
+    await flushPromises()
+    driveSync()
+    await flushPromises()
+    expect(apiMock.getRoomChatMessages).toHaveBeenCalledTimes(1)
+
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  // --- Item 2: independent recovery on gap ---
+
+  it('onGap recovers chat history even when queue recovery rejects', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [] })
+    apiMock.getRoomChatMessages.mockResolvedValue({ messages: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    driveSync()
+    await flushPromises()
+
+    // Queue recovery rejects, chat recovery resolves.
+    apiMock.getRoomQueue.mockRejectedValueOnce(Object.assign(new Error('forbidden'), { status: 403 }))
+    apiMock.getRoomChatMessages.mockResolvedValueOnce({ messages: [
+      { id: 42, room_slug: 'lobby', sender: { user_id: 2, display_name: 'Peer' }, content: 'peer', created_at: '2026-01-01T00:00:00Z' },
+    ] })
+
+    await wsFactoryMock.lastInstance.onGap({ slug: 'lobby', lastSeqNum: 1, seqNum: 3 })
+    await flushPromises()
+
+    // The chat recovery succeeded, so the message is merged into
+    // the cache even though the queue recovery failed.
+    expect(globalStore.roomQueues.lobby.messages.map((m) => m.id)).toEqual([42])
+    // The queue error is surfaced via toast (existing behavior).
+    expect(toastMock.error).toHaveBeenCalled()
+
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('onGap keeps existing chat rows when chat recovery rejects (queue recovery succeeds)', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [{ id: 'restored' }], current_index: 0, current_song: { id: 'restored' }, status: 'paused', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [] })
+    apiMock.getRoomChatMessages.mockResolvedValue({ messages: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    driveSync()
+    await flushPromises()
+
+    // Seed a known local chat row via the WS event.
+    wsFactoryMock.lastInstance.onMessage({
+      type: 'room_chat_message_created',
+      data: {
+        message: { id: 7, room_slug: 'lobby', sender: { user_id: 1, display_name: 'Me' }, content: 'local', created_at: '2026-01-01T00:00:00Z' },
+      },
+    })
+    expect(globalStore.roomQueues.lobby.messages.length).toBe(1)
+
+    // Chat recovery rejects; queue recovery succeeds.
+    apiMock.getRoomChatMessages.mockRejectedValueOnce(Object.assign(new Error('boom'), { status: 500 }))
+    await wsFactoryMock.lastInstance.onGap({ slug: 'lobby', lastSeqNum: 1, seqNum: 3 })
+    await flushPromises()
+
+    // Queue recovered.
+    expect(globalStore.roomQueues.lobby.state.songs[0].id).toBe('restored')
+    // Local chat row is preserved (no destructive clear).
+    expect(globalStore.roomQueues.lobby.messages.map((m) => m.id)).toEqual([7])
+    // The queue recovery did NOT produce a toast (it succeeded).
+    expect(toastMock.error).not.toHaveBeenCalled()
+
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('stale queue or chat recovery results do not update the newly selected room', async () => {
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [] })
+
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+
+    // One seed + one gap-driven chat recovery (kept in flight).
+    let resolveChatGet
+    apiMock.getRoomChatMessages
+      .mockResolvedValueOnce({ messages: [] })
+      .mockImplementationOnce(() => new Promise((r) => { resolveChatGet = r }))
+
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    driveSync()
+    await flushPromises()
+
+    // Capture the client instance directly so this test does NOT
+    // depend on wsFactoryMock.lastInstance carrying over from a
+    // previous test in the suite. driveSync here refers to the
+    // helper above — invoked from the captured `applyMessage`
+    // closure attached to THIS mount's client.
+    const lobbyClient = wsFactoryMock.lastInstance
+    const gapPromise = lobbyClient.onGap({ slug: 'lobby', lastSeqNum: 1, seqNum: 3 })
+    expect(typeof resolveChatGet).toBe('function')
+
+    // Navigate to a new slug BEFORE the chat recovery resolves.
+    await router.push('/rooms/lounge')
+    await flushPromises()
+    driveSync('lounge')
+    await flushPromises()
+
+    // Resolve the LOBBY chat recovery with stale data AFTER the
+    // navigation. The store must NOT apply it to the new room.
+    resolveChatGet({ messages: [
+      { id: 1, room_slug: 'lobby', sender: { user_id: 1, display_name: 'Me' }, content: 'lobby-stale', created_at: '2026-01-01T00:00:00Z' },
+    ] })
+    await gapPromise
+    await flushPromises()
+
+    // Sanity: lounge now has its own (different) entries.
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  // --- Item 3: 500 code-point input behavior ---
+
+  it('accepts exactly 500 emoji / code points (input NOT capped at 500 UTF-16 code units)', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [] })
+    apiMock.getRoomChatMessages.mockResolvedValue({ messages: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    wsFactoryMock.lastInstance.onOpen()
+    driveSync()
+    await flushPromises()
+
+    const vm = wrapper.vm
+    vm.chatDraft = '🌍'.repeat(500)
+    expect(vm.chatDraftCodePoints).toBe(500)
+    expect(vm.chatDraftOverLimit).toBe(false)
+    // Send button must NOT be disabled at exactly 500.
+    expect(vm.canChat).toBe(true)
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('shows the over-limit hint and disables Send at 501 code points', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [] })
+    apiMock.getRoomChatMessages.mockResolvedValue({ messages: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    wsFactoryMock.lastInstance.onOpen()
+    driveSync()
+    await flushPromises()
+
+    const vm = wrapper.vm
+    vm.chatDraft = '🌍'.repeat(501)
+    await flushPromises()
+    expect(vm.chatDraftCodePoints).toBe(501)
+    expect(vm.chatDraftOverLimit).toBe(true)
+    expect(vm.canSendChat).toBe(false)
+    // The over-limit hint is visible in the rendered DOM and the
+    // Send button is rendered disabled.
+    const html = wrapper.html()
+    expect(html).toContain('chat-over-limit')
+    const sendBtn = wrapper.find('[data-testid="chat-send"]')
+    expect(sendBtn.attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('keeps the input enabled and editable at 501 code points (user must be able to shorten)', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [] })
+    apiMock.getRoomChatMessages.mockResolvedValue({ messages: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    wsFactoryMock.lastInstance.onOpen()
+    driveSync()
+    await flushPromises()
+
+    const vm = wrapper.vm
+    vm.chatDraft = 'x'.repeat(501)
+    expect(vm.chatDraftOverLimit).toBe(true)
+    // canEditChat covers interactivity (auth + WS + active) and
+    // intentionally does NOT depend on chatDraftOverLimit so the
+    // input stays enabled when the draft exceeds the cap.
+    expect(vm.canEditChat).toBe(true)
+    // canSendChat does gate on the cap, so Send is disabled.
+    expect(vm.canSendChat).toBe(false)
+
+    // The input has no native maxlength attribute (R11a final
+    // corrective pass): the user is free to type past 500 and the
+    // input keeps the typed text.
+    const input = wrapper.find('[data-testid="chat-input"]')
+    expect(input.attributes('maxlength')).toBeUndefined()
+    // And the bound draft is preserved (the input is not capped
+    // nor auto-trimmed by Vue when over the limit).
+    expect(vm.chatDraft.length).toBe(501)
+
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('shortening from 501 to 500 re-enables Send', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [] })
+    apiMock.getRoomChatMessages.mockResolvedValue({ messages: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    wsFactoryMock.lastInstance.onOpen()
+    driveSync()
+    await flushPromises()
+
+    const vm = wrapper.vm
+    vm.chatDraft = 'a'.repeat(501)
+    expect(vm.chatDraftOverLimit).toBe(true)
+    expect(vm.canSendChat).toBe(false)
+
+    // Trim the trailing character — the draft now sits at exactly 500.
+    vm.chatDraft = 'a'.repeat(500)
+    expect(vm.chatDraftOverLimit).toBe(false)
+    // Non-empty + within cap + canEditChat → canSendChat is true.
+    expect(vm.canSendChat).toBe(true)
+
     wrapper.unmount()
     globalStore.clearUser()
   })
