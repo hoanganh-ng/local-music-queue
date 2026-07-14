@@ -378,3 +378,71 @@ describe('Room chat store (R11a)', () => {
     expect(globalStore.currentUser).toBe(before.currentUser)
   })
 })
+
+// --- R11a corrective-pass store tests ---
+
+describe('Room chat store (R11a corrective pass)', () => {
+  beforeEach(() => {
+    globalStore.roomQueues = {}
+    globalStore.queueState = { songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] }
+    globalStore.voteSessions = {}
+    globalStore.autoQueueConfig = { enabled: false, strategy: 'related' }
+  })
+
+  function msg(id, content, createdAt) {
+    return { id, room_slug: 'lobby', sender: { user_id: 1, display_name: 'A' }, content, created_at: createdAt }
+  }
+
+  it('setRoomChatMessages merges by id (REST + WS for the same id → one row)', () => {
+    globalStore.applyRoomChatMessageCreated('lobby', { message: msg(1, 'a', '2026-01-01T00:00:00Z') })
+    globalStore.setRoomChatMessages('lobby', [
+      msg(1, 'a', '2026-01-01T00:00:00Z'),
+      msg(2, 'b', '2026-01-01T00:00:01Z'),
+    ])
+    expect(globalStore.roomQueues.lobby.messages.map((m) => m.id)).toEqual([1, 2])
+  })
+
+  it('applyRoomChatMessageCreated via _mergeRoomChat sorts oldest → newest by created_at with id tie-break', () => {
+    // Two messages with the same created_at; the id tie-break
+    // must order them deterministically.
+    globalStore.applyRoomChatMessageCreated('lobby', { message: msg(2, 'b', '2026-01-01T00:00:00Z') })
+    globalStore.applyRoomChatMessageCreated('lobby', { message: msg(1, 'a', '2026-01-01T00:00:00Z') })
+    expect(globalStore.roomQueues.lobby.messages.map((m) => m.id)).toEqual([1, 2])
+  })
+
+  it('applyRoomChatMessageFromPost applies a single message via the same merge path', () => {
+    globalStore.applyRoomChatMessageFromPost('lobby', { message: msg(1, 'a', '2026-01-01T00:00:00Z') })
+    expect(globalStore.roomQueues.lobby.messages.length).toBe(1)
+    // A subsequent WS event for the same id must dedupe.
+    globalStore.applyRoomChatMessageCreated('lobby', { message: msg(1, 'a', '2026-01-01T00:00:00Z') })
+    expect(globalStore.roomQueues.lobby.messages.length).toBe(1)
+  })
+
+  it('merge caps at MaxRoomChatMessages, dropping oldest entries', async () => {
+    const { MaxRoomChatMessages } = await import('../index')
+    // Seed N+5 entries via WS events; verify only the newest N
+    // entries remain. Use a strictly monotonic created_at so the
+    // cap is owned by ordering, not by collision within a single
+    // wall-clock second.
+    const total = MaxRoomChatMessages + 5
+    const base = Date.parse('2026-01-01T00:00:00Z')
+    for (let i = 0; i < total; i++) {
+      globalStore.applyRoomChatMessageCreated('lobby', {
+        message: msg(i, `m${i}`, new Date(base + i * 1000).toISOString()),
+      })
+    }
+    const msgs = globalStore.roomQueues.lobby.messages
+    expect(msgs.length).toBe(MaxRoomChatMessages)
+    // The oldest 5 must be dropped.
+    const ids = msgs.map((m) => m.id)
+    expect(ids[0]).toBe(5)
+    expect(ids[ids.length - 1]).toBe(total - 1)
+  })
+
+  it('merge ignores duplicate ids without producing a second row', () => {
+    globalStore.applyRoomChatMessageCreated('lobby', { message: msg(1, 'a', '2026-01-01T00:00:00Z') })
+    globalStore.applyRoomChatMessageCreated('lobby', { message: msg(1, 'a', '2026-01-01T00:00:00Z') })
+    globalStore.applyRoomChatMessageCreated('lobby', { message: msg(1, 'a', '2026-01-01T00:00:00Z') })
+    expect(globalStore.roomQueues.lobby.messages.length).toBe(1)
+  })
+})

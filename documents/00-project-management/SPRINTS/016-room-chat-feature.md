@@ -1,6 +1,6 @@
 # R11 – Room chat feature
 
-**Status:** R11a implemented on `dev` (2026-07-14); accepted by the Product Owner (pending). R11b+ deferred.
+**Status:** R11a implemented on `dev` (2026-07-14) with a corrective pass (2026-07-14) for the chat bootstrap / recovery consistency defects, restored approved POST contract, display-name-failure short-circuit, and 500-code-point cap. R11a is current/pending Product Owner review (not accepted, not closed). R11b+ deferred.
 
 **Sprint name:** Room chat feature
 
@@ -36,15 +36,42 @@ POST /api/rooms/{slug}/chat/messages
 
 Both routes sit behind `roomAuth`; the actor user id is server-resolved from the bearer token.  The request body is exactly `{"content": "<plain text>"}` — no `sender_id` / `user_id` fields are accepted.
 
+GET response (200):
+
+```json
+{
+  "messages": [
+    { "id": 123, "room_slug": "lobby",
+      "sender": { "user_id": 42, "display_name": "Alex" },
+      "content": "hello", "created_at": "..." }
+  ]
+}
+```
+
+POST response (201, **wrapped under `message`**, corrective pass):
+
+```json
+{
+  "message": {
+    "id": 123, "room_slug": "lobby",
+    "sender": { "user_id": 42, "display_name": "Alex" },
+    "content": "hello", "created_at": "..."
+  }
+}
+```
+
+The POST 201 body is wrapped under `message` so the wire shape mirrors the `room_chat_message_created` WS data payload and the frontend can route both the REST response and the later WS event through the same store merge path. Without the wrapper, the POST body would be indistinguishable from a single list entry, which would break the symmetry the R11a frontend store merge relies on. Both responses never expose the sender email; `display_name` falls back to `user #<id>` when the user row's `display_name` is empty.
+
 | Status | When |
 |---|---|
 | `200` | GET success — `{"messages": [...]}` oldest → newest |
-| `201` | POST success — the post-mutation envelope (same shape as a list entry) |
-| `400` | Invalid slug, invalid limit, empty-after-trim content, content > 500 chars |
+| `201` | POST success — `{"message": { ... }}` (wrapped envelope, corrective pass) |
+| `400` | Invalid slug, invalid limit, empty-after-trim content, content > 500 code points |
 | `401` | Missing session |
 | `403` | Non-member caller |
 | `404` | Unknown slug |
 | `409` | Archived room |
+| `500` | Internal server error — generic body; the detailed cause is logged server-side (no PII) |
 
 ### WebSocket envelope (R11a, per-room endpoint only)
 
@@ -103,6 +130,24 @@ Frontend (all pass):
 * `git diff --check`
 
 R11a preserves: the global `/ws` 16-event inventory, the R06 `room_archived` wire value + payload, the R07b/R07d/R09a/R09b/R09c/R09d/R09f/R10b per-room WebSocket events, the R05 in-memory session-token model, the schema version (now 8 after migration `0008_room_chat_messages`), the R10a members-list response wrapper, the global room-queue + auto-queue + vote + playback + member-removal surfaces, and the R10f+ deferred lifecycle hardening bucket.
+
+### Corrective pass (2026-07-14, still pending Product Owner acceptance)
+
+R11a landed on `dev` but a narrow review pass surfaced four contract / consistency defects that the corrective pass fixes without changing the R11a functional scope. The corrective pass does NOT advance the sprint.
+
+1. **Restored approved POST contract.** `POST /api/rooms/{slug}/chat/messages` now returns 201 with `{ "message": { id, room_slug, sender, content, created_at } }` so the wire shape matches the `room_chat_message_created` WS data payload. The prior landing shipped a bare envelope; the corrective pass wraps the response so the frontend can apply both the POST response and the later WS event through the same store merge path. `GET /api/rooms/{slug}/chat/messages` keeps `{"messages": [...]}`; the WS envelope keeps `{"message": ...}`. The room_chat_message_created WS event is unchanged.
+
+2. **Display-name lookup failure short-circuits Send BEFORE persistence.** The use case now resolves the sender display name AFTER room + membership resolution and BEFORE `CreateMessage`. A `sql.ErrNoRows` from the user repo returns `ErrSenderNotFound` (500). A general repository error is wrapped and mapped to 500. In both cases no row is persisted and no broadcast fires. This prevents a sender whose users row is missing from silently leaking a `{ message: { sender: { display_name: "" } } }` envelope to the room. The new use-case tests `TestSend_DisplayNameMissingUser_NoPersistNoBroadcast` and `TestSend_DisplayNameRepoError_NoPersistNoBroadcast` pin the invariant.
+
+3. **Closed the REST-history / WebSocket registration race.** The corrective pass removes the pre-WS-registration `GET /chat/messages` call from `RoomView.onMounted` and the slug watcher. The history GET is now triggered by the first `room_queue_sync` event (the per-room hub's confirmation that the client is registered) and runs at most once per connection (`chatHistoryFetched` flag, reset on teardown / slug change). The history seed is a MERGE, not a replace: the store dedupes by message id, sorts oldest → newest by `created_at` (with id as the deterministic tie-breaker), and caps at `MaxRoomChatMessages`. A WS event that arrives while the history GET is in flight produces exactly one row, not two (the store merge collapses on id collision). The `seedRoomChatMessagesFromRest(targetSlug)` helper now captures the slug at call time and re-checks it on resolution so a stale GET (the user navigated away while the GET was in flight) does NOT pollute the new room's cache.
+
+4. **Recover chat state on sequence gaps.** `RoomView.onGap` now also fetches recent chat history and merges it into the local cache. The merge is by id so messages already received via the WS events stay present (no destructive clear on a successful recovery). A failed chat recovery logs the error and keeps the prior messages intact. The existing queue recovery is preserved.
+
+5. **Enforced 500 Unicode code points.** The backend switched from byte-length to `utf8.RuneCountInString`, counted AFTER trim and CRLF/CR normalization. The frontend mirrors this with `Array.from(chatDraft).length` (the native `maxlength="500"` counts UTF-16 code units, which under-counts for BMP code points and over-counts for surrogate pairs). The Send button is disabled when the draft exceeds 500 code points, and an over-limit hint is rendered. Server validation remains authoritative. New tests cover: 500 / 501 non-ASCII code points, mixed ASCII + non-ASCII boundary, and CRLF normalization before the count.
+
+6. **Generic 500 with no internal-detail leak.** Unexpected errors from the chat use case are mapped to a generic "internal server error" body; the detailed error is logged server-side via `log.Printf` with the route slug and the actor id (no request body, header, cookie, or bearer token). `ErrSenderNotFound` keeps a 500 with a stable body string for the missing-user invariant violation.
+
+The corrective pass touches the same files as the original R11a landing and does NOT introduce new runtime surface, new migrations, new WebSocket events, or new REST routes. The full backend + frontend test suite is re-verified; the corrective pass is part of R11a (not a separate sprint) and R11a is still current/pending Product Owner review.
 
 ### Deferred R11b+ scope (NOT in R11a)
 

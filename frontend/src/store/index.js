@@ -556,39 +556,89 @@ export const globalStore = reactive({
 
   // --- R11a room chat mutators ---
   //
-  // Two narrow mutators own the room-local chat cache. The cache
-  // lives on globalStore.roomQueues[slug].messages and is isolated
-  // from the global queueState / voteSessions / autoQueueConfig /
-  // currentUser. Mutations are guarded by a MaxRoomChatMessages cap
-  // so a misbehaving sender cannot push the local store over a
-  // bounded size.
+  // The chat cache lives on globalStore.roomQueues[slug].messages
+  // and is isolated from the global queueState / voteSessions /
+  // autoQueueConfig / currentUser. Every mutator routes through
+  // _mergeRoomChat so dedup + sort + cap invariants are owned in
+  // one place. The corrective pass collapses the prior two
+  // mutators (setRoomChatMessages + applyRoomChatMessageCreated)
+  // into the same merge path so a REST-seed page and a WS event
+  // for the same id produce one row, not two.
 
-  // setRoomChatMessages replaces the cached chat history with the
-  // ordered (oldest → newest) payload from the initial REST seed.
-  // Pass [] to clear; the mutator is a no-op for null/undefined
-  // payloads so a transient GET failure leaves the prior list
-  // intact (analogous to applyRoomMembersChanged's missing-payload
-  // behavior).
+  // setRoomChatMessages merges a REST history page (oldest →
+  // newest) into the existing cache. Existing rows with the same
+  // id are preserved (the cache already has authoritative state
+  // for those rows from a prior WS event). The merged result is
+  // re-sorted oldest → newest by created_at + id, then capped at
+  // MaxRoomChatMessages (newest entries retained on overflow).
+  // The mutator is a no-op for null / non-array payloads so a
+  // transient GET failure leaves the prior list intact.
   setRoomChatMessages(slug, messages) {
     if (!slug || !Array.isArray(messages)) return
-    this._ensureRoomEntry(slug).messages = messages.slice(0, MaxRoomChatMessages)
+    const entry = this._ensureRoomEntry(slug)
+    entry.messages = this._mergeRoomChat(entry.messages, messages)
   },
 
-  // applyRoomChatMessageCreated appends a single post-mutation
-  // envelope delivered by the room_chat_message_created WS event.
-  // The cache is capped at MaxRoomChatMessages; the oldest entry
-  // is dropped on overflow so the panel stays bounded. The mutator
-  // is a no-op for missing payload / message fields so a malformed
-  // event cannot poison the local state.
+  // applyRoomChatMessageCreated handles a single
+  // room_chat_message_created WS event. The payload shape is
+  // { message: { id, room_slug, sender, content, created_at } }
+  // (matches the WS data field exactly; the same envelope is
+  // returned by POST /api/rooms/{slug}/chat/messages so the
+  // sender's POST response + the later WS event produce one row).
   applyRoomChatMessageCreated(slug, payload) {
     if (!slug || !payload || !payload.message) return
     const entry = this._ensureRoomEntry(slug)
-    const next = entry.messages.concat([payload.message])
-    if (next.length > MaxRoomChatMessages) {
-      entry.messages = next.slice(next.length - MaxRoomChatMessages)
-    } else {
-      entry.messages = next
+    entry.messages = this._mergeRoomChat(entry.messages, [payload.message])
+  },
+
+  // applyRoomChatMessageFromPost handles the POST 201 response.
+  // The wire shape is { message: { ... } } (corrective pass) so
+  // the body is the SAME shape as the WS data field. This is the
+  // sender's authoritative local view of the message even if the
+  // WS event never lands.
+  applyRoomChatMessageFromPost(slug, body) {
+    if (!slug || !body || !body.message) return
+    const entry = this._ensureRoomEntry(slug)
+    entry.messages = this._mergeRoomChat(entry.messages, [body.message])
+  },
+
+  // _mergeRoomChat dedupes two message lists by id, sorts the
+  // result oldest → newest by created_at (with id as the
+  // deterministic tie-breaker so identical timestamps are still
+  // ordered), then caps at MaxRoomChatMessages. Both mutators
+  // route through this helper so a REST seed + a WS event for the
+  // same id, or a POST response + a WS event for the same id,
+  // produce exactly one row.
+  _mergeRoomChat(existing, incoming) {
+    const byId = new Map()
+    const ingest = (list) => {
+      if (!Array.isArray(list)) return
+      for (const m of list) {
+        if (!m || typeof m.id === 'undefined' || m.id === null) continue
+        // Later writes win on collision so a more authoritative
+        // source (e.g. the POST response with a server-stamped
+        // id) can refresh a row first seen via an optimistic
+        // path. In practice the row bodies are identical for
+        // a given id; the dedup is the safety guarantee.
+        byId.set(m.id, m)
+      }
     }
+    ingest(existing)
+    ingest(incoming)
+    const merged = Array.from(byId.values())
+    merged.sort((a, b) => {
+      const ta = a && a.created_at ? Date.parse(a.created_at) : 0
+      const tb = b && b.created_at ? Date.parse(b.created_at) : 0
+      if (ta !== tb) return ta - tb
+      // Tie-breaker: numeric id (older ids first within the same
+      // second). Falls back to string compare for non-numeric ids.
+      if (typeof a.id === 'number' && typeof b.id === 'number') return a.id - b.id
+      return String(a.id).localeCompare(String(b.id))
+    })
+    if (merged.length > MaxRoomChatMessages) {
+      return merged.slice(merged.length - MaxRoomChatMessages)
+    }
+    return merged
   },
 })
 

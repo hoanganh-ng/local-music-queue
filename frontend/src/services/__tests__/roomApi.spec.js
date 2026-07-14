@@ -337,4 +337,19 @@ describe('Room Chat API (R11a)', () => {
       await expect(api.sendRoomChatMessage('lobby', 'hi')).rejects.toMatchObject({ status })
     }
   })
+
+  it('sendRoomChatMessage returns { message: ... } (post-mutation envelope is wrapped)', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    const mockFetch = mockFetchOk({
+      message: { id: 7, room_slug: 'lobby', sender: { user_id: 1, display_name: 'Me' }, content: 'hi', created_at: '2026-01-01T00:00:00Z' },
+    })
+    const res = await api.sendRoomChatMessage('lobby', 'hi')
+    expect(res).toBeDefined()
+    expect(res.message).toBeDefined()
+    expect(res.message.id).toBe(7)
+    expect(res.message.content).toBe('hi')
+    // No email in the response.
+    expect(JSON.stringify(res)).not.toMatch(/email/)
+  })
 })

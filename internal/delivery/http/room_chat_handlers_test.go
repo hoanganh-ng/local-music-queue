@@ -113,10 +113,14 @@ func TestHandlePostChatMessage_Success(t *testing.T) {
 		t.Fatalf("status=%d want 201; body=%s", rr.Code, rr.Body.String())
 	}
 
-	var wire chatMessageWire
-	if err := json.Unmarshal(rr.Body.Bytes(), &wire); err != nil {
+	// POST response is wrapped as { "message": { ... } } so the wire
+	// shape mirrors the room_chat_message_created WS data payload and
+	// the frontend can route both through the same store mutator.
+	var wrapped chatPostResp
+	if err := json.Unmarshal(rr.Body.Bytes(), &wrapped); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
+	wire := wrapped.Message
 	if wire.ID <= 0 {
 		t.Fatalf("id=%d want positive", wire.ID)
 	}
@@ -161,8 +165,9 @@ func TestHandlePostChatMessage_NoEmailOnEmptyDisplayName(t *testing.T) {
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("status=%d want 201; body=%s", rr.Code, rr.Body.String())
 	}
-	var wire chatMessageWire
-	_ = json.Unmarshal(rr.Body.Bytes(), &wire)
+	var wrapped chatPostResp
+	_ = json.Unmarshal(rr.Body.Bytes(), &wrapped)
+	wire := wrapped.Message
 	if wire.Sender.DisplayName == "" {
 		t.Fatalf("display_name must be populated (with fallback)")
 	}
@@ -506,3 +511,43 @@ func seedChatFixturesForUser(t *testing.T, db *sql.DB, slug string, displayName 
 
 // silence unused imports when a sub-test path skips body strings.
 var _ = errors.New
+// --- POST envelope shape (corrective pass) ---
+
+// TestHandlePostChatMessage_PostBodyWrappedUnderMessage pins the
+// corrective-pass contract: the POST 201 body is wrapped under
+// { "message": { ... } } so the wire shape matches the
+// room_chat_message_created WS data payload. A bare envelope (no
+// wrapper) would break the symmetry the frontend store merge relies
+// on.
+func TestHandlePostChatMessage_PostBodyWrappedUnderMessage(t *testing.T) {
+	h, db, _, cleanup := pgChatHandlers(t)
+	defer cleanup()
+	guestID := seedChatFixturesForUser(t, db, "lobby-wrap", "Guest")
+
+	body, _ := json.Marshal(map[string]string{"content": "hi"})
+	rr := postChatReq(t, h, "/api/rooms/lobby-wrap/chat/messages", body, guestID)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status=%d want 201; body=%s", rr.Code, rr.Body.String())
+	}
+	// The response body must be a single-key object with "message"
+	// as the only top-level key.
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(rr.Body.Bytes(), &top); err != nil {
+		t.Fatalf("decode top-level: %v", err)
+	}
+	if len(top) != 1 {
+		t.Fatalf("top-level keys = %d, want 1 (only \"message\")", len(top))
+	}
+	if _, ok := top["message"]; !ok {
+		t.Fatalf("top-level must have \"message\" key; got keys: %v", top)
+	}
+}
+
+// TestHandlePostChatMessage_DisplayNameLookupFailure_NoPersist
+// covers the corrective-pass reorder at the use-case layer. The
+// use-case test TestSend_DisplayNameMissingUser_NoPersistNoBroadcast
+// pins the no-persist + no-broadcast invariant; an HTTP-level test
+// would require bypassing the membership FK constraint to keep a
+// membership row alive while deleting the user row, which the
+// ON DELETE CASCADE schema cannot express. The use-case test is
+// the authoritative coverage.

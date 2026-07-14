@@ -149,6 +149,15 @@ type ChatMessageWithSender struct {
 // bearer/session user id resolved by main.go's roomAuth wrapper).
 // The actorUserID is never read from any request field.
 //
+// Failure-mode ordering: validation, room + membership resolution,
+// and display-name resolution run BEFORE the persistence call. A
+// display-name lookup failure (sql.ErrNoRows or a general repository
+// error) MUST short-circuit Send so no message is persisted and no
+// broadcast fires — otherwise a sender whose users row is missing
+// would silently leak a `{ message: { sender: { display_name: "" } } }`
+// envelope to the room. The broadcast only runs after CreateMessage
+// returns success.
+//
 // On success AND when the broadcaster seam is wired, the interactor
 // invokes BroadcastRoomChatMessageCreated exactly once. A failed
 // broadcast is not surfaced (the message is already persisted and
@@ -171,14 +180,17 @@ func (i *Interactor) Send(ctx context.Context, slug string, actorUserID int, raw
 	if err != nil {
 		return nil, err
 	}
+	// Resolve the sender display name BEFORE CreateMessage so a
+	// missing-user or general repository error short-circuits the
+	// persist + broadcast path with zero side effects.
+	display, derr := i.resolveDisplayName(ctx, actorUserID)
+	if derr != nil {
+		return nil, derr
+	}
 	now := i.now()
 	msg, err := i.repo.CreateMessage(ctx, room.ID, actorUserID, content, now)
 	if err != nil {
 		return nil, fmt.Errorf("create chat message: %w", err)
-	}
-	display, derr := i.resolveDisplayName(ctx, actorUserID)
-	if derr != nil {
-		return nil, derr
 	}
 	if i.broadcast != nil {
 		i.broadcast.BroadcastRoomChatMessageCreated(room.Slug, msg, display)

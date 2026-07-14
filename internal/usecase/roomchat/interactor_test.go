@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"local-music-queue/internal/domain/entity"
 )
@@ -155,8 +156,10 @@ func (b *stubBroadcastBroadcaster) BroadcastRoomChatMessageCreated(roomSlug stri
 // fakeUserRepo is the in-memory stand-in for repository.UserRepository.
 // Only GetUserByID is exercised by the chat interactor.
 type fakeUserRepo struct {
-	mu    sync.Mutex
-	users map[int]*entity.User
+	mu       sync.Mutex
+	users    map[int]*entity.User
+	err      error // when set, GetUserByID returns this instead of the row
+	rowsCall int  // how many times GetUserByID has been called
 }
 
 func newFakeUserRepo() *fakeUserRepo {
@@ -169,9 +172,21 @@ func (r *fakeUserRepo) putUser(id int, displayName string) {
 	r.users[id] = &entity.User{ID: id, DisplayName: displayName, Email: "redacted@example.com", Role: entity.RoleGuest}
 }
 
+// setError forces every subsequent GetUserByID call to return err
+// (until cleared). Used by the display-name-failure tests.
+func (r *fakeUserRepo) setError(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.err = err
+}
+
 func (r *fakeUserRepo) GetUserByID(_ context.Context, id int) (*entity.User, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.rowsCall++
+	if r.err != nil {
+		return nil, r.err
+	}
 	u, ok := r.users[id]
 	if !ok {
 		return nil, sql.ErrNoRows
@@ -497,5 +512,163 @@ func TestListRecent_DisplayNameFallback(t *testing.T) {
 	}
 	if got, want := out[0].DisplayName, "user #42"; got != want {
 		t.Fatalf("DisplayName fallback: got %q want %q", got, want)
+	}
+}
+// --- display-name failure modes (corrective pass) ---
+
+func TestSend_DisplayNameMissingUser_NoPersistNoBroadcast(t *testing.T) {
+	rooms := newFakeRoomRepo()
+	room := rooms.putRoom("lobby", "Lobby", entity.RoomStatusActive)
+	rooms.putMember(room.ID, 42, entity.RoomRoleGuest)
+	// Note: NO user row seeded — GetUserByID returns sql.ErrNoRows.
+	users := newFakeUserRepo()
+
+	inter, chatRepo, bcast := newTestInteractor(t, rooms, users)
+
+	_, err := inter.Send(context.Background(), "lobby", 42, "hello")
+	if !errors.Is(err, ErrSenderNotFound) {
+		t.Fatalf("Send: err = %v, want ErrSenderNotFound", err)
+	}
+	if chatRepo.createCalls != 0 {
+		t.Fatalf("Send: persist count = %d, want 0 (display-name lookup must short-circuit)", chatRepo.createCalls)
+	}
+	if len(bcast.calls) != 0 {
+		t.Fatalf("Send: broadcast count = %d, want 0", len(bcast.calls))
+	}
+}
+
+func TestSend_DisplayNameRepoError_NoPersistNoBroadcast(t *testing.T) {
+	rooms := newFakeRoomRepo()
+	room := rooms.putRoom("lobby", "Lobby", entity.RoomStatusActive)
+	rooms.putMember(room.ID, 42, entity.RoomRoleGuest)
+	users := newFakeUserRepo()
+	users.putUser(42, "Alex")
+	// Force a general repository error AFTER seeding the user.
+	repoErr := errors.New("repo unavailable")
+	users.setError(repoErr)
+
+	inter, chatRepo, bcast := newTestInteractor(t, rooms, users)
+
+	_, err := inter.Send(context.Background(), "lobby", 42, "hello")
+	if err == nil {
+		t.Fatalf("Send: expected an error")
+	}
+	// The error must be wrapped so callers can still pin the
+	// originating failure, but the persist + broadcast paths MUST
+	// remain untouched.
+	if !strings.Contains(err.Error(), "repo unavailable") {
+		t.Fatalf("Send: err = %v, want wrapped repo error", err)
+	}
+	// We do NOT want the ErrSenderNotFound sentinel here — that
+	// sentinel is for sql.ErrNoRows only. A general repository
+	// error is a 500-mappable condition, not a 5xx/4xx split.
+	if errors.Is(err, ErrSenderNotFound) {
+		t.Fatalf("Send: general repo error must NOT be mapped to ErrSenderNotFound")
+	}
+	if chatRepo.createCalls != 0 {
+		t.Fatalf("Send: persist count = %d, want 0", chatRepo.createCalls)
+	}
+	if len(bcast.calls) != 0 {
+		t.Fatalf("Send: broadcast count = %d, want 0", len(bcast.calls))
+	}
+}
+
+// --- UTF-8 / code-point cap (corrective pass) ---
+
+func TestSend_AcceptsExactly500NonASCIICodePoints(t *testing.T) {
+	rooms := newFakeRoomRepo()
+	room := rooms.putRoom("lobby", "Lobby", entity.RoomStatusActive)
+	rooms.putMember(room.ID, 42, entity.RoomRoleGuest)
+	users := newFakeUserRepo()
+	users.putUser(42, "Alex")
+
+	inter, _, _ := newTestInteractor(t, rooms, users)
+	// '世' is a CJK ideograph, 1 code point = 3 UTF-8 bytes.
+	// 500 of them = 1500 bytes (well over the old byte cap of 500)
+	// but exactly 500 code points (the new cap).
+	exact := strings.Repeat("世", entity.MaxChatContentLen)
+	out, err := inter.Send(context.Background(), "lobby", 42, exact)
+	if err != nil {
+		t.Fatalf("Send: at-cap non-ASCII content rejected: %v", err)
+	}
+	if got, want := utf8.RuneCountInString(out.Message.Content), entity.MaxChatContentLen; got != want {
+		t.Fatalf("Send: at-cap content rune count = %d, want %d", got, want)
+	}
+}
+
+func TestSend_Rejects501NonASCIICodePoints(t *testing.T) {
+	rooms := newFakeRoomRepo()
+	room := rooms.putRoom("lobby", "Lobby", entity.RoomStatusActive)
+	rooms.putMember(room.ID, 42, entity.RoomRoleGuest)
+	users := newFakeUserRepo()
+	users.putUser(42, "Alex")
+
+	inter, chatRepo, bcast := newTestInteractor(t, rooms, users)
+	over := strings.Repeat("世", entity.MaxChatContentLen+1)
+	_, err := inter.Send(context.Background(), "lobby", 42, over)
+	if !errors.Is(err, ErrContentTooLong) {
+		t.Fatalf("Send: err = %v, want ErrContentTooLong", err)
+	}
+	if chatRepo.createCalls != 0 {
+		t.Fatalf("Send: persist must NOT happen on too-long non-ASCII")
+	}
+	if len(bcast.calls) != 0 {
+		t.Fatalf("Send: broadcast must NOT happen on too-long non-ASCII")
+	}
+}
+
+func TestSend_MixedASCIINonASCIIBoundary(t *testing.T) {
+	rooms := newFakeRoomRepo()
+	room := rooms.putRoom("lobby", "Lobby", entity.RoomStatusActive)
+	rooms.putMember(room.ID, 42, entity.RoomRoleGuest)
+	users := newFakeUserRepo()
+	users.putUser(42, "Alex")
+	inter, _, _ := newTestInteractor(t, rooms, users)
+
+	// 498 ASCII + 2 emoji = 500 code points (each emoji is 1 code
+	// point but 4 bytes). 498 ASCII bytes + 8 bytes = 506 bytes
+	// (the OLD byte cap would have rejected this).
+	mixed := strings.Repeat("a", 498) + "🌍🌎" // 🌏🌎 are 1 code point each in UTF-8.
+	if utf8.RuneCountInString(mixed) != entity.MaxChatContentLen {
+		t.Fatalf("test setup: mixed rune count = %d, want %d",
+			utf8.RuneCountInString(mixed), entity.MaxChatContentLen)
+	}
+	out, err := inter.Send(context.Background(), "lobby", 42, mixed)
+	if err != nil {
+		t.Fatalf("Send: at-cap mixed content rejected: %v", err)
+	}
+	if utf8.RuneCountInString(out.Message.Content) != entity.MaxChatContentLen {
+		t.Fatalf("Send: mixed content rune count drifted: %d", utf8.RuneCountInString(out.Message.Content))
+	}
+}
+
+func TestSend_CRLFNormalizedBeforeCount(t *testing.T) {
+	// 249 pairs of CRLF (498 bytes) collapse to 249 LFs (249 bytes
+	// in the normalized string). The post-normalization rune count
+	// must be used so a CRLF-heavy message is NOT double-counted.
+	rooms := newFakeRoomRepo()
+	room := rooms.putRoom("lobby", "Lobby", entity.RoomStatusActive)
+	rooms.putMember(room.ID, 42, entity.RoomRoleGuest)
+	users := newFakeUserRepo()
+	users.putUser(42, "Alex")
+	inter, _, _ := newTestInteractor(t, rooms, users)
+
+	raw := strings.Repeat("a\r\n", 249) + "ab" // 249 "a\n" runs + "ab" = 249 + 2 = 251 code points after normalize? No: 249 a's + 249 \n + "ab" = 500.
+	// The wire cap is 500 code points. The CR in "a\r\n" is collapsed
+	// to a single LF by NormalizeChatContent, so a string of
+	// 249 "a\r\n" + "ab" is 251 'a' + 249 '\n' = 500 normalized
+	// runes — exactly at the cap. Anything bigger would have been
+	// rejected.
+	normalized := strings.ReplaceAll(strings.ReplaceAll(raw, "\r\n", "\n"), "\r", "\n")
+	if utf8.RuneCountInString(normalized) != entity.MaxChatContentLen {
+		t.Fatalf("test setup: post-normalize rune count = %d, want %d",
+			utf8.RuneCountInString(normalized), entity.MaxChatContentLen)
+	}
+	out, err := inter.Send(context.Background(), "lobby", 42, raw)
+	if err != nil {
+		t.Fatalf("Send: CRLF-heavy within-cap content rejected: %v", err)
+	}
+	if strings.Contains(out.Message.Content, "\r") {
+		t.Fatalf("Send: post-persist content still has CR: %q", out.Message.Content)
 	}
 }

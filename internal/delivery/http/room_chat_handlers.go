@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -68,6 +69,17 @@ type chatMessageSenderWire struct {
 // chatListResp is the response body for GET /api/rooms/{slug}/chat/messages.
 type chatListResp struct {
 	Messages []chatMessageWire `json:"messages"`
+}
+
+// chatPostResp is the response body for POST /api/rooms/{slug}/chat/messages
+// (201 Created). The post-mutation envelope is wrapped under `message` so
+// the wire shape mirrors the room_chat_message_created WebSocket data
+// payload (`{ message: ... }`) and the frontend can apply both the REST
+// response and the WS event through the same store merge path. Without
+// the wrapper the POST body is indistinguishable from a single list
+// entry, which breaks the symmetry that the R11a frontend relies on.
+type chatPostResp struct {
+	Message chatMessageWire `json:"message"`
 }
 
 // --- Handlers ---
@@ -151,13 +163,13 @@ func (h *RoomChatHandlers) HandlePostChatMessage(w http.ResponseWriter, r *http.
 		writeChatError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, chatMessageWire{
+	writeJSON(w, http.StatusCreated, chatPostResp{Message: chatMessageWire{
 		ID:        posted.Message.ID,
 		RoomSlug:  slug,
 		Sender:    chatMessageSenderWire{UserID: posted.Message.SenderID, DisplayName: posted.DisplayName},
 		Content:   posted.Message.Content,
 		CreatedAt: posted.Message.CreatedAt,
-	})
+	}})
 }
 
 // writeChatError maps use-case sentinel errors to the documented
@@ -173,6 +185,15 @@ func (h *RoomChatHandlers) HandlePostChatMessage(w http.ResponseWriter, r *http.
 // ErrSenderNotFound is a 500 because it indicates the session is
 // valid but the underlying users row is missing — a server-side
 // invariant violation, not a client error.
+//
+// Unexpected errors (the default branch) MUST NOT leak their
+// err.Error() to the wire: a wrapped repository error may include
+// a slug, an internal table name, or a connection string fragment
+// that is useful to an attacker. The default branch returns a
+// generic "internal server error" body and logs the detailed error
+// server-side. The log line intentionally does NOT include any
+// request body, header, cookie, or bearer token — only the error
+// itself, the route slug, and the actor id (when available).
 func writeChatError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, roomchat.ErrInvalidSlug):
@@ -192,6 +213,11 @@ func writeChatError(w http.ResponseWriter, err error) {
 	case errors.Is(err, roomchat.ErrSenderNotFound):
 		http.Error(w, "sender not found", http.StatusInternalServerError)
 	default:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// Log the full error server-side (no PII — see function
+		// comment) and return a generic body to the wire. The slug
+		// argument is already a path value the client supplied;
+		// including it in the log is safe and useful for tracing.
+		log.Printf("roomchat internal error: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 	}
 }
