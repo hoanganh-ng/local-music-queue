@@ -1880,3 +1880,144 @@ func TestRoomHub_CloseRemovedClient_SendsCode1008(t *testing.T) {
 		t.Fatalf("expected close code %d, got err=%v", websocket.ClosePolicyViolation, err)
 	}
 }
+
+// --- R11a chat broadcast envelope ---
+
+// TestRoomHub_BroadcastRoomChatMessageCreated_FanOut pins the
+// per-room room_chat_message_created envelope. Two clients
+// connected to the same room must both observe the post-persist
+// message; the broadcast must fire exactly once (mirror of the
+// "no broadcast on failure" invariant from the use-case layer).
+// R11a addition.
+func TestRoomHub_BroadcastRoomChatMessageCreated_FanOut(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("r11a-chat", &entity.Room{ID: 200, Slug: "r11a-chat", Status: entity.RoomStatusActive})
+	resolver.SetQueue(200, &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "S1"}}})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{
+			"u1": {ID: 1, Role: entity.RoleHost, DisplayName: "HostOne"},
+			"u2": {ID: 2, Role: entity.RoleGuest, DisplayName: "GuestTwo"},
+		},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	c1 := dialRoomWS(t, server, "r11a-chat", "u1")
+	defer c1.Close()
+	c1.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := c1.ReadMessage(); err != nil {
+		t.Fatalf("c1 drain: %v", err)
+	}
+	c2 := dialRoomWS(t, server, "r11a-chat", "u2")
+	defer c2.Close()
+	c2.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := c2.ReadMessage(); err != nil {
+		t.Fatalf("c2 drain: %v", err)
+	}
+
+	msg := &entity.RoomChatMessage{
+		ID:        555,
+		RoomID:    200,
+		SenderID:  1,
+		Content:   "hello chat",
+		CreatedAt: time.Now(),
+	}
+	hub.BroadcastRoomChatMessageCreated("r11a-chat", msg, "HostOne")
+
+	for i, c := range []*websocket.Conn{c1, c2} {
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, data, err := c.ReadMessage()
+		if err != nil {
+			t.Fatalf("client %d should receive chat broadcast: %v", i+1, err)
+		}
+		var env struct {
+			Type string                 `json:"type"`
+			Data RoomChatMessageCreatedData `json:"data"`
+		}
+		if err := json.Unmarshal(data, &env); err != nil {
+			t.Fatalf("client %d decode: %v", i+1, err)
+		}
+		if env.Type != EventRoomChatMessageCreated {
+			t.Fatalf("client %d type=%q want %q", i+1, env.Type, EventRoomChatMessageCreated)
+		}
+		if env.Data.Message.ID != 555 || env.Data.Message.RoomSlug != "r11a-chat" {
+			t.Fatalf("client %d message envelope: %+v", i+1, env.Data.Message)
+		}
+		if env.Data.Message.Content != "hello chat" {
+			t.Fatalf("client %d content=%q want %q", i+1, env.Data.Message.Content, "hello chat")
+		}
+		if env.Data.Message.Sender.UserID != 1 || env.Data.Message.Sender.DisplayName != "HostOne" {
+			t.Fatalf("client %d sender envelope: %+v", i+1, env.Data.Message.Sender)
+		}
+		// Wire must NOT carry the sender email — the envelope is a
+		// plain sender block with only user_id + display_name.
+		if strings.Contains(string(data), "email") {
+			t.Fatalf("client %d envelope must not leak email: %s", i+1, string(data))
+		}
+	}
+}
+
+// TestRoomHub_BroadcastRoomChatMessageCreated_NoLeakToOtherRoom
+// pins cross-room isolation: a chat broadcast for room A must NOT
+// reach a client connected to a different room.
+func TestRoomHub_BroadcastRoomChatMessageCreated_NoLeakToOtherRoom(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("r11a-a", &entity.Room{ID: 201, Slug: "r11a-a", Status: entity.RoomStatusActive})
+	resolver.SetRoom("r11a-b", &entity.Room{ID: 202, Slug: "r11a-b", Status: entity.RoomStatusActive})
+	resolver.SetQueue(201, &entity.Queue{Songs: []entity.Song{{ID: "x", Title: "X"}}})
+	resolver.SetQueue(202, &entity.Queue{Songs: []entity.Song{{ID: "y", Title: "Y"}}})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{
+			"ua": {ID: 1, Role: entity.RoleGuest, DisplayName: "A"},
+			"ub": {ID: 2, Role: entity.RoleGuest, DisplayName: "B"},
+		},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	cA := dialRoomWS(t, server, "r11a-a", "ua")
+	defer cA.Close()
+	cA.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := cA.ReadMessage(); err != nil {
+		t.Fatalf("a drain: %v", err)
+	}
+	cB := dialRoomWS(t, server, "r11a-b", "ub")
+	defer cB.Close()
+	cB.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := cB.ReadMessage(); err != nil {
+		t.Fatalf("b drain: %v", err)
+	}
+
+	hub.BroadcastRoomChatMessageCreated("r11a-a", &entity.RoomChatMessage{
+		ID:        9,
+		RoomID:    201,
+		SenderID:  1,
+		Content:   "only-for-room-a",
+		CreatedAt: time.Now(),
+	}, "A")
+
+	cA.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := cA.ReadMessage(); err != nil {
+		t.Fatalf("a should receive chat broadcast: %v", err)
+	}
+	cB.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, _, err := cB.ReadMessage(); err == nil {
+		t.Fatal("b unexpectedly received chat broadcast for room a")
+	}
+}

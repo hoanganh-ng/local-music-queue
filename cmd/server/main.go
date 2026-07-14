@@ -29,6 +29,7 @@ import (
 	usecaseRoom "local-music-queue/internal/usecase/room"
 	usecaseRoomQueue "local-music-queue/internal/usecase/roomqueue"
 	usecaseRoomAutoQueue "local-music-queue/internal/usecase/roomautoqueue"
+	usecaseRoomChat "local-music-queue/internal/usecase/roomchat"
 	usecaseRoomVote "local-music-queue/internal/usecase/roomvote"
 	usecaseVote "local-music-queue/internal/usecase/vote"
 
@@ -188,6 +189,15 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	autoQueueInteractor := usecaseAutoQueue.NewInteractor(autoQueueRepo, queueRepo, ytRelatedFetcher)
 	roomInteractor := usecaseRoom.NewInteractor(pgRoom)
 	roomQueueInteractor := usecaseRoomQueue.NewInteractor(pgRoom, pgRoomQueue, ytService)
+
+	// R11a: per-room plain-text chat (active members only; archived
+	// rooms map to 409). The interactor owns trim/CRLF normalization
+	// + length validation, resolves sender display names via the
+	// existing user repo, and fans the post-mutation envelope out
+	// through the per-room hub via a thin adapter (so usecase/roomchat
+	// stays free of delivery/ws).
+	pgRoomChat := persistence.NewPostgresRoomChatMessageRepository(dbHandle)
+	roomChatInteractor := usecaseRoomChat.NewInteractor(pgRoomChat, pgRoom, userRepo)
 	roomQueueHandlers := delivery.NewRoomQueueHandlers(roomQueueInteractor, authInteractor)
 	playerLeaseInteractor := usecaseRoom.NewPlayerLeaseInteractor(persistence.NewPostgresPlayerLeaseRepository(dbHandle), pgRoom, dbHandle, usecaseRoom.DefaultLeaseDuration, usecaseRoom.DefaultLeaseGrace)
 
@@ -264,6 +274,17 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	roomMembersAdapter := roomMembersBroadcasterAdapter{hub: roomWSHub}
 	roomInteractor.SetMembersBroadcaster(roomMembersAdapter)
 
+	// R11a: wire the per-room chat broadcaster seam so the roomchat
+	// interactor can fan out the post-mutation room_chat_message_created
+	// envelope after a successful persistence without usecase/roomchat
+	// importing delivery/ws. The adapter below resolves the sender
+	// display name via the user repo (with the "user #<id>" fallback
+	// per 016-room-chat-feature.md) and forwards the canonical tuple
+	// (roomSlug, *entity.RoomChatMessage, displayName) to the per-room
+	// hub's BroadcastRoomChatMessageCreated method.
+	roomChatBroadcasterAdapter := roomChatBroadcasterAdapter{hub: roomWSHub}
+	roomChatInteractor.SetBroadcaster(roomChatBroadcasterAdapter)
+
 	// R09a: wire the lease-authorizer seam so direct playback mutations
 	// (status / sync / skip / ended) enforce the player-lease holder rule
 	// at the use-case layer. PlayerLeaseInteractor implements
@@ -333,6 +354,7 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	handlers := delivery.NewHandlers(qInteractor, authInteractor, actInteractor, priorityInteractor, voteInteractor, hub)
 	autoQueueHandlers := delivery.NewAutoQueueHandlers(autoQueueInteractor, hub)
 	roomHandlers := delivery.NewRoomHandlers(roomInteractor, playerLeaseInteractor, authInteractor)
+	roomChatHandlers := delivery.NewRoomChatHandlers(roomChatInteractor)
 	// Adapter lets the room handler publish room_archived without
 	// importing the ws package. hub.Broadcast is non-blocking when called
 	// from outside Hub.Run; for the in-ticker case the goroutine fan-out
@@ -544,6 +566,23 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	mux.HandleFunc("POST /api/rooms/{slug}/autoqueue/toggle", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomAutoQueueHandlers.HandleRoomAutoQueueToggle(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
+	// R11a: per-room plain-text chat. Both routes sit behind roomAuth
+	// (bearer token) so actor identity is server-resolved from the
+	// session; the request body never carries a sender_id. The
+	// GET response and POST 201 body share the same per-message
+	// wire shape (`{id, room_slug, sender:{user_id, display_name},
+	// content, created_at}`) so the frontend can route incoming
+	// WS events through the same applyRoomChatMessageCreated store
+	// mutator as the initial REST seed. Active-membership is
+	// enforced by the chat interactor; archived rooms map to 409.
+	// No retention purge in R11a; lifecycle hardening is deferred
+	// to R10f+.
+	mux.HandleFunc("GET /api/rooms/{slug}/chat/messages", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomChatHandlers.HandleListChatMessages(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
+	mux.HandleFunc("POST /api/rooms/{slug}/chat/messages", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomChatHandlers.HandlePostChatMessage(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
 
 	// WebSocket
 	mux.HandleFunc("/ws", hub.RegisterHandler)
@@ -700,6 +739,30 @@ func (a roomMembersBroadcasterAdapter) BroadcastRoomMembersChanged(roomSlug stri
 // connections and unregisters them from the hub.
 func (a roomMembersBroadcasterAdapter) CloseRemovedClient(roomSlug string, targetUserID int) {
 	a.hub.CloseRemovedClient(roomSlug, targetUserID)
+}
+
+// roomChatBroadcasterAdapter adapts *ws.RoomWSHub to the
+// roomchat.Broadcaster interface so usecase/roomchat stays free of
+// delivery/ws imports. R11a addition.
+//
+// The displayName argument is the resolved sender display name
+// (user.DisplayName, or the documented "user #<id>" fallback when
+// the row's display_name is empty). The interactor owns the
+// resolution so the broadcaster stays free of any user-repo
+// dependency and the wire envelope stays consistent with the REST
+// response shape.
+type roomChatBroadcasterAdapter struct {
+	hub *ws.RoomWSHub
+}
+
+// BroadcastRoomChatMessageCreated implements roomchat.Broadcaster.
+// R11a addition; rides /ws/rooms/{slug} only. The global /ws
+// 16-event inventory is unchanged.
+func (a roomChatBroadcasterAdapter) BroadcastRoomChatMessageCreated(roomSlug string, msg *entity.RoomChatMessage, displayName string) {
+	if msg == nil {
+		return
+	}
+	a.hub.BroadcastRoomChatMessageCreated(roomSlug, msg, displayName)
 }
 
 // expiryAdapter is the server-owned seam that periodically calls

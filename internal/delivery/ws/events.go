@@ -88,6 +88,14 @@ const (
 	// "room_members_changed". Only rides /ws/rooms/{slug}; the global
 	// /ws 16-event inventory is unchanged.
 	EventRoomMembersChanged = "room_members_changed"
+	// R11a: additive on top of R07b/R07d/R09a/R09b/R09c/R09d/R09f/R10b.
+	// EventRoomChatMessageCreated fires after a successful
+	// POST /api/rooms/{slug}/chat/messages. The payload carries the
+	// post-mutation message envelope (the same shape as the REST GET
+	// response body). Only rides /ws/rooms/{slug}; the global /ws
+	// 16-event inventory is unchanged. The wire NEVER exposes the
+	// sender email.
+	EventRoomChatMessageCreated = "room_chat_message_created"
 )
 
 // UserJoinedData contains only the new user info
@@ -494,4 +502,35 @@ type RoomMemberInfo struct {
 type RoomMembersChangedData struct {
 	RoomSlug string           `json:"room_slug"`
 	Members  []RoomMemberInfo `json:"members"`
+}
+
+// RoomChatMessageSender is the per-room chat sender identity carried
+// in the chat wire envelope. DisplayName is the resolved
+// user.DisplayName with a "user #<id>" fallback when the user row's
+// display_name is empty. The wire NEVER exposes the sender email
+// (per the R11a privacy stance in 016-room-chat-feature.md).
+type RoomChatMessageSender struct {
+	UserID      int    `json:"user_id"`
+	DisplayName string `json:"display_name"`
+}
+
+// RoomChatMessage is the per-message shape carried by both the
+// room_chat_message_created WS envelope and the REST chat endpoints.
+// The shape intentionally mirrors the HTTP response body so the
+// frontend can route incoming WS events through the same
+// applyRoomChatMessageCreated store mutator as the initial REST seed
+// (analogous to the R10c members-list symmetry).
+type RoomChatMessage struct {
+	ID        int64                 `json:"id"`
+	RoomSlug  string                `json:"room_slug"`
+	Sender    RoomChatMessageSender `json:"sender"`
+	Content   string                `json:"content"`
+	CreatedAt time.Time             `json:"created_at"`
+}
+
+// RoomChatMessageCreatedData is the data payload for the
+// room_chat_message_created WS envelope. R11a addition; rides
+// /ws/rooms/{slug} only.
+type RoomChatMessageCreatedData struct {
+	Message RoomChatMessage `json:"message"`
 }

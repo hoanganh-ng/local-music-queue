@@ -2,6 +2,14 @@ import { reactive, watch } from 'vue'
 
 const STORE_KEY = 'lmq_user_session'
 
+// MaxRoomChatMessages is the R11a documented per-room chat cap.
+// Local cache and panel render are bounded so a misbehaving sender
+// cannot push the in-memory store or the visible panel past a
+// documented size. The cap is enforced by the setRoomChatMessages
+// and applyRoomChatMessageCreated mutators (oldest entry dropped
+// on overflow).
+export const MaxRoomChatMessages = 100
+
 // Load initial user from localStorage
 let initialUser = null
 try {
@@ -254,6 +262,13 @@ export const globalStore = reactive({
         archived: false,
         removed: false,
         members: [],
+        // R11a: chat history cache. The initial REST seed populates
+        // it; incoming room_chat_message_created WS events append
+        // and cap at MaxRoomChatMessages so an over-eager burst
+        // never blows up the panel. Empty array means "not yet
+        // received" (initial REST seed failed, or the room has no
+        // chat history yet).
+        messages: [],
       }
     }
     return this.roomQueues[slug]
@@ -536,6 +551,43 @@ export const globalStore = reactive({
         user_id: typeof m?.user_id === 'number' ? m.user_id : Number(m?.user_id),
         role: m?.role || 'guest',
       }))
+    }
+  },
+
+  // --- R11a room chat mutators ---
+  //
+  // Two narrow mutators own the room-local chat cache. The cache
+  // lives on globalStore.roomQueues[slug].messages and is isolated
+  // from the global queueState / voteSessions / autoQueueConfig /
+  // currentUser. Mutations are guarded by a MaxRoomChatMessages cap
+  // so a misbehaving sender cannot push the local store over a
+  // bounded size.
+
+  // setRoomChatMessages replaces the cached chat history with the
+  // ordered (oldest → newest) payload from the initial REST seed.
+  // Pass [] to clear; the mutator is a no-op for null/undefined
+  // payloads so a transient GET failure leaves the prior list
+  // intact (analogous to applyRoomMembersChanged's missing-payload
+  // behavior).
+  setRoomChatMessages(slug, messages) {
+    if (!slug || !Array.isArray(messages)) return
+    this._ensureRoomEntry(slug).messages = messages.slice(0, MaxRoomChatMessages)
+  },
+
+  // applyRoomChatMessageCreated appends a single post-mutation
+  // envelope delivered by the room_chat_message_created WS event.
+  // The cache is capped at MaxRoomChatMessages; the oldest entry
+  // is dropped on overflow so the panel stays bounded. The mutator
+  // is a no-op for missing payload / message fields so a malformed
+  // event cannot poison the local state.
+  applyRoomChatMessageCreated(slug, payload) {
+    if (!slug || !payload || !payload.message) return
+    const entry = this._ensureRoomEntry(slug)
+    const next = entry.messages.concat([payload.message])
+    if (next.length > MaxRoomChatMessages) {
+      entry.messages = next.slice(next.length - MaxRoomChatMessages)
+    } else {
+      entry.messages = next
     }
   },
 })

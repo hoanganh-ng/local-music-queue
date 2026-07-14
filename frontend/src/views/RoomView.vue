@@ -122,6 +122,55 @@
         <p class="hint">Only the active lease holder may control playback.</p>
       </section>
 
+      <!-- R11a: room chat panel. Plain-text messages between active
+           room members. The history list is rendered as text only
+           (never v-html) so any future sender-side HTML is
+           inert. Send is disabled when the viewer is unauthenticated,
+           the room is archived, the viewer was removed, the WS is
+           disconnected, the input is empty/whitespace-only, or a
+           previous send is in flight. -->
+      <section
+        v-if="!isRoomDisabled"
+        class="chat-panel glass-panel"
+        data-testid="chat-panel"
+      >
+        <h3>Chat</h3>
+        <p v-if="!roomState.connected" class="hint">
+          Chat is unavailable while disconnected.
+        </p>
+        <ol class="chat-list" data-testid="chat-list">
+          <li
+            v-for="(msg, idx) in chatMessages"
+            :key="`${msg.id}-${idx}`"
+            class="chat-message"
+            data-testid="chat-message"
+          >
+            <span class="chat-sender">{{ msg.sender && msg.sender.display_name ? msg.sender.display_name : `user #${msg.sender ? msg.sender.user_id : '?'}` }}</span>
+            <span class="chat-content">{{ msg.content }}</span>
+          </li>
+          <li v-if="!chatMessages.length" class="empty" data-testid="chat-empty">
+            No messages yet.
+          </li>
+        </ol>
+        <form class="chat-form" @submit.prevent="sendChat">
+          <input
+            v-model="chatDraft"
+            type="text"
+            class="chat-input"
+            data-testid="chat-input"
+            placeholder="Say something…"
+            :disabled="!canChat"
+            :maxlength="500"
+          />
+          <button
+            type="submit"
+            class="chat-send-btn"
+            data-testid="chat-send"
+            :disabled="!canChat || !chatDraft.trim()"
+          >Send</button>
+        </form>
+      </section>
+
       <!-- R10c: room deletion + member removal host panel.
            Visible only to the host as a UI convenience (the backend
            is authoritative and surfaces 401/403/404/409 toasts).
@@ -228,11 +277,47 @@ const roomState = computed(() => {
 const canMutate = computed(() => !!currentUser.value && roomState.value.connected && !roomState.value.archived && !roomState.value.removed)
 const canClear = computed(() => !!currentUser.value && roomState.value.connected && !roomState.value.archived && !roomState.value.removed)
 const addUrl = ref('')
+// R11a: chat draft + send-in-flight guard. The send button is
+// disabled while chatSendInFlight is true so a user cannot fire
+// two POSTs before the first completes (the response would
+// append the persisted row AND the next /chat/messages refresh
+// would surface it again — harmless, but the local view would
+// briefly double-render before the cache de-dupes on seq).
+const chatDraft = ref('')
+const chatSendInFlight = ref(false)
 let wsClient = null
 let suppressSeqGap = false
 // Track the slug we actually connected to so unmount can clean it up
 // even if the route reactive value drifts (test mounts without an initial slug).
 let connectedSlug = null
+
+// R11a: chatMessages exposes the per-room cache as a reactive
+// computed. The cap is owned by the store mutator
+// (applyRoomChatMessageCreated), so this computed only mirrors
+// the slice. The empty-state branch renders "No messages yet."
+// when the slice is empty.
+const chatMessages = computed(() => {
+  const s = globalStore.roomQueues[slug.value]
+  return (s && Array.isArray(s.messages)) ? s.messages : []
+})
+
+// R11a: canChat gates the send button. Disabled when:
+//   - the viewer is unauthenticated (no current user)
+//   - the per-room WS is not connected (no live fan-out + 409
+//     for archived rooms; the parent already hides the panel
+//     in the archived branch)
+//   - the room is archived or the viewer was removed
+//   - a previous send is in flight
+// Note: text-level empty/whitespace check is applied inline in
+// the template's :disabled binding so the button greys out as
+// the user types.
+const canChat = computed(
+  () => !!currentUser.value
+    && roomState.value.connected
+    && !roomState.value.archived
+    && !roomState.value.removed
+    && !chatSendInFlight.value
+)
 
 function applyMessage(msg) {
   switch (msg.type) {
@@ -326,6 +411,14 @@ function applyMessage(msg) {
     case 'room_members_changed':
       globalStore.applyRoomMembersChanged(slug.value, msg.data)
       break
+    // R11a: room chat. Append the post-mutation message to the
+    // room-local cache. The store mutator caps the cache at
+    // MaxRoomChatMessages so an over-eager burst cannot blow up
+    // the local view. The cache is seeded by the initial REST
+    // GET on mount + slug change.
+    case 'room_chat_message_created':
+      globalStore.applyRoomChatMessageCreated(slug.value, msg.data)
+      break
     default:
       // Ignore global / unrelated event types per the R07c contract.
       break
@@ -411,6 +504,28 @@ async function seedRoomMembersFromRest() {
   }
 }
 
+// R11a: seed the room chat history from GET /chat/messages. The
+// history is bounded server-side (default 50, max 100) and ordered
+// oldest → newest. 400/401/403/404/409 surface as a clear toast
+// but do NOT block the rest of the room from rendering; the panel
+// just renders the seeded "no messages yet" empty state. Archived
+// rooms map to 409 and the panel is hidden by the parent
+// `v-if="!isRoomDisabled"`, so the seed becomes a no-op for the
+// archived surface.
+async function seedRoomChatMessagesFromRest() {
+  try {
+    const res = await api.getRoomChatMessages(slug.value, 50)
+    globalStore.setRoomChatMessages(slug.value, res.messages || [])
+  } catch (e) {
+    const status = e?.status
+    if (status === 401) toast.error('You are signed out. Log in again.')
+    else if (status === 403) toast.error('You are not a member of this room.')
+    else if (status === 404) toast.error('Room not found.')
+    else if (status === 409) toast.error('Room is archived or in conflict.')
+    else if (status === 400) toast.error('Invalid chat request.')
+  }
+}
+
 function buildRoomClient(targetSlug) {
   // R10c: a 1008 close means the host removed this client. We
   // surface a disabled/removed view and do NOT silently reconnect
@@ -472,6 +587,7 @@ onMounted(async () => {
   await seedStateFromRest()
   await seedRoomAutoQueueConfigFromRest()
   await seedRoomMembersFromRest()
+  await seedRoomChatMessagesFromRest()
   wsClient = buildRoomClient(target)
   wsClient.connect()
 })
@@ -488,6 +604,7 @@ watch(slug, async (newSlug) => {
   await seedStateFromRest()
   await seedRoomAutoQueueConfigFromRest()
   await seedRoomMembersFromRest()
+  await seedRoomChatMessagesFromRest()
   wsClient = buildRoomClient(newSlug)
   wsClient.connect()
 })
@@ -508,6 +625,38 @@ async function addSong() {
     else if (s === 404) toast.error('Room not found.')
     else if (s === 409) toast.error('That song is already in the room queue.')
     else toast.error('Could not add song to room queue.')
+  }
+}
+
+// R11a: send a plain-text chat message. The send-in-flight guard
+// prevents a double-POST if the user double-clicks before the
+// first response lands. On success the input is cleared; the
+// authoritative cache update comes from the
+// room_chat_message_created WS event so the same code path is
+// shared between self-sent and peer-sent messages. The POST
+// response is intentionally NOT applied directly to the local
+// store so a delayed/replayed WS event does not produce a
+// duplicate row (the store mutator does not de-dupe; the WS
+// fan-out is the single authoritative source of post-mutation
+// state, mirroring the R07c queue pattern).
+async function sendChat() {
+  if (!canChat.value) return
+  const trimmed = chatDraft.value.trim()
+  if (!trimmed) return
+  chatSendInFlight.value = true
+  try {
+    await api.sendRoomChatMessage(slug.value, trimmed)
+    chatDraft.value = ''
+  } catch (e) {
+    const s = e?.status
+    if (s === 400) toast.error('Message is empty or too long.')
+    else if (s === 401) toast.error('You are signed out. Log in again.')
+    else if (s === 403) toast.error('You are not a member of this room.')
+    else if (s === 404) toast.error('Room not found.')
+    else if (s === 409) toast.error('Room is archived or in conflict.')
+    else toast.error('Could not send message.')
+  } finally {
+    chatSendInFlight.value = false
   }
 }
 
@@ -909,6 +1058,69 @@ async function removeRoomMember(member) {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+}
+
+/* R11a: chat panel. Mirrors the host-panel layout primitive so
+   the panel stretches full-width and matches the rest of the
+   room surface. The list is rendered as plain text via {{ }}
+   (never v-html) so any future sender-side HTML is inert. */
+.chat-panel {
+  grid-column: 1 / -1;
+  padding: 1rem;
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.chat-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 18rem;
+  overflow-y: auto;
+}
+.chat-message {
+  font-size: 0.95rem;
+  line-height: 1.3;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.chat-sender {
+  font-weight: 600;
+  margin-right: 0.4rem;
+}
+.chat-form {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+.chat-input {
+  flex: 1;
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.15));
+  background: rgba(0, 0, 0, 0.2);
+  color: inherit;
+}
+.chat-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.chat-send-btn {
+  padding: 0.4rem 0.9rem;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: var(--accent, #4a90e2);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+.chat-send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .host-row {
   display: flex;

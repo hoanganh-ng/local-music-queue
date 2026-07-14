@@ -622,6 +622,30 @@ func (h *RoomWSHub) BroadcastRoomMembersChanged(roomSlug string, members []entit
 	}, excludeUserID)
 }
 
+// BroadcastRoomChatMessageCreated delivers a room_chat_message_created
+// envelope to every per-room WS client of roomSlug after a
+// successful POST /api/rooms/{slug}/chat/messages. R11a addition;
+// rides /ws/rooms/{slug} only. The global /ws 16-event inventory is
+// unchanged.
+//
+// The sender display_name is supplied by the caller (the chat
+// interactor resolves it via UserRepository). The wire NEVER carries
+// the sender email.
+func (h *RoomWSHub) BroadcastRoomChatMessageCreated(roomSlug string, msg *entity.RoomChatMessage, displayName string) {
+	h.dispatch(roomSlug, EventRoomChatMessageCreated, RoomChatMessageCreatedData{
+		Message: RoomChatMessage{
+			ID:       msg.ID,
+			RoomSlug: roomSlug,
+			Sender: RoomChatMessageSender{
+				UserID:      msg.SenderID,
+				DisplayName: displayName,
+			},
+			Content:   msg.Content,
+			CreatedAt: msg.CreatedAt,
+		},
+	})
+}
+
 // dispatchToRoomExcept is like dispatch but lets the hub loop skip
 // connections owned by a specific user. Used by R10b to deliver
 // room_members_changed to remaining clients when the removed user's

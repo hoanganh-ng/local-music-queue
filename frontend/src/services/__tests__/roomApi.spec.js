@@ -248,3 +248,93 @@ describe('Room Queue API', () => {
     }
   })
 })
+// --- R11a room chat (frontend API) ---
+
+describe('Room Chat API (R11a)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    sessionStorage.clear()
+    sessionHelper.clearSession()
+    vi.restoreAllMocks()
+  })
+
+  function mockFetchOk(json = {}) {
+    const mockFetch = vi.fn().mockResolvedValue({
+      status: 200, ok: true, json: async () => json
+    })
+    global.fetch = mockFetch
+    return mockFetch
+  }
+
+  it('getRoomChatMessages targets GET /rooms/{slug}/chat/messages with default limit', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    const mockFetch = mockFetchOk({ messages: [] })
+    const res = await api.getRoomChatMessages('lobby')
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/chat\/messages(\?.*)?$/)
+    expect(init.method).toBe('GET')
+    expect(init.headers['Authorization']).toBe('Bearer tok')
+    expect(res).toEqual({ messages: [] })
+  })
+
+  it('getRoomChatMessages appends ?limit=N when a positive numeric limit is supplied', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    const mockFetch = mockFetchOk({ messages: [] })
+    await api.getRoomChatMessages('lobby', 25)
+    const [url] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/chat\/messages\?limit=25$/)
+  })
+
+  it('getRoomChatMessages omits ?limit= when limit is 0 or NaN', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    for (const lim of [0, NaN]) {
+      const mockFetch = mockFetchOk({ messages: [] })
+      await api.getRoomChatMessages('lobby', lim)
+      const [url] = mockFetch.mock.calls[0]
+      expect(url).not.toMatch(/limit=/)
+    }
+  })
+
+  it('getRoomChatMessages URL-encodes the slug', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    const mockFetch = mockFetchOk({ messages: [] })
+    await api.getRoomChatMessages('weird slug')
+    const [url] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/weird%20slug\/chat\/messages(\?.*)?$/)
+  })
+
+  it('sendRoomChatMessage posts body { content } only — no sender_id, no user_id', async () => {
+    const mockFetch = mockFetchOk({
+      id: 7, room_slug: 'lobby', sender: { user_id: 1, display_name: 'A' },
+      content: 'hi', created_at: new Date().toISOString(),
+    })
+    await api.sendRoomChatMessage('lobby', 'hi')
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/chat\/messages$/)
+    expect(init.method).toBe('POST')
+    const body = JSON.parse(init.body)
+    expect(body).toEqual({ content: 'hi' })
+    expect(body).not.toHaveProperty('sender_id')
+    expect(body).not.toHaveProperty('user_id')
+  })
+
+  it('sendRoomChatMessage stringifies non-string content safely', async () => {
+    const mockFetch = mockFetchOk({ id: 1, room_slug: 'lobby', sender: { user_id: 1, display_name: 'A' }, content: '', created_at: new Date().toISOString() })
+    await api.sendRoomChatMessage('lobby', null)
+    const [, init] = mockFetch.mock.calls[0]
+    const body = JSON.parse(init.body)
+    expect(body).toEqual({ content: '' })
+  })
+
+  it('sendRoomChatMessage propagates APIError on 400 / 401 / 403 / 404 / 409', async () => {
+    for (const status of [400, 401, 403, 404, 409]) {
+      const mockFetch = vi.fn().mockResolvedValue({ status, ok: false, text: async () => `err ${status}` })
+      global.fetch = mockFetch
+      await expect(api.sendRoomChatMessage('lobby', 'hi')).rejects.toMatchObject({ status })
+    }
+  })
+})

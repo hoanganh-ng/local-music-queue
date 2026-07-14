@@ -340,5 +340,35 @@ export const api = {
     return this.request(`/rooms/${encodeURIComponent(slug)}/members`, {
       method: 'GET'
     })
+  },
+
+  // --- R11a: room chat (frontend) ---
+  //
+  // Both methods target the R11a HTTP routes behind roomAuth. The
+  // sender identity is resolved server-side from the bearer token;
+  // the request body NEVER carries a sender_id field. Active-room +
+  // active-membership are enforced at the use-case layer (archived
+  // maps to 409, non-member maps to 403).
+  //
+  //   - getRoomChatMessages: GET /api/rooms/{slug}/chat/messages?limit=50
+  //     Returns { messages: [{ id, room_slug, sender: { user_id,
+  //     display_name }, content, created_at }, ...] } ordered
+  //     oldest → newest. The default limit is 50; the backend caps
+  //     at 100 and rejects out-of-range limits with 400.
+  //   - sendRoomChatMessage: POST /api/rooms/{slug}/chat/messages with
+  //     body { content }. Returns 201 with the post-mutation envelope
+  //     (same shape as a list entry). Sender email is NEVER returned.
+  async getRoomChatMessages(slug, limit = 50) {
+    const q = Number.isFinite(limit) && limit > 0 ? `?limit=${encodeURIComponent(String(limit))}` : ''
+    return this.request(`/rooms/${encodeURIComponent(slug)}/chat/messages${q}`, {
+      method: 'GET'
+    })
+  },
+
+  async sendRoomChatMessage(slug, content) {
+    return this.request(`/rooms/${encodeURIComponent(slug)}/chat/messages`, {
+      method: 'POST',
+      body: { content: String(content == null ? '' : content) }
+    })
   }
 }

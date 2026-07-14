@@ -284,3 +284,97 @@ describe('Room queue store (isolated)', () => {
     expect(globalStore.currentUser).toBe(before.currentUser)
   })
 })
+
+// --- R11a: room chat mutators ---
+
+describe('Room chat store (R11a)', () => {
+  beforeEach(() => {
+    globalStore.roomQueues = {}
+    globalStore.queueState = { songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] }
+    globalStore.voteSessions = {}
+    globalStore.autoQueueConfig = { enabled: false, strategy: 'related' }
+  })
+
+  it('_ensureRoomEntry seeds an empty messages array on first access', () => {
+    const entry = globalStore._ensureRoomEntry('lobby')
+    expect(Array.isArray(entry.messages)).toBe(true)
+    expect(entry.messages).toEqual([])
+  })
+
+  it('setRoomChatMessages replaces the slice with the seeded list', () => {
+    const seeded = [
+      { id: 1, room_slug: 'lobby', sender: { user_id: 1, display_name: 'A' }, content: 'hi', created_at: '2026-01-01T00:00:00Z' },
+      { id: 2, room_slug: 'lobby', sender: { user_id: 2, display_name: 'B' }, content: 'yo', created_at: '2026-01-01T00:00:01Z' },
+    ]
+    globalStore.setRoomChatMessages('lobby', seeded)
+    expect(globalStore.roomQueues.lobby.messages).toEqual(seeded)
+  })
+
+  it('setRoomChatMessages is a no-op for null / non-array payloads', () => {
+    globalStore.setRoomChatMessages('lobby', [
+      { id: 1, room_slug: 'lobby', sender: { user_id: 1, display_name: 'A' }, content: 'hi', created_at: 't' },
+    ])
+    globalStore.setRoomChatMessages('lobby', null)
+    globalStore.setRoomChatMessages('lobby', { messages: [] })
+    expect(globalStore.roomQueues.lobby.messages.length).toBe(1)
+  })
+
+  it('applyRoomChatMessageCreated appends a single message envelope', () => {
+    globalStore.applyRoomChatMessageCreated('lobby', {
+      message: { id: 1, room_slug: 'lobby', sender: { user_id: 1, display_name: 'A' }, content: 'a', created_at: 't1' },
+    })
+    globalStore.applyRoomChatMessageCreated('lobby', {
+      message: { id: 2, room_slug: 'lobby', sender: { user_id: 2, display_name: 'B' }, content: 'b', created_at: 't2' },
+    })
+    expect(globalStore.roomQueues.lobby.messages.length).toBe(2)
+    expect(globalStore.roomQueues.lobby.messages[1].content).toBe('b')
+  })
+
+  it('applyRoomChatMessageCreated caps the slice at MaxRoomChatMessages (oldest dropped)', async () => {
+    const { MaxRoomChatMessages } = await import('../index')
+    // Seed MaxRoomChatMessages + 5 entries; verify the oldest 5 are dropped.
+    const total = MaxRoomChatMessages + 5
+    for (let i = 0; i < total; i++) {
+      globalStore.applyRoomChatMessageCreated('lobby', {
+        message: { id: i, room_slug: 'lobby', sender: { user_id: 1, display_name: 'A' }, content: `m${i}`, created_at: `t${i}` },
+      })
+    }
+    const msgs = globalStore.roomQueues.lobby.messages
+    expect(msgs.length).toBe(MaxRoomChatMessages)
+    // The oldest retained entry must be id=5 (the 6th inserted).
+    expect(msgs[0].id).toBe(5)
+    expect(msgs[msgs.length - 1].id).toBe(total - 1)
+  })
+
+  it('applyRoomChatMessageCreated is a no-op for missing payload or message', () => {
+    globalStore.applyRoomChatMessageCreated('lobby', null)
+    globalStore.applyRoomChatMessageCreated('lobby', {})
+    // A no-op must NOT poison the local state. Either no entry was
+    // created OR the entry's messages array is empty.
+    const entry = globalStore.roomQueues.lobby
+    if (entry) {
+      expect(entry.messages).toEqual([])
+    } else {
+      expect(entry).toBeUndefined()
+    }
+  })
+
+  it('chat mutators never touch global queue / vote / autoQueueConfig / currentUser', async () => {
+    const before = {
+      queueState: JSON.parse(JSON.stringify(globalStore.queueState)),
+      voteSessions: { ...globalStore.voteSessions },
+      autoQueueConfig: { ...globalStore.autoQueueConfig },
+      currentUser: globalStore.currentUser,
+    }
+    globalStore.applyRoomChatMessageCreated('lobby', {
+      message: { id: 1, room_slug: 'lobby', sender: { user_id: 1, display_name: 'A' }, content: 'hi', created_at: 't' },
+    })
+    globalStore.setRoomChatMessages('lobby2', [
+      { id: 2, room_slug: 'lobby2', sender: { user_id: 1, display_name: 'A' }, content: 'x', created_at: 't' },
+    ])
+    expect(globalStore.queueState).toEqual(before.queueState)
+    expect(globalStore.voteSessions).toEqual(before.voteSessions)
+    expect(globalStore.autoQueueConfig).toEqual(before.autoQueueConfig)
+    expect(globalStore.currentUser).toBe(before.currentUser)
+  })
+})

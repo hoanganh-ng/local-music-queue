@@ -55,6 +55,9 @@ const apiMock = vi.hoisted(() => ({
   deleteRoom: vi.fn(),
   removeRoomMember: vi.fn(),
   getRoomMembers: vi.fn(),
+  // R11a
+  getRoomChatMessages: vi.fn(),
+  sendRoomChatMessage: vi.fn(),
 }))
 vi.mock('../../services/api', () => ({ api: apiMock }))
 
@@ -81,6 +84,11 @@ describe('RoomView', () => {
     sessionHelper.clearSession()
     globalStore.roomQueues = {}
     vi.clearAllMocks()
+    // R11a: default the chat API methods so the existing test
+    // suite (which doesn't know about chat) keeps working. Tests
+    // that exercise the chat panel override these mocks.
+    apiMock.getRoomChatMessages.mockResolvedValue({ messages: [] })
+    apiMock.sendRoomChatMessage.mockResolvedValue({ id: 0, room_slug: '', sender: { user_id: 0, display_name: '' }, content: '', created_at: new Date(0).toISOString() })
   })
 
   it('subscribes the room ws client to the exact event types and ignores others', async () => {
@@ -932,6 +940,165 @@ describe('RoomView', () => {
     inst.onClose({ code: 1000, reason: '', wasClean: true })
     await flushPromises()
     expect(globalStore.roomQueues.lobby.removed).toBe(false)
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+})
+
+// --- R11a: room chat panel ---
+
+describe('RoomView (R11a chat panel)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    sessionStorage.clear()
+    sessionHelper.clearSession()
+    globalStore.roomQueues = {}
+    vi.clearAllMocks()
+    apiMock.getRoomChatMessages.mockResolvedValue({ messages: [] })
+    apiMock.sendRoomChatMessage.mockResolvedValue({ id: 0, room_slug: '', sender: { user_id: 0, display_name: '' }, content: '', created_at: new Date(0).toISOString() })
+  })
+
+  it('fetches chat history on mount and again on slug change', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [] })
+    apiMock.getRoomChatMessages.mockResolvedValue({ messages: [
+      { id: 1, room_slug: 'lobby', sender: { user_id: 1, display_name: 'A' }, content: 'first', created_at: '2026-01-01T00:00:00Z' },
+    ] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    expect(apiMock.getRoomChatMessages).toHaveBeenCalledWith('lobby', 50)
+    expect(globalStore.roomQueues.lobby.messages.length).toBe(1)
+
+    // Navigate to a new slug; the chat history is re-seeded.
+    apiMock.getRoomChatMessages.mockResolvedValueOnce({ messages: [
+      { id: 2, room_slug: 'lounge', sender: { user_id: 2, display_name: 'B' }, content: 'second', created_at: '2026-01-01T00:00:01Z' },
+    ] })
+    await router.push('/rooms/lounge')
+    await flushPromises()
+    expect(apiMock.getRoomChatMessages).toHaveBeenCalledWith('lounge', 50)
+    expect(globalStore.roomQueues.lounge.messages[0].content).toBe('second')
+
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('appends an incoming room_chat_message_created WS event to the local cache', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const inst = wsFactoryMock.lastInstance
+
+    inst.onMessage({
+      type: 'room_chat_message_created',
+      data: {
+        message: {
+          id: 99, room_slug: 'lobby',
+          sender: { user_id: 2, display_name: 'Peer' },
+          content: 'hello peer', created_at: '2026-01-01T00:00:00Z',
+        },
+      },
+    })
+    expect(globalStore.roomQueues.lobby.messages.length).toBe(1)
+    expect(globalStore.roomQueues.lobby.messages[0].content).toBe('hello peer')
+    expect(globalStore.roomQueues.lobby.messages[0].sender.display_name).toBe('Peer')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('successful send calls api.sendRoomChatMessage and clears the input', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [] })
+    apiMock.getRoomChatMessages.mockResolvedValue({ messages: [] })
+    apiMock.sendRoomChatMessage.mockResolvedValue({
+      id: 1, room_slug: 'lobby', sender: { user_id: 1, display_name: 'Me' },
+      content: 'hi', created_at: '2026-01-01T00:00:00Z',
+    })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    // Fire the captured onOpen so the per-room WS connection is
+    // considered connected (canChat requires connected=true).
+    wsFactoryMock.lastInstance.onOpen()
+    const vm = wrapper.vm
+    vm.chatDraft = '  hi  '
+    await vm.sendChat()
+    await flushPromises()
+    expect(apiMock.sendRoomChatMessage).toHaveBeenCalledWith('lobby', 'hi')
+    expect(vm.chatDraft).toBe('')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('send button is disabled when disconnected, unauthenticated, archived, or removed', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const vm = wrapper.vm
+    vm.chatDraft = 'hi'
+
+    // Disconnected initially (no onOpen fired) — canChat must be false.
+    expect(vm.canChat).toBe(false)
+
+    // Mark connected.
+    wsFactoryMock.lastInstance.onOpen()
+    expect(vm.canChat).toBe(true)
+
+    // Archived.
+    globalStore.markRoomArchived('lobby')
+    expect(vm.canChat).toBe(false)
+    globalStore.roomQueues.lobby.archived = false
+
+    // Removed.
+    globalStore.markRoomRemovedAsCurrentUser('lobby')
+    expect(vm.canChat).toBe(false)
+    globalStore.roomQueues.lobby.removed = false
+
+    // Unauthenticated.
+    const prev = globalStore.currentUser
+    globalStore.currentUser = null
+    expect(vm.canChat).toBe(false)
+    globalStore.currentUser = prev
+    expect(vm.canChat).toBe(true)
+
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('chat messages are rendered as text only — never as HTML (no v-html)', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
+    apiMock.getRoomMembers.mockResolvedValue({ members: [] })
+    apiMock.getRoomChatMessages.mockResolvedValue({ messages: [
+      { id: 1, room_slug: 'lobby', sender: { user_id: 1, display_name: 'A' }, content: '<img src=x onerror=alert(1)>', created_at: 't' },
+    ] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const html = wrapper.html()
+    // The dangerous string is rendered as the literal text content
+    // (escaped angle brackets), not as an <img> element. We assert
+    // the string appears and that no actual <img> tag is present.
+    expect(html).toContain('&lt;img')
+    expect(html).not.toMatch(/<img\b[^>]*src=x/)
     wrapper.unmount()
     globalStore.clearUser()
   })
