@@ -177,14 +177,18 @@ room_cutover_marker
   id                     INTEGER PRIMARY KEY CHECK (id = 1)
   room_cutover_id        UUID NOT NULL
   target_room_slug       TEXT NOT NULL
-  target_room_id         BIGINT NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT
-  host_user_id           BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT
+  target_room_id         BIGINT NOT NULL    -- immutable audit snapshot; NO foreign key
+  host_user_id           BIGINT NOT NULL    -- immutable audit snapshot; NO foreign key
   source_hashes          JSONB NOT NULL
   target_hashes          JSONB NOT NULL
   legacy_id_offset       BIGINT NOT NULL DEFAULT 0
-  cutover_pre_commit_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  cutover_pre_commit_at  TIMESTAMPTZ NOT NULL   -- supplied explicitly by the CLI; NOT DEFAULT NOW()
   binary_build_sha       TEXT NOT NULL
 ```
+
+The fields `target_room_id` and `host_user_id` are **immutable integer audit snapshots of the migrated room's id and the host's `users.id`** — explicitly NOT foreign keys. Rationale: the marker row is retained for the rollback window AND as migration evidence; foreign-key relationships (`REFERENCES rooms(id) ON DELETE RESTRICT` / `REFERENCES users(id) ON DELETE RESTRICT`) would permanently own the lifecycle of the room or the user and prevent future hard-delete / retention work that R10f+ defers. Migration evidence must NOT own room or user lifecycle. The room row in `rooms` and the user row in `users` continue to exist independently; if either is hard-deleted in a future R10f+ lifecycle hardening slice, the marker row is unaffected and the numeric IDs remain valid as historical references. To re-link the marker to the current row (if any) in a future reconciliation, callers can `SELECT … FROM rooms WHERE id = :target_room_id` and act on the result; reconciliation is **out of scope for R14a and any of R09h / R14b / R09i / R14d / R14c / R14e**.
+
+The field `cutover_pre_commit_at` is named to reflect that the row is written **before** `COMMIT` and cannot truthfully reflect the database commit time. **It is supplied explicitly by the CLI at marker insertion** as a parameter (CLI process clock at the moment of marker insertion), rather than relying on `DEFAULT NOW()`. Rationale: the CLI's process clock is the authoritative recorder of the pre-commit completion timestamp; a `DEFAULT NOW()` would silently use the DB clock at insert time, which can drift from the CLI's intended completion timestamp under load or clock skew. Explicit parameter passing makes the audit timestamp the CLI's view, not a DB-side implicit. The DB commit time is implicit in the transaction's WAL position; the marker record does not need to expose it.
 
 **Both tables are created by `0009_room_cutover_support.up.sql`** (and dropped by its matching `0009_room_cutover_support.down.sql`). The CLI does NOT create schema ad hoc.
 
@@ -219,15 +223,15 @@ The R14b room-cutover is built fresh. R03 patterns are referenced but R03's CLI 
 1. `BEGIN`.
 2. `INSERT INTO rooms (slug, name, ...) VALUES (...)`.
 3. `INSERT INTO room_members (room_id, user_id, role) VALUES (:room_id, :host_user_id, 'host')`.
-4. Source-to-target copy (legacy → room).
-5. `INSERT INTO room_cutover_marker (id, room_cutover_id, ...) VALUES (1, ...)`. Marker is inserted before `COMMIT`, never after.
-6. **Pre-commit verification** within the same tx: source row counts, target row counts, `queue_state.data` byte length parity, per-target SHA256 after copy, marker record fields present.
+4. Source-to-target copy (legacy → room). The legacy `activities` rows are inserted into `room_activities` with preserved `id`s; after the insert, `setval(room_activities_id_seq, MAX(id), is_called=true)` is run **before** the marker INSERT in the same transaction (this resequence is the precondition that lets R09i's write path activate later; see § R09i).
+5. `INSERT INTO room_cutover_marker (id, room_cutover_id, target_room_slug, target_room_id, host_user_id, source_hashes, target_hashes, legacy_id_offset, cutover_pre_commit_at, binary_build_sha) VALUES (1, :uuid, :slug, :room_id, :host_id, :source_hashes, :target_hashes, :legacy_id_offset, :cutover_pre_commit_at_supplied_by_cli, :binary_build_sha)`. `target_room_id` and `host_user_id` here are integer snapshots (NOT foreign keys); `cutover_pre_commit_at` is supplied by the CLI process clock at this moment. Marker is inserted before `COMMIT`, never after.
+6. **Pre-commit verification** within the same tx: source row counts, target row counts, `queue_state.data` byte length parity, per-target SHA256 after copy, marker record fields present, `setval` already applied.
 7. `COMMIT` (or `ROLLBACK` on any verification failure).
 8. `pg_advisory_unlock(987654321)` on the same pinned connection (deferred unlock).
 
 **No `abort` subcommand.** Lock release is via explicit `pg_advisory_unlock` on the same pinned connection (with connection close as fallback). The CLI rejects unknown positional arguments and unknown flags.
 
-**NEW** `room_cutover_marker` table is distinct from R03's `migration_marker`. R03's marker is preserved untouched.
+**NEW** `room_cutover_marker` table is distinct from R03's `migration_marker`. R03's marker is preserved untouched. `target_room_id` and `host_user_id` in the marker are integer snapshots (NOT foreign keys); future hard deletes of the room row or the user row do NOT remove or block the marker row.
 
 **Migration files and rollback:** every migration in this work — `0009_room_cutover_support.{up,down}.sql`, `0010_drop_legacy_global_tables.{up,down}.sql` — ships a matching `.down.sql`. The `0009.down.sql` drops the `room_activities` and `room_cutover_marker` tables. The `0010.down.sql` **cannot restore data that was dropped** (it only recreates empty tables); the destructive cleanup rollback is one-way and is documented as such in `0010.down.sql`.
 
@@ -255,11 +259,20 @@ R14b is a backend-only sprint that ships the offline cutover mechanism. R14b lan
 
 #### R09i — room-activity runtime parity (AFTER R14b, BEFORE R14d)
 
-R09i wires the room runtime's mutations to call `RoomActivityRepository.AddActivity` on the same events that the global runtime today appends to `activities` (vote / priority / queue mutations in `usecase/vote/interactor.go`, `usecase/priority/interactor.go:81`, `usecase/queue/interactor.go`). After R09i, the room runtime has a live write path to `room_activities`; per-room mutators call it. **R09i is backend-only; the activity READ panel (a `RoomView` activity surface) is a separate optional frontend task and is NOT in R09i scope.**
+R09i wires the room runtime's mutations to call `RoomActivityRepository.AddActivity` on the same events that the global runtime today appends to `activities` (vote / priority / queue mutations in `usecase/vote/interactor.go`, `usecase/priority/interactor.go:81`, `usecase/queue/interactor.go`). **R09i is BACKEND-ONLY**; the activity READ panel (a `RoomView` activity surface) is a separate optional frontend task and is NOT in R09i scope.
 
 - R09i is a blocking prerequisite for R14c unless the Product Owner explicitly waives it (recorded on Issue #20).
 - R09i runs after R14b (because R14b creates `room_activities`) and before R14d.
 - R09i only touches `internal/usecase/roomqueue`, `internal/usecase/roomvote`, `internal/usecase/roomautoqueue`, and the new `RoomActivityRepository`. No frontend, no global runtime changes.
+
+**R09i write behavior must remain DISABLED until R14c has copied legacy activities and resynchronized `room_activities_id_seq`.** This is the activity-ID collision guard that mirrors the `legacy_id_offset` mechanism for `room_play_history`. Without it, both the legacy `activities` table (still writable by the global runtime during Phase A/B) and the new `room_activities` table (BIGSERIAL) could allocate overlapping IDs concurrently, and a future re-run of the lossless `activities` → `room_activities` copy would either collide with rows the room runtime already appended or lose the preserved-id invariant. The contract is:
+
+- R09i may land its code (repo + call sites + mutator wiring) on `dev` **after R14b's gate passes**; this is in-progress work that does not affect the legacy runtime.
+- R09i's write behavior is gated behind the same cutover-state gate as R14d's behavioral activation (the `VITE_ROOM_CUTOVER_AUTHORITATIVE` SPA bundle flag matched against the server `--room-cutover-authoritative=true` flag; see § Deployment compatibility matrix). Concretely: the `RoomActivityRepository.AddActivity` call sites are wired but a build flag / runtime feature flag keeps them no-ops until R14c has run `cmd/room-cutover up` against the live DB.
+- During the R14c maintenance window, the binary restart with `--room-cutover-authoritative=true` activates the gate atomically with the legacy-route retirement. After that, `setval(room_activities_id_seq, MAX(id), is_called=true)` has been applied to `room_activities_id_seq` so the global BIGSERIAL is resequenced past the highest preserved legacy `activities.id`, and the R09i writes may begin.
+- If the Product Owner explicitly waives R09i (recorded on Issue #20), the gate still applies — R09i is unused in that scenario; the cutover binary simply runs without R09i migrated code.
+
+**This activity-ID collision guard is symmetric with the play-history `legacy_id_offset` mechanism (§ room_play_history id-collision handling).** Both ensure that the legacy-table writes (still active during Phase A) and the new-table writes (active in R09i / post-R14c) do not allocate overlapping IDs during the cutover window.
 
 #### Phase C — frontend cutover (R14d, with deferred behavioral activation)
 
@@ -267,7 +280,7 @@ R14d implements the SPA changes; **the behavioral activation is deferred to the 
 
 - Implementation may be accepted BEFORE R14c ships (the code lands and passes its own review).
 - Pre-R14c, the SPA continues to expose the legacy dashboard surface (so the still-authoritative global queue remains reachable).
-- Activation happens during R14c, behind an explicit cutover-state gate (e.g., a build flag matched against `--room-cutover-authoritative=true`, or a runtime feature flag flipped during the maintenance window).
+- Activation happens during R14c. The frontend gate is a **single, named mechanism**: the SPA bundle exposes a `VITE_ROOM_CUTOVER_AUTHORITATIVE` flag (a Vite build-time `import.meta.env` value baked at build). Two SPA bundle variants are built and deployed: **`VITE_ROOM_CUTOVER_AUTHORITATIVE=false`** (paired with the server in `--room-cutover-authoritative=false` / pre-R14c states) and **`VITE_ROOM_CUTOVER_AUTHORITATIVE=true`** (paired with the server in `--room-cutover-authoritative=true` / post-R14c states). The SPA checks the flag once at mount time. There is **NO runtime feature flag** — the SPA is built twice and the right bundle is deployed for the right server state; no alternate mechanism (no separate env var at runtime, no separate feature-flag service) is permitted within R14a's contract. R14d's bundle-acceptance ships the `VITE_ROOM_CUTOVER_AUTHORITATIVE=false` variant; the `true` variant is deployed as part of the R14c maintenance window. After successful migration the binary restarts as `--room-cutover-authoritative=true`, and the next SPA rollout deploys the `VITE_ROOM_CUTOVER_AUTHORITATIVE=true` bundle.
 - The activation removes `DashboardView` (or redirects it to the room entry surface from R05b), clears `globalStore.queueState` / `voteSessions` / `autoQueueConfig`, closes global `WebSocketClient`, preserves `globalStore.currentUser` + `roomQueues[slug]`.
 - R14d assumes R05b (room entry UI) has landed.
 
@@ -290,7 +303,15 @@ R14c owns the coordinated production execution: maintenance window + redeploy wi
 
 - Land `0010_drop_legacy_global_tables.up.sql` (and matching `.down.sql`). The forward migration drops the **legacy global** tables: `queue_state`, `activities`, `auto_queue_config`, `play_history`. **It does NOT touch `room_play_history` or `room_activities`.** `0001_initial.up.sql` is NEVER rewritten.
 - Schema bumps v9 → v10.
-- `0010_drop_legacy_global_tables.down.sql` recreates the legacy tables as empty shells; **it cannot restore dropped data**. The destructive cleanup is one-way; this is documented in the `.down.sql` file header.
+- **`0010_drop_legacy_global_tables.down.sql` MUST restore the exact legacy schema structure** so that rolling forward (rolling PAST the `0010` upgrade) and rolling back (rolling back the `0010` upgrade) is a no-op on structure for the legacy tables. Specifically, the `.down.sql` MUST recreate:
+  - All four legacy tables with their **exact column structure** (column names, types, nullability, defaults) as declared in `0001_initial.up.sql`.
+  - All legacy **indexes** declared in `0001_initial.up.sql` (e.g., the index on `play_history.played_at`, the unique constraints on `users.email`, `user_sessions(user_id, session_date)`, etc.).
+  - All legacy **sequences** (`users_id_seq`, `user_sessions_id_seq`, `priority_transactions_id_seq`, `activities_id_seq`, `play_history_id_seq`); the recreated tables are wired to those sequences via `BIGSERIAL` / `DEFAULT nextval(...)` defaults so legacy writes resume from the same id space.
+  - All legacy **constraints** (PK / UNIQUE / NOT NULL / CHECK) as declared in `0001_initial.up.sql` (e.g., `queue_state.id = 1` CHECK).
+  - All legacy **column defaults** (e.g., `users.created_at`, `queue_state.id = 1`).
+  - The required **`auto_queue_config` singleton seed row** (`id = 1` with the `enabled`, `strategy` columns at their initial values), so the global autoplay toggle works against the recreated table. Specifically, the seed must recreate the row originally inserted by `0001_initial.up.sql` (`INSERT INTO auto_queue_config (id, enabled, strategy) VALUES (1, ...) ON CONFLICT DO NOTHING`).
+- The `.down.sql` MAY also restore the singleton **queue_state row** (`id = 1` with `data = NULL` or the documented default empty JSON), but the documented default — **"`.down.sql` cannot restore dropped data"** — means that any non-null `data` payload that existed before `0010.up.sql` ran is lost. The recreated `queue_state` row is an empty shell; the payload is recoverable only by re-running `0010.up.sql` (the destructive cleanup is one-way). This is documented in the `.down.sql` file header.
+- Migration-evidence rows in `room_cutover_marker` and preserved `room_*` rows are unaffected; the `.down.sql` does NOT touch any non-`0010` table or row.
 
 ### WebSocket cutover
 
@@ -307,19 +328,22 @@ R14c owns the coordinated production execution: maintenance window + redeploy wi
 
 ### Deployment compatibility matrix
 
-The cutover involves two build flags (`--room-cutover-authoritative` per-server, R14d's cutover-state gate per-client) and three server cutover states.
+The cutover involves a **single named gate mechanism on each side**:
+- **Server side**: `--room-cutover-authoritative=true|false` (build-time Go flag baked at compile; default `false`).
+- **Client side**: `VITE_ROOM_CUTOVER_AUTHORITATIVE=true|false` (Vite build-time `import.meta.env` value baked at SPA build; two bundle variants — `false` bundle shipped pre-R14c, `true` bundle shipped as part of the R14c rollout).
+- There is **no runtime feature flag**: the server's `--room-cutover-authoritative` value and the SPA's `VITE_ROOM_CUTOVER_AUTHORITATIVE` value are baked at build and **MUST match** in any deployed combination. The matrix below names this single mechanism explicitly.
 
-| Server binary | SPA cutover-state gate | Legacy global routes | Per-room routes | Result |
+| Server binary (`--room-cutover-authoritative`) | SPA bundle (`VITE_ROOM_CUTOVER_AUTHORITATIVE`) | Legacy global routes | Per-room routes | Result |
 | --- | --- | --- | --- | --- |
-| Pre-R14b binary (default `--room-cutover-authoritative=false`) | OFF | Registered; serve legacy repos | Registered | Pre-cutover baseline. |
-| Post-R14b binary | OFF | Registered; serve legacy repos | Registered | The R14b verification state. |
-| Post-R14d binary (R14d accepted) | OFF (gate not yet flipped) | Registered; serve legacy repos | Registered | R14d implementation accepted; gate still off so the SPA continues exposing legacy dashboard. |
-| Post-R14c binary (`--room-cutover-authoritative=true`) | ON (gate flipped during maintenance) | **Tombstone handlers; `410 Gone` envelope** + `Link: </api/rooms>; rel="successor-version"` | Registered; sole authoritative path | Production cutover state. ONLY valid post-R14c combination. |
-| Post-R14c binary | ON | `410 Gone` tombstone | Registered | DashboardView removed/redirected; SPA no longer hits legacy endpoints. |
-| Post-R14c binary | OFF | `410 Gone` tombstone | Registered | **BROKEN** — SPA still expects legacy endpoints but server returns `410`. Forbid this combination in deployment. |
-| Mid-window rollback: **immediately pre-cutover production release** with `--room-cutover-authoritative=false` | OFF | Registered; serves legacy repos | Registered | Mid-window rollback. The `pg_dump` from the start of the window is the source of truth. Forward recovery for any data that mutated after the cutover. **Not an "R03 binary"** — R03 is the unrelated SQLite-to-PostgreSQL migration release. |
+| Pre-R14b binary (default `false`) | `false` bundle | Registered; serve legacy repos | Registered | Pre-cutover baseline. |
+| Post-R14b binary (`false`) | `false` bundle | Registered; serve legacy repos | Registered | The R14b verification state. |
+| Post-R14d binary (`false`) — R14d accepted | `false` bundle | Registered; serve legacy repos | Registered | R14d implementation accepted; the `false` bundle continues exposing the legacy dashboard so the still-authoritative global queue remains reachable pre-cutover. |
+| Post-R14c binary (`true`) | `true` bundle | **Tombstone handlers; `410 Gone` envelope** + `Link: </api/rooms>; rel="successor-version"` | Registered; sole authoritative path | Production cutover state. ONLY valid post-R14c combination. |
+| Post-R14c binary (`true`) | `false` bundle (forgotten rollout) | `410 Gone` tombstone | Registered | **BROKEN** — SPA still expects legacy endpoints but server returns `410`. Forbid this combination. |
+| Post-R14c binary (`true`) | `true` bundle | `410 Gone` tombstone | Registered | Correct: SPA bundle matches server state. |
+| Mid-window rollback: **immediately pre-cutover production release** with `false` / `false` bundle | OFF (gate not on) | Registered; serves legacy repos | Registered | Mid-window rollback. The `pg_dump` from the start of the window is the source of truth. Forward recovery for any data that mutated after the cutover. **Not an "R03 binary"** — R03 is the unrelated SQLite-to-PostgreSQL migration release. |
 
-**Client-continuity claim:** the only combinations that guarantee client continuity are the documented ones. R14d's behavioral activation is gated behind an explicit flag matched against `--room-cutover-authoritative=true`. Pre-R14c, the SPA continues to expose the legacy dashboard so the global queue is reachable. The compatibility matrix forbids deploying the post-R14c server with the pre-R14d SPA.
+**Client-continuity claim:** the only combinations that guarantee client continuity are the documented ones. The front-end gate is the single mechanism `VITE_ROOM_CUTOVER_AUTHORITATIVE` matched against `--room-cutover-authoritative`. Pre-R14c, the SPA `false` bundle continues exposing the legacy dashboard so the global queue is reachable. The compatibility matrix forbids any combination where the server's flag is `true` and the SPA bundle is `false` — the deployed artifacts must match.
 
 ### Deployment, backup, and rollback gates
 
