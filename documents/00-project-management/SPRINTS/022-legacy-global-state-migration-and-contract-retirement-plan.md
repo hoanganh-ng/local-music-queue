@@ -240,55 +240,62 @@ R14a chooses ONE recommended sequence. The four phases MUST be implemented as se
 
 #### Phase A — offline conversion (built + verified by R14b)
 
-R14b is a backend-only sprint that ships **the mechanism** as a new dedicated CLI and verifies it against a representative PostgreSQL snapshot. R14b does NOT retire the global runtime in production; it lands the CLI, the marker contract, the source-to-target copy, the dry-run, the verification, and the rollback hook. R14b's verification gate MUST pass before R14c can run.
+R14b is a backend-only sprint that ships **the mechanism** as a new dedicated CLI and verifies it against a representative PostgreSQL snapshot. R14b does NOT retire the global runtime in production; it lands the CLI, the marker contract, the source-to-target copy, the dry-run, the verification, and the rollback hook. R14b's verification gate MUST pass before R14d (frontend cutover) can run.
 
-- R14b ships `cmd/room-cutover` with subcommands `plan` (read-only snapshot + dry-run), `up` (apply), `verify` (re-assert hash record), and `abort` (release the advisory lock without committing).
-- R14b ships the marker table `room_cutover_marker` (single-row, `id = 1`) as described above.
+- R14b ships `cmd/room-cutover` with subcommands:
+  - `plan` (read-only snapshot + dry-run)
+  - `up` (apply)
+  - `verify` (re-assert hash record against the marker)
+  - **No `abort` subcommand.** PostgreSQL advisory locks belong to the connection that acquired them; another process cannot release them. Rollback and lock release happen by ending the held connection — `tx.Rollback` on any error returns the connection to the pool on process exit, releasing the lock with it. If the operator wants to abandon a held cutover mid-flight, they stop the `cmd/room-cutover up` process (`SIGTERM` / Ctrl-C); the connection closes, the lock releases, the in-flight transaction rolls back. The CLI MAY print a textual "press Ctrl-C to abandon" hint before the copy phase begins.
+- R14b ships the marker table `room_cutover_marker` (single-row, `id = 1`) as described in § Atomicity and idempotency.
 - R14b ships the binary build flag `--room-cutover-authoritative` (default `false`; in R14b this is `false` in every deployment). When `false`, the legacy global routes continue to serve from the legacy repositories **unchanged**; the cutover migrator reads from the legacy tables and writes to the room tables, but the server still serves the global routes for concurrent testing. This is the verification state.
-- R14b verification gate (must pass before R14c can run):
+- R14b verification gate (must pass before R14d can run):
   - `cmd/room-cutover plan` against a fresh PostgreSQL snapshot returns a report with no PII (numeric ids + sha256 + counts only).
   - `cmd/room-cutover up --dry-run` against the same snapshot completes with no writes and a successful SHA256 record.
-  - `cmd/room-cutover up` (real run) against the same snapshot completes the source-to-target copy inside one transaction, then commits the marker, then returns 0.
+  - `cmd/room-cutover up` (real run) against the same snapshot creates the room, inserts the host membership, copies the source rows into the target rows, and inserts the marker **all in one transaction**; then commits and returns 0. (See § Atomicity and idempotency for the in-transaction marker contract.)
   - Re-running `cmd/room-cutover up` immediately after returns `already cut over; no-op` (exit 0), driven by the marker.
   - Hash drift on either source or target is detected and rejected (no `--force` / `--reset`).
   - PII redaction verified (no email, no OAuth token, no display name, no session token in the report).
   - The marker preserves the R03 `migration_marker` row untouched.
+  - Schema version after the R14b migration is **9** (verified by the runner's reported version, not by a separate config file).
   - `go test ./...` clean.
 
 #### Phase B — coordinated production cutover (executed by R14c)
 
 R14c owns the **coordinated production execution**: a planned maintenance window, a redeploy with the **binary build flag `--room-cutover-authoritative=true`**, and the run of `cmd/room-cutover up` against the live PostgreSQL. R14c is the ONLY sprint where the production binary is changed.
 
-- Before the window: a `pg_dump` is taken and retained ≥30 days (mirrors ADR 002 §9). The R14b binary is already deployed and the R14b verification gate has passed.
+- Before the window: a `pg_dump` is taken and retained ≥30 days (mirrors ADR 002 §9). The R14b binary is already deployed and the R14b verification gate has passed. The post-R14d frontend bundle has been deployed and is in production. R05b (room entry UI), R09h (vote-prioritize parity), and R09i (room-activity runtime parity) are all accepted. The three blocking prerequisites close together; R14c cannot start until all of them are accepted.
 - During the window:
   - The application is shut down (or restarted with a maintenance-mode flag that disables ALL mutating endpoints — global AND room — while keeping reads disabled too in this state).
-  - `cmd/room-cutover up` runs against the live database. It pins a connection, takes the advisory lock, opens a single transaction, copies the source rows to the target rows, commits, writes the marker.
+  - `cmd/room-cutover up` runs against the live database. It pins a connection, takes the advisory lock, opens a single transaction, creates the room, inserts the host membership, copies the source rows into the target rows, inserts the marker **in the same transaction**, and commits. See § Atomicity and idempotency.
   - The application restarts with `--room-cutover-authoritative=true`. In this build:
-    - The legacy global `/api/queue/...` / `/api/vote/skip` / `/api/autoqueue/...` routes and the legacy `/ws` endpoint are **unregistered**, NOT just "must not be hit". The room routes are the only registered set.
-    - The legacy repositories are still in the binary for read-only rollback support, but they are NOT wired into HTTP handlers or the WS hub.
-    - On the cutover boundary, the application restart is the only window where the global routes are unreachable — this is the documented maintenance window.
+    - The legacy global `/api/queue/...` / `/api/vote/...` / `/api/autoqueue/...` routes and the legacy `/ws` endpoint are **registered with repository-free tombstone handlers** that return `410 Gone` with the documented envelope (see § Errors and the route-retired responses) — they are NOT unregistered. The room routes are still the only data path; the tombstone handlers carry no repository wiring and no WS hub mutation logic. The mux returns `410` for the listed legacy routes; the global `/ws` upgrade is **rejected during the HTTP phase** with `410 Gone` (the WS handler is replaced by a 410-returning HTTP handler at upgrade time, so no WebSocket connection succeeds). This is the approved `410 Gone` retirement posture.
+    - On the cutover boundary, the application restart is the only window where the listed legacy routes transition from serving real responses to `410 Gone` — this is the documented maintenance window.
   - The legacy global repositories write paths are also disabled by `--room-cutover-authoritative=true` to prevent any tool / script / cron that bypassed HTTP from mutating the legacy tables during the rollback window. The `--safe-write` mode is OFF in this build for legacy tables.
 - Frontend deployment order is captured in § Deployment compatibility matrix; the cutover binary is paired with the post-R05b + post-R14d frontend at production cutover time.
 
-#### Phase C — frontend cutover (R14d)
+**R14c is atomic across the listed legacy routes.** The cutover binary retires `/api/queue/...`, `/api/vote/skip`, `/api/autoqueue/...`, `/api/vote/prioritize`, the global `/ws`, all in one step. There is NO partial cutover where some legacy routes are retired while others (notably `/api/vote/prioritize`) remain live; a partial cutover would let surviving legacy mutations continue writing legacy global queue state after the room state is declared authoritative. Because R09h is a blocking prerequisite for the entire R14c cutover (not just `/api/vote/prioritize`), `/api/vote/prioritize` is guaranteed retired by Phase B.
+
+#### Phase C — frontend cutover (R14d) — runs BEFORE R14c
+
+R14d executes BEFORE R14c per § Future sprint sequence. R14d deploys a frontend bundle that pairs with the still-`authoritative=false` server. The legacy global routes are still live during R14d deployment; the post-R14d frontend simply does not call them.
 
 - `RoomView` becomes the only supported view; `DashboardView` is removed or redirects to a Welcome / room entry surface.
 - `globalStore.queueState`, `globalStore.voteSessions`, and `globalStore.autoQueueConfig` are cleared.
 - `globalStore.currentUser` is preserved (RoomView still reads it).
-- `globalStore.roomQueues[slug]` per-slug slices are preserved (RoomView reads them).
+- `globalStore.roomQueues[slug]` per-slug slices are preserved (RoomView still reads them).
 - The global `WebSocketClient` is closed and not reconnected.
 - **Frontend entry UX is a prerequisite**, not part of R14d: the unbuilt SPA client methods (`api.createRoom`, `api.listRooms`, `api.getRoom`, `api.joinRoom`, the invite endpoints, `api.claimPlayerLease`, `api.heartbeatPlayerLease`, `api.releasePlayerLease`, `api.getPlayerLease`) MUST exist before R14c can run. This is the **R05b — Room entry / player-lease UI** prerequisite sprint (see § Future sprint sequence). R05b is the slice that ships these frontend methods and exposes them as actual UI (room create form, room list, room join, invite redeem, lease claim UI). R14d assumes these exist.
 
 #### Phase D — schema cleanup (R14e)
 
-- Drop the legacy `queue_state`, `activities`, `auto_queue_config`, and `play_history` tables.
-- Reduce `0001_initial.up.sql` to only the account-scoped tables (`users`, `user_sessions`, `priority_transactions`); preserve the historical migration files on disk so the v8 era remains auditable.
-- Schema version bumps from 8 to 9 (only if R14e accepts and destructive cleanup completes).
+- Land `0010_drop_legacy_global_tables.up.sql` as a SEPARATE forward migration (do NOT modify `0001_initial.up.sql`). The forward migration drops the legacy `queue_state`, `activities`, `auto_queue_config`, and `play_history` tables. **DO NOT touch `room_play_history` rows** — `room_play_history` is the per-room play-history table and is NOT legacy; the migration drops only the **global** legacy tables. **The historical `0001_initial.up.sql` file remains on disk byte-for-byte and is NEVER rewritten.**
+- Schema version bumps from 9 to 10 (only if R14e accepts and destructive cleanup completes).
 - Phase D is destructive cleanup only and runs **after** a verified rollback window AND after no runtime path references the legacy tables.
 
 ### WebSocket cutover
 
-- `/ws` is **unregistered** in the `--room-cutover-authoritative=true` build (R14c). It returns HTTP 404 from the mux because the handler is not registered. (404 is the natural outcome of unregistering — R14a does NOT claim a `410 Gone` for `/ws` because there is no path to retire; the upgrade is refused.)
+- `/ws` is **retired with `410 Gone` in the `--room-cutover-authoritative=true` build (R14c).** The global WS upgrade handler is replaced by an HTTP handler at the mux entry that returns `410 Gone` with the documented envelope (see § Errors and the route-retired responses). The HTTP-phase rejection prevents WebSocket connections from being established against the retired endpoint. R14a explicitly does NOT use `404` for the retired `/ws`; `410 Gone` is the approved retirement posture.
 - Per-room `/ws/rooms/{slug}` reconnect/seq logic is unchanged.
 - `seq_num` continuity: per-room sequence numbers restart from the per-room hub's own counter (which is independent of the global hub's counter); this is the existing R07b behaviour and is not changed by R14a.
 - `/ws` MUST NOT silently join an arbitrary room under any circumstance.
@@ -300,43 +307,54 @@ R14c owns the **coordinated production execution**: a planned maintenance window
 - Where users land after upgrade: when no active room is selected, redirect to a room entry surface (or Welcome). Users with the migrated room bookmarked land directly on the migrated room's `RoomView`. The room entry surface REQUIRES the R05b SPA client methods and routes.
 - The migrated room is presented to its initial host and to other existing accounts via the existing room-frontend entry points; no automatic join.
 - Global queue / store / WebSocket state is cleared (per Phase C); per-slug `roomQueues[slug]` slices preserved; `currentUser` preserved.
-- Stale bookmarks, stale local storage, archived-room view, and unregistered-route responses surface as clear UI states; the frontend MUST NOT attempt to fall back to the unregistered endpoints.
+- Stale bookmarks, stale local storage, archived-room view, and `410 Gone` responses surface as clear UI states; the frontend MUST NOT attempt to fall back to the retired endpoints.
 - Frontend cutover is paired with the binary cutover at production time per § Deployment compatibility matrix.
 
 ### Deployment compatibility matrix
 
-The cutover involves two build flags (`--room-cutover-authoritative` per-server, R05b frontend bundle version per-client) and two cutover states (pre-cutover vs post-cutover binary). Valid combinations only:
+The cutover involves two build flags (`--room-cutover-authoritative` per-server, frontend bundle version per-client — pre-R05b / post-R05b / post-R14d) and three server cutover states (pre-R14b / post-R14b / post-R14c). Valid combinations only:
 
 | Server binary | Frontend SPA | Legacy global routes | Per-room routes | Result |
 | --- | --- | --- | --- | --- |
-| `--room-cutover-authoritative=false` (pre-R14c) | pre-R05b (no entry UI; DashboardView only) | Registered; serve legacy repos | Registered | Pre-cutover baseline. Documented. |
-| `--room-cutover-authoritative=false` (post-R14b; pre-R14c) | post-R05b (entry UI exists; user can create / list / join rooms / claim lease) | Registered; serve legacy repos | Registered | The R14b verification state. Users can use both surfaces. |
-| `--room-cutover-authoritative=true` (post-R14c) | post-R14c + post-R05b + post-R14d (DashboardView removed / redirected) | **Unregistered** (HTTP 404 from mux); `/api/vote/prioritize` may still be live if R09h has not yet landed and is excluded from the unregistration set | Registered; sole authoritative path | Production cutover state. Documented. |
-| `--room-cutover-authoritative=true` (post-R14c) | post-R05b only (DashboardView still present) | **Unregistered** | Registered | Frontend shows DashboardView, but the legacy routes it calls return 404. This is a **BROKEN** combination — the compatibility matrix forbids it. Either pair `--room-cutover-authoritative=true` with the R14d frontend, or keep the pre-R14c binary. |
-| R03 binary (legacy) | any | Registered (legacy repos) | Registered | Pre-cutover baseline. Documented as the rollback entry point if Phase B fails: restart the R03 binary, the `room_cutover_marker` remains in place, but the legacy tables are untouched and the room tables are the new (empty / partial) copies. Forward recovery may be needed depending on what mutations landed. |
-| `--room-cutover-authoritative=false` (R14c mid-window; binary restarted before `cmd/room-cutover up`) | any | Registered; serves legacy repos | Registered | Mid-window rollback state. Documented. The `pg_dump` from the start of the window is the source of truth. |
+| Pre-R14b binary (`--room-cutover-authoritative=false` default) | pre-R05b (no entry UI) | Registered; serve legacy repos | Registered | Pre-cutover baseline. Documented. |
+| Post-R14b binary (`--room-cutover-authoritative=false`) | pre-R05b OR post-R05b (entry UI exists) | Registered; serve legacy repos | Registered | The R14b verification state. Users can use both surfaces. |
+| Post-R14c binary (`--room-cutover-authoritative=true`) | post-R14c + post-R05b + post-R14d (DashboardView removed / redirected) | **Tombstone handlers; `410 Gone` with the documented envelope** (see § Errors and the route-retired responses); the global `/ws` upgrade is rejected with `410` in the HTTP phase | Registered; sole authoritative path | Production cutover state. Documented. This is the ONLY valid post-R14c combination. |
+| Post-R14c binary | post-R05b only (DashboardView still present) | `410 Gone` tombstone | Registered | **BROKEN** — frontend shows DashboardView, but every legacy route it calls returns `410`. The compatibility matrix forbids this combination. |
+| Post-R14c binary | pre-R05b (no entry UI) | `410 Gone` tombstone | Registered | **BROKEN** — frontend cannot enter rooms. The compatibility matrix forbids this combination. |
+| Mid-window rollback (immediately pre-cutover production release, server binary running with `--room-cutover-authoritative=false` because the cutover flag rollout was reverted before `cmd/room-cutover up`) | post-R14c + post-R05b + post-R14d | Registered; serves legacy repos | Registered | Mid-window rollback. **The rollback target is the immediately pre-cutover production release**, not an "R03 binary" — the R03 release is the SQLite-to-PostgreSQL migration release and is unrelated to the room cutover. The room tables in the target release are populated by the prior `cmd/room-cutover up` run; mutations since that point would need forward recovery against the `pg_dump` taken at the start of the window. |
+| Pre-R14c binary | pre-R05b / post-R05b | Registered | Registered | Pre-cutover state. Rollback target when only the room-cutover migration has been run. |
 
-**Client-continuity claim:** the only combinations that guarantee client continuity are the documented ones. Specifically: the `post-R05b + pre-R14c` combination is safe to deploy before the cutover window; the `post-R14c + post-R14d` combination is the production cutover state. **There is NO combination in which a frontend relying on legacy global routes is connected to a server that has unregistered those routes.** This is the client-continuity guarantee.
+The rollback target for any failure during Phase B is the **immediately pre-cutover production release** (the same server binary deployed at the time the maintenance window opened, with `--room-cutover-authoritative=false`). The legacy global repositories in the target release resume serving real responses. The `room_cutover_marker` row and the migrated room data persist; further room writes (post-rollback) would create drift the next cutover must reconcile. Forward recovery against the `pg_dump` taken at window start is the safe path for any data that mutated after the cutover.
+
+**Client-continuity claim:** the only combinations that guarantee client continuity are the documented ones. Specifically:
+- The `post-R05b + post-R14d` frontend paired with the `--room-cutover-authoritative=false` (post-R14b / pre-R14c) server is safe to deploy before the cutover window — both global and room surfaces are live.
+- The `post-R14c + post-R14d` frontend paired with the `--room-cutover-authoritative=true` (post-R14c) server is the production cutover state — legacy surfaces return `410` and clients see the documented surface.
+- A frontend relying on legacy global routes paired with a post-R14c server will receive `410` from the legacy surfaces. The compatibility matrix forbids this combination.
+This is the client-continuity guarantee.
 
 ### Deployment, backup, and rollback gates
 
-- Required PostgreSQL `pg_dump` BEFORE R14c cutover; retained ≥30 days (mirrors ADR 002 §9).
+- Required PostgreSQL `pg_dump` BEFORE R14c cutover; retained ≥30 days (mirrors ADR 002 §9). The `pg_dump` is the source of truth for the immediately pre-cutover production state.
 - Application downtime / maintenance window is required during Phase B.
 - `cmd/room-cutover plan` (read-only) and `cmd/room-cutover up --dry-run` MUST be run before any commit.
 - Target verification (`verifyWithinTx` + `cmd/room-cutover verify` post-commit) MUST pass before R14c accepts writes on the room-authoritative version.
-- Migration succeeds but application startup fails: the documented rollback entry point is to restart the pre-R14c binary (which still serves legacy routes). The room tables are then partially populated from the R14b run; forward recovery against the `pg_dump` is the safe path.
+- Migration succeeds but application startup fails: the documented rollback entry point is to restart the **immediately pre-cutover production release** of the binary (the same build deployed at window open, with `--room-cutover-authoritative=false`); the legacy repositories resume serving real responses. The room tables in the target release are populated by the prior `cmd/room-cutover up` run; mutations since that point would need forward recovery against the `pg_dump`.
+- The rollback target is **not** an "R03 binary". The R03 release is the SQLite-to-PostgreSQL migration release; it is unrelated to the room cutover and is not a valid rollback target for R14c.
 - **Explicit warning:** rollback after new room writes may require forward recovery or data reconciliation; the compatibility matrix is the deployment-time safeguard.
 
 ## Future sprint sequence
 
+Sprint execution order is fixed: **`R05b → R09h → R14b → R14d → R14c → R14e`** (with R14e only after the verified rollback window). Reordering is NOT permitted within this sprint's scope.
+
 | Sprint | Scope | Notes |
 | --- | --- | --- |
 | **R05b — Room entry / player-lease UI** | Frontend only (no new HTTP routes; uses the existing R04 / R06 / R11a routes). Adds SPA client methods `api.createRoom` / `api.listRooms` / `api.getRoom` / `api.joinRoom` / invite + `api.claimPlayerLease` / `api.heartbeatPlayerLease` / `api.releasePlayerLease` / `api.getPlayerLease`; exposes them as actual room create / list / join / invite-redeem / lease-claim UI. **BLOCKING PREREQUISITE for R14c** — without it, retiring `/api/queue` / `/ws` etc. strands users on a global dashboard that has no way to enter a room. | The existing backend routes are already registered (per `cmd/server/main.go:413–486`); R05b only wires the SPA. |
-| **R09h — Room vote-to-prioritize parity** | Backend room-vote-prioritize parity. Adds `POST /api/rooms/{slug}/vote/prioritize`. **BLOCKING PREREQUISITE for R14c** to retire `/api/vote/prioritize` only. | Reuses existing `room_queue_song_prioritized` event. No new WS event constant. |
-| **R14b — room-cutover mechanism** | Backend-only. New dedicated CLI `cmd/room-cutover` with `plan` / `up` / `verify` / `abort` subcommands. New marker table `room_cutover_marker`. Source-to-target copy (legacy → room). `--room-cutover-authoritative=false` build flag (default `false`). Pre-commit + post-commit verification. **NO global route removal. NO frontend changes.** R14b's binary ships the mechanism and verifies it; R14b's gate MUST pass before R14c can run. | Does NOT reuse R03's CLI or `migration_marker`. R03's marker is preserved untouched. |
-| **R14c — coordinated production cutover** | Backend production cutover (Phase B). Maintenance window + restart with `--room-cutover-authoritative=true` binary + run `cmd/room-cutover up` against the live DB. Unregisters the legacy global `/api/queue/...` / `/api/vote/skip` / `/api/autoqueue/...` routes and the global `/ws` endpoint. Pairs with the R14d + R05b frontend in the deployment compatibility matrix. | `/api/vote/prioritize` is excluded from the unregistration set until R09h is accepted; the cutover binary may retire the OTHER legacy routes without R09h. |
-| **R14d — frontend global-path removal** | Frontend only. Removes / redirects `DashboardView`; clears `globalStore.queueState` / `voteSessions` / `autoQueueConfig`; closes global `WebSocketClient`; preserves `currentUser` + `roomQueues[slug]`. | Assumes R05b has landed. |
-| **R14e — schema cleanup** | Backend only. Drops legacy `queue_state`, `activities`, `auto_queue_config`, `play_history`; reduces `0001_initial.up.sql` to account-scoped tables only; bumps schema v8 → v9 (only if R14e accepts). | Runs after the verified rollback window AND after no runtime path references the legacy tables. Historical migration files remain on disk. |
+| **R09h — Room vote-to-prioritize parity** | Backend room-vote-prioritize parity. Adds `POST /api/rooms/{slug}/vote/prioritize`. **BLOCKING PREREQUISITE for the ENTIRE R14c cutover** — R14c cannot run while `/api/vote/prioritize` is still live (a partial cutover would let that global mutation continue writing legacy global queue state after room state is declared authoritative). | Reuses existing `room_queue_song_prioritized` event. No new WS event constant. |
+| **R09i — Room activity runtime parity** *(new)* | Backend-only slice that wires existing room mutations to append rows to the new `room_activities` table. Replaces the global dashboard's silent activity append (today the global `activities` table is fed from vote / priority / queue mutations in `usecase/vote/interactor.go`, `usecase/priority/interactor.go:81`, `usecase/queue/interactor.go`; the room runtime has no equivalent). After R09i, the room frontend shows live activity through the existing `RoomActivityRepository.AddActivity` path; the per-room mutators call it. **BLOCKING PREREQUISITE for R14c** unless the Product Owner explicitly approves retiring live activity logging entirely. See § PO acceptance blockers #1. | The `room_activities` table itself is built in R14b; R09i wires the call sites and the read surface. |
+| **R14b — room-cutover mechanism** | Backend-only. New dedicated CLI `cmd/room-cutover` with `plan` / `up` / `verify` subcommands (NO `abort` — see § CLI flags). New marker table `room_cutover_marker`. Source-to-target copy (legacy → room). NEW migration `0009_room_activities.up.sql` (additive; schema v8 → v9). Build flag `--room-cutover-authoritative=false` (default). Pre-commit + post-commit verification. **NO global route retirement. NO frontend changes.** R14b's binary ships the mechanism and verifies it; R14b's gate MUST pass before R14d can run. | Does NOT reuse R03's CLI or `migration_marker`. R03's marker is preserved untouched. |
+| **R14d — frontend global-path removal** | Frontend-only. Removes / redirects `DashboardView`; clears `globalStore.queueState` / `voteSessions` / `autoQueueConfig`; closes global `WebSocketClient`; preserves `currentUser` + `roomQueues[slug]`; deploys the post-R14d SPA bundle alongside the (still `authoritative=false`) server. | Assumes R05b + R09h + R14b have landed. **R14d ships BEFORE R14c** so that the post-R14c binary has a compatible frontend bundle to pair with. |
+| **R14c — coordinated production cutover** | Backend production cutover (Phase B). Maintenance window + restart with `--room-cutover-authoritative=true` binary + run `cmd/room-cutover up` against the live DB. The cutover binary retires ALL listed legacy global `/api/queue/...` / `/api/vote/...` / `/api/autoqueue/...` routes and the global `/ws` endpoint in one atomic step — `/api/vote/prioritize` is INCLUDED in the retirement set because R09h has landed. The room runtime is the only authoritative path. Pairs with the post-R14d + R05b frontend in the deployment compatibility matrix. | Requires R05b + R09h + R09i + R14b + R14d all accepted. Blocks until each prerequisite gate has passed. |
+| **R14e — schema cleanup** | Backend only. Lands `0010_drop_legacy_global_tables.up.sql` (a SEPARATE forward migration that drops legacy `queue_state`, `activities`, `auto_queue_config`, `play_history`); bumps schema v9 → v10. Historical migration files `0001`..`0009` remain on disk byte-for-byte; `0001_initial.up.sql` is NEVER rewritten. | Runs after the verified rollback window AND after no runtime path references the legacy tables. |
 
 Sprint names may be renamed if evidence requires it, but R05b / R09h / R14b / R14c / R14d / R14e MUST NOT be combined; migration, destructive cleanup, frontend rewrite, frontend entry UX, and vote-prioritize parity must remain independently reviewable.
 
@@ -352,10 +370,10 @@ R14a documents the expected test inventory; tests are NOT in R14a scope.
 - Idempotency: re-run = no-op exit 0; hash drift = reject.
 - Archived-room / missing-host failures map to explicit sentinels.
 
-### Errors and the route-unregistered responses
+### Errors and the route-retired responses
 
-- After R14c, unregistered legacy global REST routes and `/ws` return HTTP 404 from the mux because the handlers are not registered.
-- The proposed envelope body for documentation purposes (NOT carried on the wire — the mux 404 is the actual response):
+- After R14c, the legacy global REST routes and `/ws` return `410 Gone` via repository-free tombstone handlers wired at the mux entry. **`410 Gone` is the approved retirement posture** (not `404`). The handlers carry no repository wiring and no WS hub mutation logic.
+- The route-retired envelope (the actual wire response):
 
 ```json
 {
@@ -366,8 +384,20 @@ R14a documents the expected test inventory; tests are NOT in R14a scope.
 ```
 
 - Clients discover the migrated room through the standard `GET /api/rooms` listing endpoint, which is the documented successor-discovery surface.
-- The HTTP `Link: </api/rooms>; rel="successor-version"` header MAY be added if the Product Owner wants explicit discovery.
-- The first R14a draft's mistake was carrying a concrete `successor: "/api/rooms/{slug}/..."` value in the envelope; R14a drops that field. The successor room is discovered, not pre-supplied.
+- The HTTP `Link: </api/rooms>; rel="successor-version"` header IS added in the tombstone handler response so clients can navigate to the discovery surface without out-of-band knowledge.
+- The global `/ws` upgrade is rejected with `410 Gone` during the HTTP phase of the request (the upgrade handler returns the HTTP `410` before the WebSocket handshake completes) — this is the tombstone-handler behaviour for `/ws`, not a separate `404`-from-unregister path.
+- The earlier R14a draft's mistake was describing retirement as route unregistration returning `404`; R14a explicitly reverts to `410 Gone` with repository-free tombstone handlers. The retirement is a stable, machine-readable surface.
+- No concrete `successor: "/api/rooms/{slug}/..."` field appears in the envelope. The successor room is discovered through `GET /api/rooms`, not pre-supplied.
+
+### Migration CLI flags (R14b)
+
+- `--room-slug=<slug>` (required): the slug of the migrated room. Server-side regex / length rules mirror the existing room-slug validation in `internal/domain/repository/room_repository.go`.
+- `--room-name=<name>` (required): the displayed room name. The room model permits the name to differ from the slug; R14a recommends allowing them to differ, mirroring the existing room model. If a future migration rules this out, the validation becomes an explicit equality check.
+- `--host-user-id=<positive integer>` (required): the canonical PostgreSQL `users.id` (BIGINT) of the initial host. PK lookup; no inference from joiners / roles / emails / lease / frontend.
+- `--dry-run` (optional; default false): same as the body of `up` but no writes commit; produces the same report as `plan`.
+- The CLI MUST reject unknown / extra positional arguments and unknown flags. Idempotent re-run requires only the three flags above (and `verify` uses no flags).
+- The CLI MUST NOT accept `--force` / `--reset` / `--allow-hash-drift`. Hash drift fails the migration.
+- The CLI MUST NOT expose a subcommand to release another process's advisory lock (PostgreSQL session locks belong to the connection that acquired them). See § Atomicity and idempotency for release semantics.
 
 ### Migration report fields
 
@@ -376,7 +406,7 @@ R14a documents the expected test inventory; tests are NOT in R14a scope.
 - SHA256 hashes per migrated table.
 - Sequence names resynced.
 - Durations per phase.
-- `legacy_id_offset` for `room_play_history`.
+- `legacy_id_offset` (history-id offset formula): `legacy_id_offset = COALESCE(MAX(room_play_history.id), 0)` — the maximum existing `room_play_history.id` at the start of the migration; the copy shifts every legacy `play_history.id` by this offset and inserts it into `room_play_history` with `id + legacy_id_offset`. The migrator records the offset in the marker record so a re-run or rollback-window reference uses the same shift. (This is the simpler rule the Architect review called out; the sprint document previously had a more elaborate formula — the simpler `MAX(id)` rule is the agreed contract.)
 - `binary_build_sha` for the marker.
 - No email, OAuth tokens, display names, session tokens, credentials, cookies, or `Authorization` headers.
 
@@ -384,17 +414,23 @@ R14a documents the expected test inventory; tests are NOT in R14a scope.
 
 - R05b: frontend tests for `api.createRoom` / `api.listRooms` / `api.getRoom` / invite / lease methods; UI tests for the entry surfaces.
 - R09h: `room_vote_prioritize` interactor tests (session create, vote, threshold, expiry); HTTP handler tests (auth, body shape, success, 400 / 403 / 404 / 409 mapping); race-sensitive tests; WebSocket event emission tests (`room_vote_updated`, `room_vote_resolved`, `room_queue_song_prioritized`).
-- R14b: focused migration tests — `room_activities` lossless copy; `room_queue_state` JSON round-trip + SHA256; sequence resync; idempotent re-run (no-op); hash-drift rejection; offline CLI smoke; advisory-lock conflict; transaction rollback on mid-flight failure; report PII redaction; dry-run output; legacy-id-offset calculation correctness.
+- R09i: room-activity runtime parity tests — verify that the room mutators (queue / playback / vote / auto-queue) call `RoomActivityRepository.AddActivity` with the documented shapes; verify that the read surface exposes `room_activities` rows to the RoomView panel; race-sensitive tests.
+- R14b: focused migration tests — `room_activities` lossless copy; `room_queue_state` JSON round-trip + SHA256; sequence resync; idempotent re-run (no-op); hash-drift rejection; offline CLI smoke; advisory-lock conflict; transaction rollback on mid-flight failure; report PII redaction; dry-run output; legacy-id-offset calculation correctness; marker-inserted-in-same-transaction-as-room-and-host-and-copy test (kill the cutover mid-flight, restart the DB, verify NO partial state); CLI flag validation (`--room-slug` / `--room-name` / `--host-user-id`).
 - R14b repository tests: `RoomActivityRepository.AddActivity` / `GetActivities`.
-- R14c: HTTP 404 tests for unregistered routes; `/ws` upgrade rejection; per-room WebSocket event inventory unchanged; success-path routing.
-- R14d: frontend tests for `globalStore` clearing on cutover; `currentUser` preservation; `roomQueues[slug]` preservation; global `WebSocketClient` close; toast / redirect for unregistered responses; `DashboardView` removal.
-- R14e: focused cleanup tests; legacy-table-drop verifies no runtime path references them; schema version bumped to 9.
+- R14c: HTTP `410 Gone` envelope tests; `Link` header tests; `/ws` HTTP-phase rejection returning `410`; per-room WebSocket event inventory unchanged; success-path routing; atomic retirement of all listed legacy routes in one step (test that the cutover binary enables `410` for ALL listed legacy routes simultaneously, NOT a partial cutover).
+- R14d: frontend tests for `globalStore` clearing on cutover; `currentUser` preservation; `roomQueues[slug]` preservation; global `WebSocketClient` close; toast / redirect for `410` responses; `DashboardView` removal.
+- R14e: focused cleanup tests; legacy-table-drop verifies no runtime path references them; schema version bumped to 10; `room_play_history` is NOT touched by the `0010` migration.
 
 ## Schema-version plan
 
-The schema version stays **v8** throughout R14a, R14b, R14c, R14d, and during the rollback window after R14c. The v9 bump lands in **R14e** and only if R14e accepts destructive cleanup. If the rollback window must be extended or a forward-recovery path is needed, v9 is delayed.
+The migration runner (`internal/infrastructure/persistence/migrations/postgres/...`) reports the applied numbered migration as the schema version; adding a new migration necessarily bumps the version. **No sprint can both add a migration and keep the version unchanged.**
 
-**No historical migration files are removed by R14a.** All of `0001_initial.up.sql` .. `0008_room_chat_messages.up.sql` remain on disk; a future `0009_room_activities.up.sql` (added in R14b) is additive. R14e may drop legacy tables and reduce the `0001_initial.up.sql` content to only the account-scoped tables (`users`, `user_sessions`, `priority_transactions`) so the historical migration files still describe what they originally created.
+- **Schema at start of R14a: v8** (last applied: `0008_room_chat_messages.up.sql`; current schema-version report = 8).
+- **R14b lands `0009_room_activities.up.sql`** — a NEW additive migration that creates the `room_activities` table + index. The migration runner bumps the schema version. **Schema after R14b: v9.** The schema version reported at the end of the R14b verification gate MUST be 9.
+- **R14c is a runtime + binary-flag cutover; it does NOT add a migration.** Schema during R14c and during the rollback window: v9.
+- **R14e lands `0010_drop_legacy_global_tables.up.sql`** which drops the legacy `queue_state`, `activities`, `auto_queue_config`, and `play_history` tables. Bumps to **v10**. Only if R14e accepts destructive cleanup. If the rollback window must be extended or forward recovery is required, v10 is delayed.
+
+**Historical migration files are never rewritten.** `0001_initial.up.sql` .. `0008_room_chat_messages.up.sql` are preserved on disk byte-for-byte; R14a adds new files only (no edits to existing ones). R14e does NOT modify `0001_initial.up.sql` to remove rows — it instead lands `0010_drop_legacy_global_tables.up.sql` as a SEPARATE forward migration that drops the legacy tables. The historical files remain auditable. The `0001` file's contents continue to describe what `0001` originally created; the v10 state is the cumulative result of running `0001`..`0010` in order.
 
 ## ADR reconciliation
 
@@ -404,27 +440,33 @@ R14a supersedes parts of ADR 001 and the R06-fold attribution in ADR 002 §11/§
 
 These are explicit blockers that the Product Owner must sign off on before R14c can run (and before R14e can land):
 
-1. **Live room-activity read parity.** R14a designs the `room_activities` table and the repository contract; **live read parity (a `RoomView` activity panel that replaces the global dashboard's activity surface) is NOT in this sprint and is NOT required for R14c or R14d**. If the Product Owner wants read parity in the room frontend before accepting R14c, it must be added as a separate frontend task and its scope must be settled in a focused sprint before R14d (or R14c depending on ordering). Confirming acceptance of R14c without read parity may strand users who used the global activity surface.
-2. **Slug-collision resolution.** If the migrated room slug already exists in `rooms` at cutover time with a different identity, the migrator fails loudly. The recovery path is operator-driven (rename the existing room and re-run, or pick a different slug). No automatic rename or proxy.
-3. **Route-unregistered response posture.** After R14c, unregistered legacy routes return HTTP 404 from the mux. The optional envelope body is `{error, code: "global_contract_retired", documentation}` (no concrete `successor` value). Clients discover the migrated room via `GET /api/rooms`. The HTTP `Link: </api/rooms>; rel="successor-version"` header is optional.
-4. **Rollback posture.** Rollback after the binary restart with `--room-cutover-authoritative=true` is **NOT a transparent rollback** — it requires either restarting the pre-R14c binary (which still serves legacy routes; the room data is partially populated) or a forward-recovery path against the `pg_dump`. The compatibility matrix in § Deployment compatibility matrix is the deployment-time safeguard. The Product Owner must accept this posture.
-5. **R09h landing prerequisite for `/api/vote/prioritize` retirement.** Until R09h is accepted, R14c keeps `/api/vote/prioritize` registered. The cutover binary may retire the OTHER legacy routes but explicitly EXCLUDES `/api/vote/prioritize` from the unregistration set.
-6. **R05b landing prerequisite for user-facing cutover.** Until R05b is accepted, no user can create / list / join rooms from the SPA. R14c is therefore blocked.
+1. **Room-activity runtime parity (R09i).** R14a designs the `room_activities` table and the repository contract; R09i (a separate future backend-only sprint) wires the room runtime to append rows to `room_activities` on the same events that the global runtime today appends to `activities` (vote / priority / queue mutations in `usecase/vote/interactor.go`, `usecase/priority/interactor.go:81`, `usecase/queue/interactor.go`). **R09i is a BLOCKING PREREQUISITE for R14c** unless the Product Owner explicitly approves retiring live activity logging entirely (separate sign-off recorded on Issue #20). The frontend activity panel may be a later follow-up; the runtime write path is the slice R09i ships. The R09i gate prevents the global write path (which feeds `activities`) from running concurrently with the room runtime (which would feed `room_activities`) — the cutover would otherwise lose activity write continuity for the room.
+2. **Live room-activity read parity (frontend panel).** May be deferred as a separate frontend task; not in scope for R09i or R14a. If the Product Owner wants read parity in the room frontend before accepting R14c, it must be added as a separate frontend task and its scope settled in a focused sprint before R14d.
+3. **R09h landing prerequisite for the entire R14c cutover.** Until R09h is accepted, R14c cannot run at all — R14c is atomic across the listed legacy routes. A partial cutover where `/api/vote/prioritize` is live while other legacy routes are retired would let the surviving legacy mutation continue writing legacy global queue state after room state is declared authoritative. R14c therefore blocks on R09h, not just `/api/vote/prioritize`.
+4. **R05b landing prerequisite for user-facing cutover.** Until R05b is accepted, no user can create / list / join rooms from the SPA. R14c is blocked.
+5. **Route-retirement response posture.** After R14c, the listed legacy routes return `410 Gone` via repository-free tombstone handlers (NOT `404` from unregistration). The envelope is `{error, code: "global_contract_retired", documentation}` plus the HTTP `Link: </api/rooms>; rel="successor-version"` header. Clients discover the migrated room via `GET /api/rooms`.
+6. **Rollback posture.** Rollback after the binary restart with `--room-cutover-authoritative=true` is **NOT a transparent rollback** — it requires restarting the **immediately pre-cutover production release** (the same server binary deployed at window open, with `--room-cutover-authoritative=false`). The room tables in the target release are populated by the prior `cmd/room-cutover up` run; mutations since that point would need forward recovery against the `pg_dump`. The compatibility matrix in § Deployment compatibility matrix is the deployment-time safeguard. **The rollback target is NOT an "R03 binary".** The R03 release is the unrelated SQLite-to-PostgreSQL migration.
+7. **Slug-collision resolution.** If the migrated room slug already exists in `rooms` at cutover time with a different identity, the migrator fails loudly. The recovery path is operator-driven (rename the existing room and re-run, or pick a different slug). No automatic rename or proxy.
+8. **Schema-version plan approval.** The Product Owner must approve the schema-version plan in § Schema-version plan (v8 → v9 in R14b; v9 → v10 in R14e; historical migrations preserved on disk).
 
 ## Items already settled (informational)
 
-- ID-collision handling for `room_play_history` (see § room_play_history id-collision handling).
+- ID-collision handling for `room_play_history` (see § room_play_history id-collision handling) — `legacy_id_offset = MAX(room_play_history.id)` is the agreed simple rule (see § Migration CLI flags).
 - Account-table posture: no recopy (see § Source-to-target mapping).
-- Schema version stays v8 in R14a; v9 only if R14e lands.
-- Historical migration files preserved on disk.
+- Schema version plan: v8 → v9 in R14b (with the new `0009_room_activities.up.sql` migration); v9 → v10 in R14e (with the new `0010_drop_legacy_global_tables.up.sql` migration). Historical migrations preserved on disk; `0001_initial.up.sql` is NEVER rewritten.
 - The R03 `cmd/migrate-data` + `migration_marker` is preserved untouched and is the SQLite-to-PostgreSQL migrator; it is NOT reused for the room cutover. R14b adds a SEPARATE `cmd/room-cutover` + `room_cutover_marker`.
-- Per-room `room_play_history` 50-row cap is enforced in `roomautoqueue`, matching R09f.
+- Per-room `room_play_history` 50-row cap is enforced in `roomautoqueue`, matching R09f. **The R14e `0010_drop_legacy_global_tables.up.sql` migration drops the legacy global `play_history` table only — `room_play_history` is NOT a legacy table and is NOT touched.**
 - The `entity.Queue` JSON conversion contract uses the default `encoding/json` tagged-field round-trip; no custom `MarshalJSON` / `UnmarshalJSON` methods are assumed.
-- The queue-prioritize / vote-prioritize distinction: global `/api/queue/prioritize` has a room equivalent (`/api/rooms/{slug}/queue/prioritize`, R07d) and retires in R14c without a parity sprint; only `/api/vote/prioritize` needs R09h.
-- WebSocket: `/ws` is unregistered in the cutover build, returning HTTP 404 from the mux. No `410 Gone` is claimed for `/ws`.
+- The queue-prioritize / vote-prioritize distinction: global `/api/queue/prioritize` has a room equivalent (`/api/rooms/{slug}/queue/prioritize`, R07d) and retires in R14c without a parity sprint; only `/api/vote/prioritize` needs R09h, and only R09h (not just `/api/vote/prioritize`) is a blocking prerequisite for the entire R14c cutover.
+- Marker is inserted in the same transaction as the room, the host membership, and the copied state. There is NO post-commit write of the marker; a mid-flight crash leaves NO partial state.
+- `cmd/room-cutover` has no `abort` subcommand. PostgreSQL session locks belong to the connection that acquired them; another process cannot release them. Lock release happens through connection close (process exit, `SIGTERM`, `Ctrl-C`).
+- Retirement posture: `410 Gone` via repository-free tombstone handlers (NOT `404` from route unregistration). The global `/ws` upgrade is rejected with `410` in the HTTP phase.
 - Per-room sequence numbers restart from the per-room hub's own counter.
 - The cutover CLI is offline; the application is shut down during Phase B.
 - A hidden default-room `/ws` is forbidden.
+- The cutover binary retires ALL listed legacy global routes in one atomic step — no partial cutover.
+- Sprint execution order is fixed: `R05b → R09h → R14b → R14d → R14c → R14e`.
+- R09i (room-activity runtime parity) is a blocking prerequisite for R14c unless the Product Owner explicitly waives it.
 
 ## Issue #17 requirement mapping
 
