@@ -1621,45 +1621,115 @@ describe('RoomView (R11a final corrective pass)', () => {
     globalStore.clearUser()
   })
 
-  it('stale onGap finalization does not recreate a cleared old-room entry', async () => {
+  it('stale onGap finalization does not recreate a cleared old-room entry (full lifecycle)', async () => {
+    // R11a (final lifecycle correction): exercise the actual
+    // onGap path end-to-end, not just the IfExists mutators. The
+    // old room's WebSocket client fires onGap; the recovery GETs
+    // settle while the user navigates to a new room (which clears
+    // the old room entry and bumps the seqGapGeneration token).
+    // The finally block must NOT recreate the old room entry,
+    // must NOT mutate the new room's state, and must NOT raise a
+    // stale toast.
     apiMock.getRoomAutoQueueStatus.mockResolvedValue({ enabled: false, strategy: 'related' })
     apiMock.getRoomMembers.mockResolvedValue({ members: [] })
 
     globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
 
-    // Mount at /rooms/lobby, seed the entry, then PRE-CLEAR the
-    // lobby entry directly. This simulates the post-teardown
-    // state where a recovery GET's stale resolution lands.
+    // Mock ordering mirrors the working "onGap keeps existing
+    // chat rows" test pattern. Mock queue per call (vi consumes
+    // onceImpls in FIFO order):
+    //   1. lobby sync GET  → empty list (chat)
+    //   2. onGap queue GET → 500 reject (queue)
+    //   3. onGap chat GET  → 500 reject (chat)
+    //   4. lounge sync GET → new-room id 200 (chat)
+    // The default fall-back (mockResolvedValue({messages:[]}))
+    // covers any extra calls.
+    apiMock.getRoomChatMessages.mockResolvedValueOnce({ messages: [] })
+    apiMock.getRoomQueue.mockRejectedValueOnce(Object.assign(new Error('queue boom'), { status: 500 }))
+    apiMock.getRoomChatMessages.mockRejectedValueOnce(Object.assign(new Error('chat boom'), { status: 500 }))
+    apiMock.getRoomChatMessages.mockResolvedValueOnce({ messages: [
+      { id: 200, room_slug: 'lounge', sender: { user_id: 9, display_name: 'New' }, content: 'lounge-fresh', created_at: '2026-01-01T00:00:00Z' },
+    ] })
+
     const { wrapper, router } = mountRoomView()
     await router.push('/rooms/lobby')
+    // The slug watcher's body is async (`await seedStateFromRest`
+    // etc.); drain extra microtasks so the lobby's WS client is
+    // built before driveSync fires.
+    await flushPromises()
     await flushPromises()
     driveSync()
     await flushPromises()
+
+    // Capture the WS client the current mount wired (i.e. the
+    // one that owns this slug's onGap). wsFactoryMock.lastInstance
+    // may be a client from a previous test in the suite; using
+    // the captured reference guarantees we're driving THIS
+    // mount's onGap.
+    const lobbyClient = wsFactoryMock.lastInstance
+
+    // Pre-condition: the lobby entry exists and its recovery
+    // flag is wired by the new IfExists init call.
     expect(globalStore.roomQueues.lobby).toBeTruthy()
 
-    // Simulate teardown: clear the entry, then fire a stale
-    // onGap directly against the store mutators. This is what
-    // happens when a stale-resolution path lands AFTER the slug
-    // watcher has cleared the old entry. The IfExists variants
-    // must NOT recreate the entry.
-    globalStore.clearRoomQueueState('lobby')
+    // Fire onGap. Both recovery GETs reject synchronously; the
+    // queue IIFE's catch path would normally toast, but the
+    // targetSlug !== slug.value guard at the top of the catch
+    // will short-circuit it once the user navigates away.
+    const gapPromise = lobbyClient.onGap({ slug: 'lobby', lastSeqNum: 1, seqNum: 3 })
+
+    // Navigate to the new slug BEFORE awaiting the onGap
+    // promise. The slug watcher runs teardownCurrentClient,
+    // which:
+    //   - disconnects the lobby ws client
+    //   - clears the lobby entry from the store
+    //   - bumps the seqGapGeneration token
+    //   - resets suppressSeqGap
+    await router.push('/rooms/lounge')
+    await flushPromises()
+    driveSync('lounge')
+    await flushPromises()
+
+    // Confirm the old room's entry was cleared by teardown and
+    // the new room established its own entry.
+    expect(globalStore.roomQueues.lobby).toBeUndefined()
+    expect(globalStore.roomQueues.lounge).toBeTruthy()
+    expect(globalStore.roomQueues.lounge.messages.map((m) => m.id)).toEqual([200])
+
+    // Await the original lobby onGap promise. Both IIFEs have
+    // already settled (their GETs were mocked to reject), and
+    // the finally block runs.
+    await gapPromise
+    await flushPromises()
+
+    // Old-room invariants:
+    //   - the lobby entry MUST remain absent. Neither the IIFEs'
+    //     IfExists mutators NOR the finally block's IfExists
+    //     recoveryInFlight may have recreated it.
     expect(globalStore.roomQueues.lobby).toBeUndefined()
 
-    // Direct invocation of the IfExists mutators with the stale
-    // targetSlug — these are the same paths the onGap chat IIFE
-    // uses, isolated here so the test does not depend on the
-    // onGap navigation race.
-    globalStore.setRoomChatMessagesIfExists('lobby', [
-      { id: 1, room_slug: 'lobby', sender: { user_id: 1, display_name: 'Me' }, content: 'stale', created_at: '2026-01-01T00:00:00Z' },
-    ])
-    globalStore.setRoomQueueStateIfExists('lobby', { songs: [{ id: 'stale' }], current_index: 0, current_song: { id: 'stale' }, status: 'paused', queue: [], history: [] })
-    globalStore.setRoomQueueErrorIfExists('lobby', 'stale error')
+    // New-room invariants:
+    //   - the lounge entry remains present.
+    //   - its messages slice is unchanged.
+    //   - its queue state is unchanged.
+    //   - its recoveryInFlight is owned by its own onGap path;
+    //     the stale lobby finally MUST NOT have touched it.
+    expect(globalStore.roomQueues.lounge).toBeTruthy()
+    expect(globalStore.roomQueues.lounge.messages.map((m) => m.id)).toEqual([200])
+    expect(globalStore.roomQueues.lounge.state.songs || []).toEqual([])
+    expect(globalStore.roomQueues.lounge.recoveryInFlight).not.toBe(true)
+    // No stale lobby error visible on the new room.
+    expect(globalStore.roomQueues.lounge.lastError).toBeNull()
+    expect(globalStore.roomQueues.lounge.removed || false).toBe(false)
+    expect(globalStore.roomQueues.lounge.archived || false).toBe(false)
 
-    // Explicit old-room + new-room assertions: the old entry
-    // remains absent (no recreation), and the new room (which
-    // does not yet exist in the store) is unaffected.
-    expect(globalStore.roomQueues.lobby).toBeUndefined()
-    expect(globalStore.roomQueues.lounge).toBeUndefined()
+    // No stale toast was raised. The two error branches inside
+    // the IIFEs are gated on the same stale-guard, so neither
+    // a "could not resync" toast nor a 401/403/404/409 toast
+    // should have been emitted. The success path never toasts.
+    expect(toastMock.error).not.toHaveBeenCalled()
+    expect(toastMock.info).not.toHaveBeenCalled()
+    expect(toastMock.success).not.toHaveBeenCalled()
 
     wrapper.unmount()
     globalStore.clearUser()

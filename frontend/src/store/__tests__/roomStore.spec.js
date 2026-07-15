@@ -508,4 +508,38 @@ describe('Room chat store (R11a deferred lifecycle follow-up)', () => {
     globalStore.setRoomChatMessagesIfExists('lobby', { messages: [] })
     expect(globalStore.roomQueues.lobby.messages.length).toBe(1)
   })
+
+  it('setRoomQueueRecoveryInFlightIfExists is a no-op when the slug has no entry', () => {
+    // The room entry was cleared by teardown / slug change. A
+    // stale onGap finalization must not recreate it.
+    globalStore.setRoomQueueRecoveryInFlightIfExists('lobby', true)
+    globalStore.setRoomQueueRecoveryInFlightIfExists('lobby', false)
+    expect(globalStore.roomQueues.lobby).toBeUndefined()
+  })
+
+  it('setRoomQueueRecoveryInFlightIfExists is a no-op for an empty slug', () => {
+    globalStore.setRoomQueueConnected('lobby', true)
+    globalStore.setRoomQueueRecoveryInFlightIfExists('', true)
+    expect(globalStore.roomQueues.lobby.recoveryInFlight).toBe(false)
+  })
+
+  it('setRoomQueueRecoveryInFlightIfExists mutates recoveryInFlight in place when the entry exists', () => {
+    globalStore.setRoomQueueConnected('lobby', true)
+    expect(globalStore.roomQueues.lobby.recoveryInFlight).toBe(false)
+    globalStore.setRoomQueueRecoveryInFlightIfExists('lobby', true)
+    expect(globalStore.roomQueues.lobby.recoveryInFlight).toBe(true)
+    globalStore.setRoomQueueRecoveryInFlightIfExists('lobby', false)
+    expect(globalStore.roomQueues.lobby.recoveryInFlight).toBe(false)
+  })
+
+  it('setRoomQueueRecoveryInFlightIfExists does not touch other room entries', () => {
+    globalStore.setRoomQueueConnected('lobby', true)
+    globalStore.setRoomQueueRecoveryInFlightIfExists('lobby', true)
+    // The IfExists variant does not ensure a sibling entry —
+    // it is a no-op for a slug whose entry does not exist.
+    globalStore.setRoomQueueRecoveryInFlightIfExists('lounge', true)
+    expect(globalStore.roomQueues.lounge).toBeUndefined()
+    // lobby is still present and recoveryInFlight=true.
+    expect(globalStore.roomQueues.lobby.recoveryInFlight).toBe(true)
+  })
 })

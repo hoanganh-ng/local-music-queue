@@ -519,7 +519,13 @@ async function onGap() {
   if (suppressSeqGap) return
   const targetSlug = slug.value
   if (!targetSlug) return
-  globalStore.setRoomQueueRecoveryInFlight(targetSlug, true)
+  // R11a (final lifecycle correction): use the IfExists variant
+  // so a stale onGap that lands AFTER the slug watcher has cleared
+  // the old room entry (or AFTER a teardown) does NOT recreate
+  // the entry with a default `recoveryInFlight = true`. The
+  // standard mutator calls _ensureRoomEntry, which would silently
+  // create a phantom old-room entry on a stale call.
+  globalStore.setRoomQueueRecoveryInFlightIfExists(targetSlug, true)
   // R11a (corrective pass): queue recovery and chat history
   // recovery are TWO INDEPENDENT operations on every accepted
   // onGap. They each succeed or fail on their own; one failure
@@ -594,7 +600,25 @@ async function onGap() {
   try {
     await Promise.allSettled([queuePromise, chatPromise])
   } finally {
-    globalStore.setRoomQueueRecoveryInFlight(targetSlug, false)
+    // R11a (final lifecycle correction): onGap's finally only
+    // finalizes the recovery flag when both invariants hold:
+    //   1. the connection's generation token is still current
+    //      (no teardown or slug change happened during the
+    //      recovery)
+    //   2. the targetSlug still matches the active slug (the
+    //      user did not navigate away)
+    // A stale recovery that satisfies neither invariant MUST
+    // NOT:
+    //   - recreate the cleared old room entry (the standard
+    //     mutator's _ensureRoomEntry would do that), nor
+    //   - clear / modify the NEW room's recovery state, nor
+    //   - show a stale toast (toasts are gated inside the
+    //     individual IIFEs on the same invariants).
+    // The IfExists variant is the entry-mutating primitive and
+    // is a no-op when the slug's entry was already cleared.
+    if (myGapGeneration === seqGapGeneration && targetSlug === slug.value) {
+      globalStore.setRoomQueueRecoveryInFlightIfExists(targetSlug, false)
+    }
   }
 }
 

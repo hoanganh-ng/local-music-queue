@@ -287,6 +287,19 @@ export const globalStore = reactive({
     this._ensureRoomEntry(slug).recoveryInFlight = !!inFlight
   },
 
+  // R11a (final lifecycle correction): write-if-exists variant
+  // for the onGap finalization path. The standard mutator above
+  // calls _ensureRoomEntry, which would recreate a cleared
+  // old-room entry if a stale recovery lands after teardown.
+  // The IfExists variant is a no-op when the slug's entry has
+  // already been removed.
+  setRoomQueueRecoveryInFlightIfExists(slug, inFlight) {
+    if (!slug) return
+    const entry = this.roomQueues[slug]
+    if (!entry) return
+    entry.recoveryInFlight = !!inFlight
+  },
+
   setRoomQueueSeq(slug, seq) {
     this._ensureRoomEntry(slug).lastSeqNum = seq
   },
