@@ -211,7 +211,7 @@ The migration runner reports the applied numbered migration as the schema versio
 - R14e lands `0010_drop_legacy_global_tables.up.sql` — drops **only** the four legacy global tables: `queue_state`, `activities`, `auto_queue_config`, `play_history`. Schema becomes **v10**.
 - **`0010_drop_legacy_global_tables.down.sql` recreates ONLY the four dropped tables** with their exact legacy definitions so that rolling forward/backward on the dropped tables is a no-op on structure. The `.down.sql` MUST recreate:
   - `queue_state` — with `id INTEGER PRIMARY KEY CHECK (id = 1)` and `data TEXT NOT NULL` (the `data` column is NOT NULLABLE — the `.down.sql` MUST NOT seed `data` with `NULL`).
-  - `activities` — with its OWN `activities_id_seq` BIGSERIAL and the column structure from `0001_initial.up.sql`.
+  - `activities` — with its OWN `activities_id_seq` BIGSERIAL and **exactly** the column structure from `0001_initial.up.sql` (`id BIGSERIAL PRIMARY KEY`, `"timestamp" TIMESTAMPTZ NOT NULL`, `type TEXT NOT NULL`, `"user" TEXT NOT NULL`, `description TEXT NOT NULL`). The legacy `activities` table has no `room_id` column; the `.down.sql` MUST NOT introduce one.
   - `auto_queue_config` — with its OWN required singleton seed row at its initial values from `0001_initial.up.sql`: `INSERT INTO auto_queue_config (id, enabled, strategy) VALUES (1, FALSE, 'related') ON CONFLICT DO NOTHING`.
   - `play_history` — with its OWN `play_history_id_seq` BIGSERIAL, the column structure from `0001_initial.up.sql`, and the **`idx_play_history_played_at` index**.
 - The `.down.sql` MUST NOT recreate **account-table** objects (`users`, `user_sessions`, `priority_transactions`, `users_id_seq`, `user_sessions_id_seq`, `priority_transactions_id_seq`, the unique constraint on `users.email`, the unique constraint on `user_sessions(user_id, session_date)`, the FK constraints on `user_sessions.user_id` → `users.id` and `priority_transactions.user_id` → `users.id`) — these tables survive `0010.up.sql`, and recreating their objects would conflict with the existing schema.
@@ -226,11 +226,10 @@ R14a chooses ONE recommended sequence. The four phases are implemented as separa
 
 ### Phase A — offline conversion (built + verified by R14b)
 
-R14b is a backend-only sprint that ships the offline cutover mechanism. R14b lands `0009_room_cutover_support.up.sql` (creating both `room_activities` and `room_cutover_marker`; schema v8 → v9). R14b does NOT retire the global runtime.
+R14b is a backend-only sprint that ships the offline cutover mechanism. R14b lands `0009_room_cutover_support.up.sql` (creating both `room_activities` and `room_cutover_marker`; schema v8 → v9). R14b does NOT retire the global runtime, does NOT introduce the runtime server flag, and does NOT select activity-writer implementations — those belong to R14c.
 
 - `cmd/room-cutover` ships subcommands `plan`, `up`, `verify` — **no `abort` subcommand** (PostgreSQL session locks belong to the connection that acquired them; release is via explicit `pg_advisory_unlock` on the same pinned connection, with connection close as fallback).
 - `room_cutover_marker` table created by `0009_room_cutover_support.up.sql`; PK = 1; `target_room_id` and `host_user_id` are stored as **immutable integer audit snapshots WITHOUT foreign keys** (migration evidence must NOT own room or user lifecycle — future hard-delete work under R10f+ must not be permanently blocked by the marker row).
-- **Runtime server startup flag `--room-cutover-authoritative`** (Go runtime arg parsed at `main()`; read once during composition; default `false`). R14b composition reads the flag and injects either a no-op activity writer (when `false`) or the real `room_activities`-writing `RoomActivityRepository` implementation (when `true`); the flag also controls the legacy-route registration set. The flag is NOT baked at build; it is a runtime flag.
 - R14b verification gate (must pass before R09i can run): plan returns PII-free report; `--dry-run` completes with no writes; real `up` creates room + host membership + copies + marker ALL in one transaction, commits, returns 0; re-run is `already cut over; no-op` driven by the marker; hash drift rejected (no `--force`/`--reset`); PII redacted; R03 marker preserved untouched; schema version after R14b is **9**; `go test ./...` clean.
 
 ### R09i — room-activity runtime parity (BACKEND-ONLY, after R14b, before R14d)
@@ -247,20 +246,35 @@ R14d implements SPA changes; **the behavioral activation is deferred to the R14c
 
 - Implementation may be accepted BEFORE R14c ships.
 - Pre-R14c, the SPA continues to expose the legacy dashboard surface (so the still-authoritative global queue remains reachable).
-- Activation happens during R14c, behind an explicit cutover-state gate (a build flag matched against `--room-cutover-authoritative=true`, or a runtime feature flag flipped during the maintenance window).
+- Activation happens during R14c. The frontend gate is the **single named mechanism** `VITE_ROOM_CUTOVER_AUTHORITATIVE` (Vite build-time `import.meta.env` baked at SPA build; two bundle variants — `false` shipped pre-R14c, `true` shipped as part of the R14c rollout). The SPA is built twice and the right bundle is deployed for the right server state. There is **NO runtime feature flag** — no alternate mechanism (no separate env var at runtime, no separate feature-flag service) is permitted within R14a's contract. R14d's bundle-acceptance ships the `VITE_ROOM_CUTOVER_AUTHORITATIVE=false` variant; the `true` variant is deployed as part of the R14c maintenance window.
 - R14d assumes R05b (room entry UI) has landed.
 
 ### Phase B — coordinated production cutover (R14c)
 
 R14c owns the coordinated production execution: maintenance window + redeploy with `--room-cutover-authoritative=true` + run `cmd/room-cutover up` against the live DB. Execution order: **R05b → R09h → R14b → R09i → R14d → R14c → R14e**. R14c requires all of R05b + R09h + R14b + R09i + R14d accepted (R09i waivable only by explicit PO sign-off).
 
-- Before the window: `pg_dump` retained ≥30 days; R14b's binary deployed; R14b's verification gate has passed; R14d's SPA bundle accepted and gated behind the cutover-state flag.
-- During the window: shut down the application; run `cmd/room-cutover up` against the live DB (advisory lock; single transaction — room + host + copy + marker; commit; deferred `pg_advisory_unlock`); restart with `--room-cutover-authoritative=true`.
+- R14c owns the runtime server startup flag `--room-cutover-authoritative`. R14b does NOT introduce the flag, do NOT read it, and do NOT switch activity-writer or route registration based on it. R14b's binary is always pre-cutover; the flag only exists in the R14c binary.
+- R14c composition selects the activity-writer and the legacy-route registration set based on the flag:
+  - **`false` (pre-cutover / rollback):** real legacy global handlers + no-op `RoomActivityRepository`.
+  - **`true` (production cutover):** repository-free `410 Gone` tombstone handlers + real `room_activities`-writing `RoomActivityRepository`.
+- **Startup guard (fail closed).** If `--room-cutover-authoritative=true`, the server MUST refuse to serve traffic unless both:
+  - schema version ≥ 9 (i.e. `0009_room_cutover_support.up.sql` has been applied), AND
+  - the `room_cutover_marker` row exists.
+  This is the durable activation proof: the marker is inserted in the same transaction as the atomic copy + `room_activities_id_seq` resequence, so its presence proves the cutover completed. Activation with `true` before this guard passes would enable room activity writes and/or disable global behavior before the copy and sequence resync have completed. The startup guard is marker + schema-version presence only; do NOT require copied target hashes to remain unchanged on every later startup (legitimate room writes change them).
+- Before the window: `pg_dump` retained ≥30 days; R14b's binary deployed; R14b's verification gate has passed; R14d's SPA bundle accepted.
+- During the window: shut down the application; run `cmd/room-cutover up` against the live DB (advisory lock; single transaction — room + host + copy + marker; commit; deferred `pg_advisory_unlock`); restart with `--room-cutover-authoritative=true` (the startup guard above passes because the marker row now exists and schema is v9).
 - In this build:
-  - R14d's SPA cutover-state gate is activated (the flag flips; legacy surfaces are removed/cleared/closed in the SPA).
+  - R14d's SPA cutover-state gate is activated (the deployed `VITE_ROOM_CUTOVER_AUTHORITATIVE=true` bundle flips legacy surfaces). Legacy surfaces (`DashboardView`, global queue slices, global WS) are removed/cleared/closed in the SPA.
   - Legacy global `/api/queue/...` / `/api/vote/...` / `/api/autoqueue/...` routes and the global `/ws` endpoint are **registered with repository-free tombstone handlers** returning `410 Gone` with the documented envelope + `Link: </api/rooms>; rel="successor-version"`. The global `/ws` upgrade is rejected with `410` in the HTTP phase.
   - **R14c is atomic across all listed legacy routes.** No partial cutover.
 - Legacy write paths disabled.
+- **Deployment sequence during the window.** Public traffic remains closed for the entire duration. The order is:
+  1. stop public traffic / enter maintenance;
+  2. run `cmd/room-cutover up` and verify success;
+  3. deploy the server configured `--room-cutover-authoritative=true` AND the SPA bundle built `VITE_ROOM_CUTOVER_AUTHORITATIVE=true` while traffic remains closed;
+  4. perform paired smoke checks against both artifacts;
+  5. reopen traffic.
+  The two artifacts MUST be deployed as a paired set; the compatibility matrix forbids `true` server + `false` SPA. Mid-window rollback likewise restores the immediately pre-cutover `false` server AND `false` SPA bundle as one pair before reopening traffic.
 
 ### Phase D — schema cleanup (R14e)
 
@@ -273,6 +287,7 @@ R14c owns the coordinated production execution: maintenance window + redeploy wi
 The R14b mechanism is built fresh; it draws on R03 patterns where appropriate but does NOT reuse R03's CLI or marker. Marker is inserted in the same transaction as room, host membership, and copied state.
 
 **Lock contract:**
+
 - `pg_try_advisory_lock(987654321)` on a pinned connection (same key, same idiom as R03).
 - The cutover transaction holds the lock for its entire duration.
 - **`pg_advisory_unlock(987654321)` is called explicitly on the same pinned connection** (deferred unlock, mirroring R03's idiom) at the end of the transaction, regardless of commit or rollback.
@@ -281,6 +296,7 @@ The R14b mechanism is built fresh; it draws on R03 patterns where appropriate bu
 **No `abort` subcommand.** Lock release is via explicit `pg_advisory_unlock` on the same pinned connection (with connection close as fallback).
 
 **Single transaction for `cmd/room-cutover up` (in this order):**
+
 1. `BEGIN`.
 2. `INSERT INTO rooms ...`.
 3. `INSERT INTO room_members ...` (host).
@@ -333,20 +349,20 @@ R05b / R09h / R09i / R14b / R14c / R14d / R14e MUST NOT be combined.
 ## 11. Deployment compatibility matrix
 
 The cutover involves **one runtime flag and one build-time flag, each owned by its respective side**:
+
 - **Server side**: `--room-cutover-authoritative=true|false` is a **runtime server startup flag** (Go runtime arg parsed at `main()` startup; read once during composition; default `false`). It controls the legacy-route registration set AND the R09i activity-writer injection. It is NOT baked at build.
 - **Client side**: `VITE_ROOM_CUTOVER_AUTHORITATIVE=true|false` is a **frontend build-time-only** setting (Vite `import.meta.env` baked at SPA build; two bundle variants — `false` shipped pre-R14c, `true` shipped as part of the R14c rollout).
 - The Go backend NEVER consumes `VITE_ROOM_CUTOVER_AUTHORITATIVE` — the SPA flag does not cross the network boundary at runtime; it only ships inside the SPA bundle. Each side gates its own behavior; the gate pair (`--room-cutover-authoritative` server-side, `VITE_ROOM_CUTOVER_AUTHORITATIVE` SPA-side) MUST match in any deployed combination.
 
 | Server binary (`--room-cutover-authoritative`) | SPA bundle (`VITE_ROOM_CUTOVER_AUTHORITATIVE`) | Legacy global routes | Per-room routes | Result |
 | --- | --- | --- | --- | --- |
-| Pre-R14b binary (default `false`) | `false` bundle | Registered; serve legacy repos | Registered | Pre-cutover baseline. |
-| Post-R14b binary (`false`) | `false` bundle | Registered; serve legacy repos | Registered | The R14b verification state. |
-| Post-R14d binary (`false`) — R14d accepted | `false` bundle | Registered; serve legacy repos | Registered | R14d implementation accepted; the `false` bundle continues exposing the legacy dashboard so the still-authoritative global queue remains reachable pre-cutover. |
+| Pre-R14c binary (default `false`) — flag is parsed but never read | `false` bundle | Registered; serve legacy repos | Registered | Pre-cutover baseline (covers Pre-R14b, Post-R14b, and Post-R14d accepted). |
+| Pre-R14c binary (`false`) — R14d accepted | `false` bundle | Registered; serve legacy repos | Registered | R14d implementation accepted; the `false` bundle continues exposing the legacy dashboard so the still-authoritative global queue remains reachable pre-cutover. |
 | Post-R14c binary (`true`) | `true` bundle | **Tombstone handlers; `410 Gone` envelope + `Link: </api/rooms>; rel="successor-version"`** | Registered; sole authoritative path | Production cutover state. ONLY valid post-R14c combination. |
 | Post-R14c binary (`true`) | `false` bundle (forgotten rollout) | `410 Gone` tombstone | Registered | **BROKEN** — SPA still expects legacy endpoints but server returns `410`. Forbid this combination. |
-| Mid-window rollback: immediately pre-cutover production release with `false` / `false` bundle | OFF (gate not on) | Registered; serves legacy repos | Registered | Mid-window rollback. The `pg_dump` from the start of the window is the source of truth. Forward recovery for any data that mutated after the cutover. **Not an "R03 binary"** — R03 is the unrelated SQLite-to-PostgreSQL migration release. |
+| Mid-window rollback: immediately pre-cutover production release with `false` server AND `false` SPA bundle (paired) | OFF (gate not on) | Registered; serves legacy repos | Registered | Mid-window rollback. The `pg_dump` from the start of the window is the source of truth. Forward recovery for any data that mutated after the cutover. **Not an "R03 binary"** — R03 is the unrelated SQLite-to-PostgreSQL migration release. |
 
-**Client-continuity claim:** the only combinations that guarantee client continuity are the documented ones. The frontend gate is the single mechanism `VITE_ROOM_CUTOVER_AUTHORITATIVE` matched against `--room-cutover-authoritative`. Pre-R14c, the SPA `false` bundle continues exposing the legacy dashboard so the global queue is reachable. The compatibility matrix forbids any combination where the server's flag is `true` and the SPA bundle is `false` — the deployed artifacts must match.
+**Client-continuity claim:** the only combinations that guarantee client continuity are the documented ones. The frontend gate is the single mechanism `VITE_ROOM_CUTOVER_AUTHORITATIVE` matched against `--room-cutover-authoritative`. Pre-R14c, the SPA `false` bundle continues exposing the legacy dashboard so the global queue is reachable. The compatibility matrix forbids any combination where the server's flag is `true` and the SPA bundle is `false` — the deployed artifacts must match. The deployment contract during the R14c maintenance window is: stop public traffic; deploy the `true` server and the `true` SPA bundle as a paired set while traffic is closed; perform paired smoke checks; reopen traffic. Mid-window rollback restores the immediately pre-cutover `false` server AND `false` SPA bundle as one pair before reopening traffic.
 
 ## 12. PO acceptance blockers
 
