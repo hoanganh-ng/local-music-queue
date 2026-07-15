@@ -446,3 +446,66 @@ describe('Room chat store (R11a corrective pass)', () => {
     expect(globalStore.roomQueues.lobby.messages.length).toBe(1)
   })
 })
+
+// --- R11a deferred lifecycle follow-up: write-if-exists mutators ---
+
+describe('Room chat store (R11a deferred lifecycle follow-up)', () => {
+  beforeEach(() => {
+    globalStore.roomQueues = {}
+    globalStore.queueState = { songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] }
+    globalStore.voteSessions = {}
+    globalStore.autoQueueConfig = { enabled: false, strategy: 'related' }
+  })
+
+  function msg(id, content, createdAt) {
+    return { id, room_slug: 'lobby', sender: { user_id: 1, display_name: 'A' }, content, created_at: createdAt }
+  }
+
+  it('setRoomQueueStateIfExists is a no-op when the slug has no entry', () => {
+    // The room entry was cleared by teardown / slug change. A
+    // stale resolution must not recreate it.
+    globalStore.setRoomQueueStateIfExists('lobby', { songs: [{ id: 'a' }], current_index: 0, current_song: { id: 'a' }, status: 'playing', queue: [], history: [] })
+    expect(globalStore.roomQueues.lobby).toBeUndefined()
+  })
+
+  it('setRoomQueueStateIfExists mutates an existing entry in place', () => {
+    globalStore.setRoomQueueConnected('lobby', true)
+    globalStore.setRoomQueueStateIfExists('lobby', { songs: [{ id: 'a' }], current_index: 0, current_song: { id: 'a' }, status: 'playing', queue: [], history: [] })
+    expect(globalStore.roomQueues.lobby.state.songs[0].id).toBe('a')
+    expect(globalStore.roomQueues.lobby.lastError).toBeNull()
+  })
+
+  it('setRoomQueueErrorIfExists is a no-op when the slug has no entry', () => {
+    globalStore.setRoomQueueErrorIfExists('lobby', 'stale error')
+    expect(globalStore.roomQueues.lobby).toBeUndefined()
+  })
+
+  it('setRoomQueueErrorIfExists mutates an existing entry\'s lastError in place', () => {
+    globalStore.setRoomQueueConnected('lobby', true)
+    globalStore.setRoomQueueErrorIfExists('lobby', 'boom')
+    expect(globalStore.roomQueues.lobby.lastError).toBe('boom')
+  })
+
+  it('setRoomChatMessagesIfExists is a no-op when the slug has no entry', () => {
+    globalStore.setRoomChatMessagesIfExists('lobby', [msg(1, 'a', '2026-01-01T00:00:00Z')])
+    expect(globalStore.roomQueues.lobby).toBeUndefined()
+  })
+
+  it('setRoomChatMessagesIfExists merges into an existing entry', () => {
+    globalStore.setRoomQueueConnected('lobby', true)
+    globalStore.applyRoomChatMessageCreated('lobby', { message: msg(1, 'a', '2026-01-01T00:00:00Z') })
+    globalStore.setRoomChatMessagesIfExists('lobby', [
+      msg(1, 'a', '2026-01-01T00:00:00Z'),
+      msg(2, 'b', '2026-01-01T00:00:01Z'),
+    ])
+    expect(globalStore.roomQueues.lobby.messages.map((m) => m.id)).toEqual([1, 2])
+  })
+
+  it('setRoomChatMessagesIfExists is a no-op for null / non-array payloads', () => {
+    globalStore.setRoomQueueConnected('lobby', true)
+    globalStore.applyRoomChatMessageCreated('lobby', { message: msg(1, 'a', '2026-01-01T00:00:00Z') })
+    globalStore.setRoomChatMessagesIfExists('lobby', null)
+    globalStore.setRoomChatMessagesIfExists('lobby', { messages: [] })
+    expect(globalStore.roomQueues.lobby.messages.length).toBe(1)
+  })
+})

@@ -297,6 +297,36 @@ export const globalStore = reactive({
     entry.lastError = null
   },
 
+  // R11a (deferred lifecycle follow-up): write-if-exists variants
+  // for stale-resolution paths. These mutate the existing entry
+  // when one is present and are a NO-OP when the slug's entry was
+  // already cleared (e.g. by a teardown / slug change). The
+  // standard mutators above always ensure an entry exists; that
+  // behaviour is still correct for live-author paths (WS events,
+  // active-room seeds) and intentionally NOT changed.
+  setRoomQueueStateIfExists(slug, state) {
+    if (!slug) return
+    const entry = this.roomQueues[slug]
+    if (!entry) return
+    entry.state = state
+    entry.lastError = null
+  },
+
+  setRoomQueueErrorIfExists(slug, message) {
+    if (!slug) return
+    const entry = this.roomQueues[slug]
+    if (!entry) return
+    entry.lastError = message
+  },
+
+  setRoomChatMessagesIfExists(slug, messages) {
+    if (!slug) return
+    const entry = this.roomQueues[slug]
+    if (!entry) return
+    if (!Array.isArray(messages)) return
+    entry.messages = this._mergeRoomChat(entry.messages, messages)
+  },
+
   applyRoomSongAdded(slug, song, position, fullState) {
     const entry = this._ensureRoomEntry(slug)
     if (fullState) {

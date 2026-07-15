@@ -307,12 +307,31 @@ const chatSendInFlight = ref(false)
 // On failure we keep chatHistoryFetched=false so a later
 // room_queue_sync is allowed to retry; the in-flight flag is cleared
 // unconditionally in a finally so a future sync is never permanently
-// gated. Both flags are reset on teardown and on slug change so the
-// next room re-seeds with the same retry semantics.
+// gated.
+//
+// R11a (deferred lifecycle follow-up): both flags are scoped to a
+// numeric generation token (`chatGeneration`). Each new mount and
+// each slug change bumps the token. A pending GET records the
+// generation it was started in; on resolve it only flips
+// `chatHistoryFetched` if its generation still matches the current
+// token. This guarantees a slow GET that was started for an OLD
+// connection (the user already navigated away) can never mutate the
+// NEW connection's fetched / in-flight flags.
 let chatHistoryFetched = false
 let chatHistoryFetchInFlight = false
+let chatGeneration = 0
 let wsClient = null
 let suppressSeqGap = false
+// R11a (deferred lifecycle follow-up): `suppressSeqGap` and its
+// 50ms release timer are also scoped to a numeric generation. The
+// setTimeout closure captures the generation it was queued in; if
+// the current generation has advanced by the time the timer fires,
+// the closure short-circuits without touching the flag. A
+// teardown / slug change bumps the generation so any stale timer
+// from a previous connection cannot re-enable gap detection for
+// the new one.
+let seqGapGeneration = 0
+let suppressSeqGapTimer = null
 // Track the slug we actually connected to so unmount can clean it up
 // even if the route reactive value drifts (test mounts without an initial slug).
 let connectedSlug = null
@@ -506,19 +525,39 @@ async function onGap() {
   // onGap. They each succeed or fail on their own; one failure
   // MUST NOT skip the other. The existing queue error/toast
   // behavior is preserved.
+  // R11a (deferred lifecycle follow-up): capture the seq-gap
+  // generation this recovery was started in so the queued
+  // setTimeout can short-circuit if a teardown / slug change has
+  // advanced the generation by the time the timer fires.
+  const myGapGeneration = seqGapGeneration
   const queuePromise = (async () => {
     try {
       const fresh = await api.getRoomQueue(targetSlug)
-      // Re-check the slug on resolution — the user may have
-      // navigated away while the GET was in flight.
+      // Stale guard: either the connection was torn down or the
+      // user navigated to a different slug in the meantime.
+      if (myGapGeneration !== seqGapGeneration) return { ok: false, stale: true }
       if (targetSlug !== slug.value) return { ok: false, stale: true }
-      globalStore.setRoomQueueState(targetSlug, fresh)
+      // Use the write-if-exists variants so a stale resolution
+      // does NOT recreate a cleared old-room store entry.
+      globalStore.setRoomQueueStateIfExists(targetSlug, fresh)
       globalStore.setRoomQueueSeq(targetSlug, 0)
       suppressSeqGap = true
-      // Re-enable gap detection on the next inbound message.
-      setTimeout(() => { suppressSeqGap = false }, 50)
+      // Cancel any prior release timer from this generation
+      // before queueing a fresh one.
+      if (suppressSeqGapTimer) clearTimeout(suppressSeqGapTimer)
+      suppressSeqGapTimer = setTimeout(() => {
+        // The timer only resets the flag if the generation is
+        // still ours. A teardown / slug change will have bumped
+        // seqGapGeneration, cleared the timer, and reset the
+        // flag — so the stale callback is a no-op.
+        if (myGapGeneration === seqGapGeneration) {
+          suppressSeqGap = false
+        }
+        suppressSeqGapTimer = null
+      }, 50)
       return { ok: true }
     } catch (e) {
+      if (myGapGeneration !== seqGapGeneration) return { ok: false, stale: true }
       // Stale-slug guard — a recovery GET that resolves after a
       // slug change must not surface toasts or write to a stale
       // entry.
@@ -530,7 +569,7 @@ async function onGap() {
         : status === 404 ? 'Room not found.'
         : status === 409 ? 'Room is archived or in conflict.'
         : 'Could not resync room queue.'
-      globalStore.setRoomQueueError(targetSlug, message)
+      globalStore.setRoomQueueErrorIfExists(targetSlug, message)
       toast.error(message)
       return { ok: false, stale: false }
     }
@@ -538,8 +577,9 @@ async function onGap() {
   const chatPromise = (async () => {
     try {
       const chat = await api.getRoomChatMessages(targetSlug, 50)
+      if (myGapGeneration !== seqGapGeneration) return { ok: false, stale: true }
       if (targetSlug !== slug.value) return { ok: false, stale: true }
-      globalStore.setRoomChatMessages(targetSlug, chat.messages || [])
+      globalStore.setRoomChatMessagesIfExists(targetSlug, chat.messages || [])
       return { ok: true }
     } catch (chatErr) {
       // The chat recovery is best-effort. The prior chat
@@ -548,7 +588,7 @@ async function onGap() {
       // failure and a per-recovery chat toast would be noise.
       // eslint-disable-next-line no-console
       console.warn('room chat history recovery failed', chatErr)
-      return { ok: false, stale: targetSlug !== slug.value }
+      return { ok: false, stale: targetSlug !== slug.value || myGapGeneration !== seqGapGeneration }
     }
   })()
   try {
@@ -634,13 +674,22 @@ async function seedRoomChatMessagesFromRest(targetSlug) {
   if (!targetSlug) return
   if (chatHistoryFetched) return
   if (chatHistoryFetchInFlight) return
+  // R11a (deferred lifecycle follow-up): record the generation
+  // this GET was started in so the resolve / reject paths can
+  // short-circuit if a teardown or slug change has advanced the
+  // generation by the time the network call returns.
+  const myGeneration = chatGeneration
   chatHistoryFetchInFlight = true
   try {
     const res = await api.getRoomChatMessages(targetSlug, 50)
+    // Stale guard: either the connection has been torn down or
+    // the user navigated to a different slug in the meantime.
+    if (myGeneration !== chatGeneration) return
     if (targetSlug !== slug.value) return
     globalStore.setRoomChatMessages(targetSlug, res.messages || [])
     chatHistoryFetched = true
   } catch (e) {
+    if (myGeneration !== chatGeneration) return
     // Only surface toasts for the currently-viewed room; a stale
     // GET for a slug the user already left must not pollute the
     // current room's toast stream.
@@ -655,7 +704,12 @@ async function seedRoomChatMessagesFromRest(targetSlug) {
     // chatHistoryFetched stays false so a later room_queue_sync
     // is allowed to retry.
   } finally {
-    chatHistoryFetchInFlight = false
+    // Only clear the in-flight flag if the in-flight GET still
+    // belongs to the current generation. A new mount / slug
+    // change already cleared / will reset the flag itself.
+    if (myGeneration === chatGeneration) {
+      chatHistoryFetchInFlight = false
+    }
   }
 }
 
@@ -716,6 +770,20 @@ function teardownCurrentClient() {
   // half-finished GET does not leave the next room stuck.
   chatHistoryFetched = false
   chatHistoryFetchInFlight = false
+  // R11a (deferred lifecycle follow-up): bump the chat
+  // generation so any in-flight GET from this connection can no
+  // longer mutate the flags (it will see myGeneration !==
+  // chatGeneration in its finally block and bail).
+  chatGeneration += 1
+  // Cancel any pending suppressSeqGap release timer from this
+  // connection and bump the seq-gap generation so a stale timer
+  // callback cannot re-enable gap detection for the next one.
+  if (suppressSeqGapTimer) {
+    clearTimeout(suppressSeqGapTimer)
+    suppressSeqGapTimer = null
+  }
+  seqGapGeneration += 1
+  suppressSeqGap = false
 }
 
 onMounted(async () => {
