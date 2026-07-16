@@ -58,6 +58,13 @@ const apiMock = vi.hoisted(() => ({
   // R11a
   getRoomChatMessages: vi.fn(),
   sendRoomChatMessage: vi.fn(),
+  // R05b2 player lease
+  claimRoomPlayerLease: vi.fn(),
+  heartbeatRoomPlayerLease: vi.fn(),
+  releaseRoomPlayerLease: vi.fn(),
+  getRoomPlayerLease: vi.fn(),
+  // R05b2 archive poll
+  getRoom: vi.fn(),
 }))
 vi.mock('../../services/api', () => ({ api: apiMock }))
 
@@ -108,6 +115,11 @@ describe('RoomView', () => {
     // the persisted row immediately. Tests that want a different
     // shape override this default.
     apiMock.sendRoomChatMessage.mockResolvedValue({ message: { id: 0, room_slug: '', sender: { user_id: 0, display_name: '' }, content: '', created_at: new Date(0).toISOString() } })
+    // R05b2 player lease: default to no active lease (404) so existing
+    // tests that don't know about the panel don't crash, and a sensible
+    // holder response for tests that exercise lease state.
+    apiMock.getRoomPlayerLease.mockRejectedValue(Object.assign(new Error('no lease'), { status: 404 }))
+    apiMock.getRoom.mockResolvedValue({ id: 7, slug: 'lobby', status: 'active' })
   })
 
   it('subscribes the room ws client to the exact event types and ignores others', async () => {
@@ -498,7 +510,7 @@ describe('RoomView', () => {
 
   it('host-panel is visible to the host when connected', async () => {
     apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
-    globalStore.setUser({ id: 'u1', display_name: 'Host', role: 'host' })
+    globalStore.setUser({ id: 1, display_name: 'Host', role: 'host' })
     globalStore.setRoomQueueConnected('lobby', true)
     globalStore.applyRoomMembersChanged('lobby', {
       members: [
@@ -562,7 +574,8 @@ describe('RoomView', () => {
   it('deleteRoom calls api.deleteRoom with the slug and flips archived=true on 204', async () => {
     apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
     apiMock.deleteRoom.mockResolvedValue(null)
-    globalStore.setUser({ id: 'u1', display_name: 'Host', role: 'host' })
+    globalStore.setUser({ id: 1, display_name: 'Host', role: 'host' })
+    globalStore.applyRoomMembersChanged('lobby', { members: [{ user_id: 1, role: 'host' }] })
     globalStore.setRoomQueueConnected('lobby', true)
     // Bypass the window.confirm() prompt.
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
@@ -583,7 +596,7 @@ describe('RoomView', () => {
   it('deleteRoom aborts cleanly when the user cancels the confirmation', async () => {
     apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
     apiMock.deleteRoom.mockResolvedValue(null)
-    globalStore.setUser({ id: 'u1', display_name: 'Host', role: 'host' })
+    globalStore.setUser({ id: 1, display_name: 'Host', role: 'host' })
     globalStore.setRoomQueueConnected('lobby', true)
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
     const { wrapper, router } = mountRoomView()
@@ -602,7 +615,8 @@ describe('RoomView', () => {
 
   it('deleteRoom surfaces 400/401/403/404/409 via toast without throwing', async () => {
     apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
-    globalStore.setUser({ id: 'u1', display_name: 'Host', role: 'host' })
+    globalStore.setUser({ id: 1, display_name: 'Host', role: 'host' })
+    globalStore.applyRoomMembersChanged('lobby', { members: [{ user_id: 1, role: 'host' }] })
     globalStore.setRoomQueueConnected('lobby', true)
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     const { wrapper, router } = mountRoomView()
@@ -625,7 +639,7 @@ describe('RoomView', () => {
   it('removeRoomMember calls api.removeRoomMember with (slug, userId)', async () => {
     apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
     apiMock.removeRoomMember.mockResolvedValue(null)
-    globalStore.setUser({ id: 'u1', display_name: 'Host', role: 'host' })
+    globalStore.setUser({ id: 1, display_name: 'Host', role: 'host' })
     globalStore.setRoomQueueConnected('lobby', true)
     globalStore.applyRoomMembersChanged('lobby', {
       members: [
@@ -1000,6 +1014,9 @@ describe('RoomView (R11a chat panel)', () => {
     globalStore.roomQueues = {}
     vi.clearAllMocks()
     apiMock.getRoomChatMessages.mockResolvedValue({ messages: [] })
+    // R05b2 default.
+    apiMock.getRoomPlayerLease.mockRejectedValue(Object.assign(new Error('no lease'), { status: 404 }))
+    apiMock.getRoom.mockResolvedValue({ id: 7, slug: 'lobby', status: 'active' })
     // R11a (corrective pass): the POST response is wrapped as
     // { message: { ... } } so the sender's local view can apply
     // the persisted row immediately. Tests that want a different
@@ -1192,6 +1209,8 @@ describe('RoomView (R11a corrective pass)', () => {
     vi.clearAllMocks()
     apiMock.getRoomChatMessages.mockResolvedValue({ messages: [] })
     apiMock.sendRoomChatMessage.mockResolvedValue({ message: { id: 0, room_slug: '', sender: { user_id: 0, display_name: '' }, content: '', created_at: new Date(0).toISOString() } })
+    apiMock.getRoomPlayerLease.mockRejectedValue(Object.assign(new Error('no lease'), { status: 404 }))
+    apiMock.getRoom.mockResolvedValue({ id: 7, slug: 'lobby', status: 'active' })
   })
 
   function driveSync(slug = 'lobby', state = { songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] }) {
@@ -1459,6 +1478,8 @@ describe('RoomView (R11a final corrective pass)', () => {
     vi.clearAllMocks()
     apiMock.getRoomChatMessages.mockResolvedValue({ messages: [] })
     apiMock.sendRoomChatMessage.mockResolvedValue({ message: { id: 0, room_slug: '', sender: { user_id: 0, display_name: '' }, content: '', created_at: new Date(0).toISOString() } })
+    apiMock.getRoomPlayerLease.mockRejectedValue(Object.assign(new Error('no lease'), { status: 404 }))
+    apiMock.getRoom.mockResolvedValue({ id: 7, slug: 'lobby', status: 'active' })
   })
 
   function driveSync(slug = 'lobby', state = { songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] }) {
@@ -1879,6 +1900,204 @@ describe('RoomView (R11a final corrective pass)', () => {
     // Non-empty + within cap + canEditChat → canSendChat is true.
     expect(vm.canSendChat).toBe(true)
 
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+})
+
+// --- R05b2: player-lease UI ---
+
+describe('RoomView (R05b2 player-lease UI)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    sessionStorage.clear()
+    sessionHelper.clearSession()
+    globalStore.roomQueues = {}
+    vi.resetAllMocks()
+    apiMock.getRoomChatMessages.mockResolvedValue({ messages: [] })
+    apiMock.sendRoomChatMessage.mockResolvedValue({ message: { id: 0, room_slug: '', sender: { user_id: 0, display_name: '' }, content: '', created_at: new Date(0).toISOString() } })
+    apiMock.claimRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    apiMock.heartbeatRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    apiMock.releaseRoomPlayerLease.mockResolvedValue(null)
+    apiMock.getRoomPlayerLease.mockRejectedValue(Object.assign(new Error('no lease'), { status: 404 }))
+    apiMock.getRoom.mockResolvedValue({ id: 7, slug: 'lobby', status: 'active' })
+  })
+
+  it('renders an always-visible Player device panel even with an empty queue', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+    globalStore.applyRoomMembersChanged('lobby', { members: [{ user_id: 1, role: 'host' }] })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    const html = wrapper.html()
+    expect(html).toContain('player-device-panel')
+    // With no active lease (404 default) the panel renders 'No active player.'
+    expect(html).toContain('No active player')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('derives room-host status from the membership list (not currentUser.role)', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    // Globally a host but only a room guest → must NOT be host here.
+    globalStore.setUser({ id: 99, display_name: 'Peer', role: 'host' })
+    globalStore.applyRoomMembersChanged('lobby', { members: [{ user_id: 99, role: 'guest' }] })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const vm = wrapper.vm
+    expect(vm.isHost).toBe(false)
+    expect(wrapper.html()).not.toContain('claim-player-btn')
+    expect(wrapper.html()).not.toContain('host-panel')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('a globally ordinary user who is the room host can claim', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'guest' })
+    globalStore.applyRoomMembersChanged('lobby', { members: [{ user_id: 1, role: 'host' }] })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const vm = wrapper.vm
+    expect(vm.isHost).toBe(true)
+    expect(wrapper.html()).toContain('claim-player-btn')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('all active members can see the Player device panel state', async () => {
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 7, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 2, display_name: 'Guest', role: 'guest' })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const html = wrapper.html()
+    expect(html).toContain('player-device-panel')
+    expect(html).toContain('user #7')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('only the current holder may use direct playback controls', async () => {
+    apiMock.getRoomPlayerLease.mockResolvedValueOnce({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [{ id: 'a' }], current_index: 0, current_song: { id: 'a' }, status: 'paused', queue: [], history: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+    globalStore.applyRoomMembersChanged('lobby', { members: [{ user_id: 1, role: 'host' }] })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    // Holder: playback controls enabled. (Pause is disabled because
+    // status is already 'paused' — that gating is independent of the
+    // lease holder. We assert play / skip / volume enablement for the
+    // holder case.)
+    expect(wrapper.find('[data-testid="play-btn"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('[data-testid="skip-btn"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.find('[data-testid="vol-up-btn"]').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+    globalStore.clearUser()
+
+    // Non-holder: queue another holder response for the SECOND mount,
+    // then mount RoomView as a DIFFERENT user who is NOT the holder.
+    apiMock.getRoomPlayerLease.mockResolvedValueOnce({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    globalStore.setUser({ id: 99, display_name: 'Peer', role: 'guest' })
+    globalStore.applyRoomMembersChanged('lobby', { members: [{ user_id: 1, role: 'host' }, { user_id: 99, role: 'guest' }] })
+    const { wrapper: w3, router: r3 } = mountRoomView()
+    await r3.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    expect(w3.find('[data-testid="play-btn"]').attributes('disabled')).toBeDefined()
+    expect(w3.find('[data-testid="skip-btn"]').attributes('disabled')).toBeDefined()
+    expect(w3.find('[data-testid="vol-up-btn"]').attributes('disabled')).toBeDefined()
+    w3.unmount()
+    globalStore.clearUser()
+  })
+
+  it('renders the "Release player and archive room" button when host + holder', async () => {
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'guest' })
+    globalStore.applyRoomMembersChanged('lobby', { members: [{ user_id: 1, role: 'host' }] })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    expect(wrapper.html()).toContain('Release player and archive room')
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('release confirmation copy explicitly mentions archival and is not a transfer', async () => {
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'guest' })
+    globalStore.applyRoomMembersChanged('lobby', { members: [{ user_id: 1, role: 'host' }] })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const vm = wrapper.vm
+    await vm.releasePlayer()
+    expect(confirmSpy).toHaveBeenCalled()
+    const message = confirmSpy.mock.calls[0][0]
+    expect(message).toMatch(/archive/i)
+    expect(message).toMatch(/not a transfer/i)
+    confirmSpy.mockRestore()
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('does NOT call release on Back / unmount navigation', async () => {
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+    globalStore.applyRoomMembersChanged('lobby', { members: [{ user_id: 1, role: 'host' }] })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    apiMock.releaseRoomPlayerLease.mockClear()
+    await router.push('/rooms')
+    await flushPromises()
+    wrapper.unmount()
+    expect(apiMock.releaseRoomPlayerLease).not.toHaveBeenCalled()
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('expired-lease 410 toast copy does NOT suggest reclaiming', async () => {
+    apiMock.setRoomPlaybackStatus.mockRejectedValueOnce(Object.assign(new Error('gone'), { status: 410 }))
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [{ id: 'a' }], current_index: 0, current_song: { id: 'a' }, status: 'paused', queue: [], history: [] })
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+    globalStore.applyRoomMembersChanged('lobby', { members: [{ user_id: 1, role: 'host' }] })
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const vm = wrapper.vm
+    await vm.setPlaybackStatus('playing')
+    expect(toastMock.error).toHaveBeenCalled()
+    const copy = toastMock.error.mock.calls[toastMock.error.mock.calls.length - 1][0]
+    expect(copy).not.toMatch(/reclaim/i)
+    expect(copy).toMatch(/archiving|archived|expired/i)
     wrapper.unmount()
     globalStore.clearUser()
   })

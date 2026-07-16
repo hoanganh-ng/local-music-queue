@@ -11,6 +11,34 @@
     </header>
 
     <main class="room-content">
+      <!-- R05b2: Player device panel. Always visible for active
+           RoomView pages, including empty queues. Status only;
+           no automatic claim. The panel reflects the composable's
+           reactive state machine (loading/none/held_by_me/held_by_other/
+           retrying/expired_pending_archive/unavailable). -->
+      <section
+        class="player-device-panel glass-panel"
+        data-testid="player-device-panel"
+      >
+        <h3>Player device</h3>
+        <p v-if="playerLease.state.value === 'loading'">Loading player status…</p>
+        <p v-else-if="playerLease.state.value === 'none'">No active player.</p>
+        <p v-else-if="playerLease.state.value === 'held_by_me'">Player held by you.</p>
+        <p v-else-if="playerLease.state.value === 'held_by_other'">
+          Player held by user #{{ playerLease.lease.value && playerLease.lease.value.claimed_by_user_id }}.
+        </p>
+        <p v-else-if="playerLease.state.value === 'retrying'">Heartbeat temporarily interrupted — retrying.</p>
+        <p v-else-if="playerLease.state.value === 'expired_pending_archive'">Lease expired. Room is being archived.</p>
+        <p v-else-if="playerLease.state.value === 'unavailable'">Room archived or unavailable.</p>
+        <button
+          v-if="canClaimPlayer"
+          class="claim-player-btn"
+          data-testid="claim-player-btn"
+          :disabled="playerLease.isClaimInFlight.value"
+          @click="onClaimPlayer"
+        >Claim player</button>
+      </section>
+
       <section class="queue-panel glass-panel">
         <h3>
           Queue
@@ -83,39 +111,46 @@
         <div class="playback-buttons">
           <button
             class="play-btn"
-            :disabled="!canMutate || roomState.state.status === 'playing'"
+            data-testid="play-btn"
+            :disabled="!canControlPlayback || roomState.state.status === 'playing'"
             @click="setPlaybackStatus('playing')"
           >Play</button>
           <button
             class="pause-btn"
-            :disabled="!canMutate || roomState.state.status === 'paused'"
+            data-testid="pause-btn"
+            :disabled="!canControlPlayback || roomState.state.status === 'paused'"
             @click="setPlaybackStatus('paused')"
           >Pause</button>
           <button
             class="prev-btn"
-            :disabled="!canMutate || !canGoPrevious"
+            data-testid="prev-btn"
+            :disabled="!canControlPlayback || !canGoPrevious"
             @click="prevPlayback"
           >Prev</button>
           <button
             class="skip-btn"
-            :disabled="!canMutate"
+            data-testid="skip-btn"
+            :disabled="!canControlPlayback"
             @click="skipPlayback"
           >Skip</button>
           <button
             class="ended-btn"
-            :disabled="!canMutate"
+            data-testid="ended-btn"
+            :disabled="!canControlPlayback"
             @click="songEnded"
           >Ended</button>
         </div>
         <div class="volume-row">
           <button
             class="vol-up-btn"
-            :disabled="!canMutate"
+            data-testid="vol-up-btn"
+            :disabled="!canControlPlayback"
             @click="changeVolume('up')"
           >Vol +</button>
           <button
             class="vol-down-btn"
-            :disabled="!canMutate"
+            data-testid="vol-down-btn"
+            :disabled="!canControlPlayback"
             @click="changeVolume('down')"
           >Vol −</button>
         </div>
@@ -232,6 +267,19 @@
           </li>
         </ul>
         <p v-else class="empty">No members loaded yet.</p>
+        <!-- R05b2: explicit player-lease release. The button is only
+             shown when the viewer is the room host AND is the
+             recorded lease holder. On click, asks for confirmation
+             (window.confirm) with copy that explicitly mentions
+             archival and explicitly states the action is not a
+             transfer. -->
+        <h4>Player lease</h4>
+        <button
+          v-if="canReleasePlayer"
+          class="release-player-btn"
+          data-testid="release-player-btn"
+          @click="releasePlayer"
+        >Release player and archive room</button>
       </section>
 
       <!-- R10c: archived / removed banners. Rendered instead of the
@@ -269,6 +317,7 @@ import { globalStore } from '../store'
 import { api } from '../services/api'
 import { createRoomWsClient } from '../services/room-websocket'
 import { useToast } from '../composables/useToast'
+import { useRoomPlayerLease } from '../composables/useRoomPlayerLease'
 import ToastContainer from '../components/ui/ToastContainer.vue'
 
 const route = useRoute()
@@ -979,16 +1028,101 @@ const canGoPrevious = computed(() => {
 //
 // These are UI conveniences only. The backend remains authoritative
 // on authorization — the frontend does NOT pre-check the role beyond
-// hiding the destructive controls. currentUser.role is the same field
-// DashboardView and QueueList.vue already consult.
-const isHost = computed(() => currentUser.value?.role === 'host')
-// roomArchived / roomRemoved flip true on the matching R10b
-// WebSocket envelope (see applyMessage) and persist for the rest of
-// the lifetime of the route. Once flipped, every destructive control
-// in the view short-circuits via the read-only state below.
-const roomArchived = computed(() => !!roomState.value?.archived)
-const roomRemoved = computed(() => !!roomState.value?.removed)
+// hiding the destructive controls.
+//
+// R05b2: room-host status MUST come from the room's membership list,
+// not from the global currentUser.role. A user can be a global
+// host/admin and only a room guest — they cannot claim the player for
+// a room they do not host in this room. The same corrected value is
+// applied to both the new lease controls (Claim, Release) and the
+// existing R10c host controls (host panel + remove-member gates).
+const isHost = computed(() => {
+  const u = currentUser.value
+  const list = (roomState.value && Array.isArray(roomState.value.members)) ? roomState.value.members : []
+  if (!u || u.id == null) return false
+  const m = list.find((x) => Number(x.user_id) === Number(u.id))
+  return !!(m && m.role === 'host')
+})
+
+// R05b2: derived flags consumed by the lease composable and the
+// canControlPlayback / canClaimPlayer computeds below.
+const isConnected = computed(() => !!(roomState.value && roomState.value.connected))
+// roomArchived / roomRemoved flip true on the matching R10b WebSocket
+// envelope (see applyMessage) and persist for the rest of the lifetime
+// of the route. Once flipped, every destructive control short-circuits
+// via the read-only state below. They live here (next to the lease
+// computeds) so the composable and the canControlPlayback guard can
+// resolve them at template-eval time.
+const roomArchived = computed(() => !!(roomState.value && roomState.value.archived))
+const roomRemoved = computed(() => !!(roomState.value && roomState.value.removed))
 const isRoomDisabled = computed(() => roomArchived.value || roomRemoved.value)
+
+// R05b2: the player-lease composable owns ALL lease lifecycle —
+// timers, listeners, single-flight guards, generation token. The
+// view only consumes the reactive snapshot (state + lease + claim /
+// release methods) and never schedules its own timers.
+const playerLease = useRoomPlayerLease(slug, {
+  currentUser,
+  isRoomHost: isHost,
+  isConnected,
+  isRoomDisabled,
+  onArchived: () => {
+    if (slug.value) globalStore.markRoomArchived(slug.value)
+  },
+  toast,
+})
+
+// R05b2: lease-holder gating for direct playback controls. Only the
+// current lease holder may use Play / Pause / Prev / Skip / Ended /
+// volume. The backend authorizes by claimed_by_user_id; this is a UI
+// affordance only. Queue controls remain gated on canMutate.
+const canControlPlayback = computed(() => {
+  if (!currentUser.value) return false
+  if (!isConnected.value) return false
+  if (isRoomDisabled.value) return false
+  if (playerLease.state.value !== 'held_by_me') return false
+  const l = playerLease.lease.value
+  if (!l || Number(l.claimed_by_user_id) !== Number(currentUser.value.id)) return false
+  return true
+})
+
+// R05b2: Claim button is shown only when:
+//   - the viewer is the room host,
+//   - the room is connected + not archived + not removed,
+//   - the composable state is `none`,
+//   - no claim is currently in flight.
+const canClaimPlayer = computed(() => {
+  if (!currentUser.value) return false
+  if (!isConnected.value) return false
+  if (isRoomDisabled.value) return false
+  if (!isHost.value) return false
+  if (playerLease.state.value !== 'none') return false
+  if (playerLease.isClaimInFlight.value) return false
+  return true
+})
+
+// R05b2: Release button is shown only when the viewer is both the
+// room host AND the recorded lease holder.
+const canReleasePlayer = computed(() => {
+  if (!currentUser.value) return false
+  if (!isHost.value) return false
+  const l = playerLease.lease.value
+  if (!l) return false
+  return Number(l.claimed_by_user_id) === Number(currentUser.value.id)
+})
+
+async function onClaimPlayer() {
+  await playerLease.claim()
+}
+
+function releasePlayer() {
+  const slugStr = slug.value
+  const ok = window.confirm(
+    `Release the player lease for room "${slugStr}"? The room will be archived and no longer playable. This is not a transfer.`
+  )
+  if (!ok) return
+  return playerLease.release()
+}
 // canDeleteRoom mirrors canMutate + isHost + not already disabled +
 // an in-flight guard for double-click safety. The backend is the
 // authoritative gate.
@@ -1057,7 +1191,7 @@ function mapPlaybackToast(e, fallback) {
   else if (s === 403) toast.error('Only the active lease holder can control playback.')
   else if (s === 404) toast.error('Room or active lease not found.')
   else if (s === 409) toast.error('Room is archived or in conflict.')
-  else if (s === 410) toast.error('Player lease has expired — reclaim to continue.')
+  else if (s === 410) toast.error('Player lease has expired — the room is being archived.')
   else toast.error(fallback)
 }
 
@@ -1310,6 +1444,43 @@ async function removeRoomMember(member) {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+}
+
+/* R05b2: Player device panel. Spans full width and uses the
+   same glass surface as the other panels so the lease status is
+   always visible alongside the queue / playback / chat panels. */
+.player-device-panel {
+  grid-column: 1 / -1;
+  padding: 1rem;
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.claim-player-btn {
+  background: var(--accent);
+  color: #0a0a0a;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  align-self: flex-start;
+}
+.claim-player-btn:disabled,
+.release-player-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.release-player-btn {
+  background: var(--danger, #c0392b);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  align-self: flex-start;
 }
 
 /* R11a: chat panel. Mirrors the host-panel layout primitive so
