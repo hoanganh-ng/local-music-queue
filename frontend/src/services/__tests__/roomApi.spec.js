@@ -353,3 +353,170 @@ describe('Room Chat API (R11a)', () => {
     expect(JSON.stringify(res)).not.toMatch(/email/)
   })
 })
+
+// --- R05b1: room entry, creation, and invite redemption API ---
+
+describe('Room Entry / Create / Redeem API (R05b1)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    sessionStorage.clear()
+    sessionHelper.clearSession()
+    vi.restoreAllMocks()
+  })
+
+  function mockFetchOk(json = {}, status = 200) {
+    const mockFetch = vi.fn().mockResolvedValue({
+      status, ok: true, json: async () => json
+    })
+    global.fetch = mockFetch
+    return mockFetch
+  }
+
+  it('createRoom posts ONLY { slug, name } — no user_id, role, or display name', async () => {
+    const mockFetch = mockFetchOk({ id: 1, slug: 'lobby', name: 'Lobby', status: 'active' }, 201)
+    await api.createRoom('lobby', 'Lobby')
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms$/)
+    expect(init.method).toBe('POST')
+    const body = JSON.parse(init.body)
+    expect(body).toEqual({ slug: 'lobby', name: 'Lobby' })
+    expect(JSON.stringify(body)).not.toMatch(/(user_id|user_role|added_by|requested_by|display_name)/)
+  })
+
+  it('createRoom URL-encodes the slug path (body slug is NOT encoded — only paths go through encodeURIComponent)', async () => {
+    const mockFetch = mockFetchOk({ id: 1, slug: 'my room', name: 'My Room', status: 'active' }, 201)
+    await api.createRoom('my room', 'My Room')
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms$/)
+    const body = JSON.parse(init.body)
+    expect(body.slug).toBe('my room')
+    expect(body.name).toBe('My Room')
+  })
+
+  it('createRoom stringifies null slug/name safely', async () => {
+    const mockFetch = mockFetchOk({ id: 1, slug: '', name: '', status: 'active' }, 201)
+    await api.createRoom(null, undefined)
+    const [, init] = mockFetch.mock.calls[0]
+    const body = JSON.parse(init.body)
+    expect(body).toEqual({ slug: '', name: '' })
+  })
+
+  it('createRoom propagates APIError on 400 / 401 / 409 / 500', async () => {
+    for (const status of [400, 401, 409, 500]) {
+      const mockFetch = vi.fn().mockResolvedValue({ status, ok: false, text: async () => `err ${status}` })
+      global.fetch = mockFetch
+      await expect(api.createRoom('lobby', 'Lobby')).rejects.toMatchObject({ status })
+    }
+  })
+
+  it('listRooms defaults to status=active query string', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    const mockFetch = mockFetchOk([{ id: 1, slug: 'lobby', name: 'Lobby', status: 'active' }])
+    const res = await api.listRooms()
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\?status=active$/)
+    expect(init.method).toBe('GET')
+    expect(init.body === undefined || init.body === '' || init.body === null).toBe(true)
+    expect(init.headers['Authorization']).toBe('Bearer tok')
+    expect(res).toEqual([{ id: 1, slug: 'lobby', name: 'Lobby', status: 'active' }])
+  })
+
+  it('listRooms honors an explicit non-default status', async () => {
+    const mockFetch = mockFetchOk([])
+    await api.listRooms('archived')
+    const [url] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\?status=archived$/)
+  })
+
+  it('listRooms omits the status query when status is empty string', async () => {
+    const mockFetch = mockFetchOk([])
+    await api.listRooms('')
+    const [url] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms$/)
+    expect(url).not.toMatch(/status=/)
+  })
+
+  it('listRooms propagates APIError on 401 / 403 / 400', async () => {
+    for (const status of [401, 403, 400]) {
+      const mockFetch = vi.fn().mockResolvedValue({ status, ok: false, text: async () => `err ${status}` })
+      global.fetch = mockFetch
+      await expect(api.listRooms('active')).rejects.toMatchObject({ status })
+    }
+  })
+
+  it('getRoom targets GET /rooms/{slug} and URL-encodes the slug', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    const mockFetch = mockFetchOk({ id: 1, slug: 'my room', name: 'My Room', status: 'active' })
+    const res = await api.getRoom('my room')
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/my%20room$/)
+    expect(init.method).toBe('GET')
+    expect(init.body === undefined || init.body === '' || init.body === null).toBe(true)
+    expect(init.headers['Authorization']).toBe('Bearer tok')
+    expect(res.slug).toBe('my room')
+  })
+
+  it('getRoom propagates APIError on 400 / 401 / 404', async () => {
+    for (const status of [400, 401, 404]) {
+      const mockFetch = vi.fn().mockResolvedValue({ status, ok: false, text: async () => `err ${status}` })
+      global.fetch = mockFetch
+      await expect(api.getRoom('lobby')).rejects.toMatchObject({ status })
+    }
+  })
+
+  it('redeemInvite targets POST /invites/{token}/redeem with NO body and URL-encodes the token', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    const mockFetch = mockFetchOk({ room_id: 7, user_id: 1, role: 'guest', joined_at: '2026-07-16T00:00:00Z' })
+    const res = await api.redeemInvite('tok with space+=')
+    const [url, init] = mockFetch.mock.calls[0]
+    // encodeURIComponent encodes spaces (%20), '+' (%2B), and '=' (%3D)
+    // but does NOT encode '/' — that's preserved per RFC 3986. The
+    // point of the test is that special chars in the token survive
+    // the trip intact via the encoding helper, not that they're all
+    // encoded identically.
+    expect(url).toMatch(/\/api\/invites\/tok%20with%20space%2B%3D\/redeem$/)
+    expect(init.method).toBe('POST')
+    expect(init.body === undefined || init.body === '' || init.body === null).toBe(true)
+    expect(init.headers['Authorization']).toBe('Bearer tok')
+    expect(res.room_id).toBe(7)
+    expect(res.user_id).toBe(1)
+    expect(res.role).toBe('guest')
+  })
+
+  it('redeemInvite URL-encodes a token with no special chars verbatim', async () => {
+    const mockFetch = mockFetchOk({ room_id: 1, user_id: 1, role: 'guest', joined_at: 't' })
+    await api.redeemInvite('plain-token-no-slashes')
+    const [url] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/invites\/plain-token-no-slashes\/redeem$/)
+  })
+
+  it('redeemInvite propagates APIError on 401 / 404 / 409 / 410', async () => {
+    for (const status of [401, 404, 409, 410]) {
+      const mockFetch = vi.fn().mockResolvedValue({ status, ok: false, text: async () => `err ${status}` })
+      global.fetch = mockFetch
+      await expect(api.redeemInvite('plain-token')).rejects.toMatchObject({ status })
+    }
+  })
+
+  it('lifecycle requests never carry identity fields (createRoom + redeemInvite body audit)', async () => {
+    const createMock = mockFetchOk({ id: 1, slug: 'lobby', name: 'Lobby', status: 'active' }, 201)
+    await api.createRoom('lobby', 'Lobby')
+    const createBody = JSON.parse(createMock.mock.calls[0][1].body)
+    const createWire = JSON.stringify({ url: createMock.mock.calls[0][0], ...createBody })
+    expect(createWire).not.toMatch(/(user_id|user_role|added_by|requested_by|display_name|room_id|membership_role)/)
+
+    const redeemMock = mockFetchOk({ room_id: 1, user_id: 1, role: 'guest', joined_at: 't' })
+    await api.redeemInvite('tok')
+    const redeemUrl = redeemMock.mock.calls[0][0]
+    const redeemBody = redeemMock.mock.calls[0][1].body
+    expect(JSON.stringify(redeemUrl)).not.toMatch(/(user_id|user_role|added_by|requested_by|display_name|room_id|membership_role)/)
+    expect(redeemBody === undefined || redeemBody === '' || redeemBody === null).toBe(true)
+  })
+
+  it('does NOT expose api.joinRoom (no arbitrary join endpoint exists)', () => {
+    expect(api.joinRoom).toBeUndefined()
+  })
+})

@@ -33,6 +33,15 @@
         >
           <span class="copy-token-label">Copy token for extension</span>
         </button>
+        <button
+          type="button"
+          class="rooms-nav-btn"
+          data-testid="rooms-nav-btn"
+          @click="handleOpenRooms"
+          title="Browse, create, or join a room"
+        >
+          Rooms
+        </button>
         <span class="user-name">{{ currentUser?.display_name }}</span>
         <button class="logout-btn" @click="handleLogout">Exit</button>
       </div>
@@ -272,6 +281,14 @@ const handleLogout = () => {
   router.push({ name: 'Auth' })
 }
 
+// R05b1: navigation control to the room entry surface. The
+// global Dashboard remains the login destination until R14d;
+// the Rooms button is the only place the user can find the room
+// create / list / manual-open / invite-redeem forms.
+const handleOpenRooms = () => {
+  router.push({ name: 'RoomEntry' })
+}
+
 const sessionValid = computed(() => sessionHelper.isValid())
 
 async function handleCopySessionToken() {
@@ -436,6 +453,27 @@ function onEnableBrowserNotifications() {
 
 .copy-token-btn:hover {
   background: rgba(62, 166, 255, 0.22);
+  border-color: var(--accent-hover);
+}
+
+/* R05b1: Rooms navigation control. Sits between the Copy-token
+   button and the user name. Same surface family as the other
+   top-nav controls so the eye lands on it as a primary action. */
+.rooms-nav-btn {
+  background: rgba(0, 212, 255, 0.12);
+  color: var(--accent-hover);
+  border: 1px solid rgba(0, 212, 255, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 0.35rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+.rooms-nav-btn:hover {
+  background: rgba(0, 212, 255, 0.22);
   border-color: var(--accent-hover);
 }
 

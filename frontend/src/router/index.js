@@ -22,6 +22,16 @@ const routes = [
     name: 'Room',
     component: () => import('../views/RoomView.vue'),
     meta: { requiresAuth: true }
+  },
+  {
+    // R05b1: room entry surface. Lists active rooms and exposes
+    // create / manual-open / invite-redeem forms. Requires auth like
+    // the other room routes; the global Dashboard remains the
+    // login destination until R14d.
+    path: '/rooms',
+    name: 'RoomEntry',
+    component: () => import('../views/RoomEntryView.vue'),
+    meta: { requiresAuth: true }
   }
 ]
 

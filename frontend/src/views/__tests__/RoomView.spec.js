@@ -962,6 +962,32 @@ describe('RoomView', () => {
     wrapper.unmount()
     globalStore.clearUser()
   })
+
+  // --- R05b1: Back button navigates to RoomEntry, not Dashboard ---
+
+  it('handleBack navigates to RoomEntry (not Dashboard) per R05b1', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    // Capture router.push calls.
+    const routerPush = vi.fn()
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/rooms/:slug', name: 'Room', component: RoomView, meta: { requiresAuth: true } },
+        { path: '/rooms', name: 'RoomEntry', component: { template: '<div />' } },
+        { path: '/', name: 'Dashboard', component: { template: '<div />' } },
+      ],
+    })
+    const origPush = router.push
+    router.push = (...args) => { routerPush(...args); return origPush.apply(router, args) }
+    const wrapper = shallowMount(RoomView, { global: { plugins: [router] } })
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    await wrapper.find('.logout-btn').trigger('click')
+    expect(routerPush).toHaveBeenCalledWith({ name: 'RoomEntry' })
+    // Back must NOT navigate to Dashboard anymore.
+    expect(routerPush).not.toHaveBeenCalledWith({ name: 'Dashboard' })
+    wrapper.unmount()
+  })
 })
 
 // --- R11a: room chat panel ---

@@ -498,4 +498,21 @@ describe('DashboardView', () => {
       })
     })
   })
+
+  // --- R05b1: Rooms navigation control ---
+
+  describe('Rooms navigation (R05b1)', () => {
+    it('renders a Rooms button in the top nav', () => {
+      const wrapper = shallowMount(DashboardView)
+      const btn = wrapper.find('[data-testid="rooms-nav-btn"]')
+      expect(btn.exists()).toBe(true)
+      expect(btn.text()).toMatch(/Rooms/i)
+    })
+
+    it('Rooms button navigates to the RoomEntry route', async () => {
+      const wrapper = shallowMount(DashboardView)
+      await wrapper.find('[data-testid="rooms-nav-btn"]').trigger('click')
+      expect(mockPush).toHaveBeenCalledWith({ name: 'RoomEntry' })
+    })
+  })
 })

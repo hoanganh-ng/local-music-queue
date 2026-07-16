@@ -370,5 +370,55 @@ export const api = {
       method: 'POST',
       body: { content: String(content == null ? '' : content) }
     })
+  },
+
+  // --- R05b1: room entry, creation, and invite redemption UI ---
+  //
+  // Thin wrappers around the existing R04 / R10a backend routes. Bearer-token
+  // auth via api.request; identity comes from the session, never the body.
+  // Slugs and tokens are URL-encoded through encodeURIComponent so reserved
+  // characters in a slug or token (slashes, spaces, +, =) survive the trip
+  // without changing the path shape.
+  //
+  //   - createRoom: POST /rooms with body exactly { slug, name }. No
+  //     user_id, no role, no display name on the wire. Returns the
+  //     created entity.Room (id, slug, name, status, timestamps).
+  //   - listRooms: GET /rooms?status=active. status defaults to "active"
+  //     (the documented lifecycle filter). An intentionally empty status
+  //     omits the query so callers can request all rooms; non-empty
+  //     statuses are appended verbatim. Returns an array of entity.Room.
+  //   - getRoom: GET /rooms/{encodedSlug}. No body. Used by the manual
+  //     "open by slug" affordance to validate a slug before navigating.
+  //     Returns the matching entity.Room.
+  //   - redeemInvite: POST /invites/{encodedToken}/redeem with NO body.
+  //     Used by the invite-redeem form. Returns the RoomMember (room_id,
+  //     user_id, role, joined_at). The frontend uses membership.room_id
+  //     + a refreshed active-room list to resolve the room slug for
+  //     navigation (the wire does not carry the slug).
+  //
+  // Joining a room means invite redemption — there is no arbitrary
+  // joinRoom endpoint, and api.joinRoom is intentionally NOT added.
+  async createRoom(slug, name) {
+    return this.request('/rooms', {
+      method: 'POST',
+      body: { slug: String(slug == null ? '' : slug), name: String(name == null ? '' : name) }
+    })
+  },
+
+  async listRooms(status = 'active') {
+    const q = status ? `?status=${encodeURIComponent(String(status))}` : ''
+    return this.request(`/rooms${q}`, { method: 'GET' })
+  },
+
+  async getRoom(slug) {
+    return this.request(`/rooms/${encodeURIComponent(String(slug == null ? '' : slug))}`, {
+      method: 'GET'
+    })
+  },
+
+  async redeemInvite(token) {
+    return this.request(`/invites/${encodeURIComponent(String(token == null ? '' : token))}/redeem`, {
+      method: 'POST'
+    })
   }
 }

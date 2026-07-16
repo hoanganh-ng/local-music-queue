@@ -1093,7 +1093,7 @@ async function toggleRoomAutoQueue() {
 }
 
 function handleBack() {
-  router.push({ name: 'Dashboard' })
+  router.push({ name: 'RoomEntry' })
 }
 
 // --- R10c: delete-room + remove-member handlers ---
