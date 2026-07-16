@@ -189,14 +189,15 @@ describe('RoomEntryView', () => {
     await vm.openBySlug()
     expect(wrapper.find('[data-testid="manual-open-error"]').text()).toMatch(/signed out/i)
 
-    // Archived room: cleared message + still navigates (RoomView
-    // surfaces its own archived banner).
+    // Archived room: surface the unavailable message AND MUST NOT
+    // navigate. The user remains on RoomEntry; they can still join
+    // through an invite-token redemption if they have one.
     pushMock.mockClear()
     vm.manualSlug = 'archive'
     apiMock.getRoom.mockResolvedValueOnce({ id: 1, slug: 'archive', name: 'Archive', status: 'archived' })
     await vm.openBySlug()
     expect(wrapper.find('[data-testid="manual-open-error"]').text()).toMatch(/no longer available/i)
-    expect(pushMock).toHaveBeenCalledWith({ name: 'Room', params: { slug: 'archive' } })
+    expect(pushMock).not.toHaveBeenCalled()
   })
 
   it('create room success clears the form, refreshes the list, and navigates', async () => {
@@ -297,7 +298,8 @@ describe('RoomEntryView', () => {
     expect(wrapper.find('[data-testid="invite-error"]').text()).toMatch(/invalid|expired|revoked/i)
   })
 
-  it('invite token is NEVER placed in the URL, localStorage, sessionStorage, or console', async () => {
+  it('invite token is NEVER placed in SPA/router URL, route query/history, storage, logs, or displayed messages', async () => {
+    const TOKEN = 'TOPSECRET-DO-NOT-LOG'
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -305,24 +307,57 @@ describe('RoomEntryView', () => {
     const { wrapper } = mountRoomEntry()
     await flushPromises()
     const vm = wrapper.vm
-    vm.inviteToken = 'TOPSECRET-DO-NOT-LOG'
+    vm.inviteToken = TOKEN
     await vm.submitRedeemInvite()
-    expect(localStorage.getItem('TOPSECRET-DO-NOT-LOG')).toBeNull()
-    expect(sessionStorage.getItem('TOPSECRET-DO-NOT-LOG')).toBeNull()
+
+    // (a) Storage: scan EVERY localStorage + sessionStorage key/value
+    // (not just the token string as a key — the token could be
+    // stored as the value of another key).
+    for (const store of [localStorage, sessionStorage]) {
+      for (let i = 0; i < store.length; i++) {
+        const key = store.key(i)
+        const value = store.getItem(key)
+        expect(key || '').not.toContain(TOKEN)
+        expect(value || '').not.toContain(TOKEN)
+      }
+    }
+
+    // (b) Router calls: every push argument serialized MUST NOT
+    // contain the raw token. The encoded backend path IS allowed
+    // (it is the documented API URL and is covered separately by
+    // the roomApi.spec.js test) — but no SPA-side router push,
+    // route query, or route params may carry the token.
+    for (const call of pushMock.mock.calls) {
+      for (const arg of call) {
+        const flat = JSON.stringify(arg)
+        expect(flat).not.toContain(TOKEN)
+      }
+    }
+
+    // (c) Console logs: every log/warn/error MUST NOT contain the
+    // raw token.
     for (const spy of [logSpy, warnSpy, errSpy]) {
       for (const call of spy.mock.calls) {
         const flat = call.map((a) => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')
-        expect(flat).not.toContain('TOPSECRET-DO-NOT-LOG')
+        expect(flat).not.toContain(TOKEN)
       }
     }
-    for (const call of toastMock.error.mock.calls) {
-      const flat = call.map((a) => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')
-      expect(flat).not.toContain('TOPSECRET-DO-NOT-LOG')
+
+    // (d) Displayed messages: every toast call (error / success /
+    // info) MUST NOT contain the raw token.
+    for (const toastFn of [toastMock.error, toastMock.success, toastMock.info]) {
+      for (const call of toastFn.mock.calls) {
+        const flat = call.map((a) => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')
+        expect(flat).not.toContain(TOKEN)
+      }
     }
-    for (const call of toastMock.success.mock.calls) {
-      const flat = call.map((a) => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')
-      expect(flat).not.toContain('TOPSECRET-DO-NOT-LOG')
-    }
+
+    // (e) DOM-rendered text: the visible RoomEntry HTML MUST NOT
+    // contain the raw token. (Encoded representations are still
+    // allowed since they are the documented backend API URL shape,
+    // but the raw token string itself must never appear.)
+    expect(wrapper.html()).not.toContain(TOKEN)
+
     logSpy.mockRestore()
     warnSpy.mockRestore()
     errSpy.mockRestore()

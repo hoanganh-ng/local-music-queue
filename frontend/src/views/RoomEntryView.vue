@@ -299,11 +299,15 @@ async function openBySlug() {
       manualOpenError.value = 'Room not found.'
       return
     }
-    // Backend response carries the canonical status. Surfaces an
-    // explicit hint for archived rooms (the user can still navigate;
-    // RoomView will display the archived banner).
+    // Archived rooms (or any non-active status) MUST NOT navigate.
+    // Per the R05b1 contract: active room → navigate; archived room
+    // → show unavailable message and remain on RoomEntry. The user
+    // can still open the room via an invite-token redemption; we
+    // never silently push them to a RoomView that would render the
+    // archived banner for a slug they typed by hand.
     if (room.status && room.status !== 'active') {
       manualOpenError.value = 'This room is no longer available.'
+      return
     }
     router.push({ name: 'Room', params: { slug: room.slug } })
   } catch (e) {

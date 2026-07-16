@@ -56,6 +56,7 @@ Frontend tests:
 - `frontend/src/views/__tests__/RoomEntryView.spec.js` — new file (22 tests).
 - `frontend/src/views/__tests__/DashboardView.spec.js` — added `Rooms navigation (R05b1)` describe block (2 tests).
 - `frontend/src/views/__tests__/RoomView.spec.js` — added `handleBack navigates to RoomEntry (not Dashboard) per R05b1` test.
+- `frontend/src/router/__tests__/router.spec.js` — new file (7 tests) pinning the production router's `requiresAuth` guard: `/rooms` requires auth, authenticated `/rooms` → `RoomEntry`, authenticated `/auth` → `Dashboard`, unauthenticated `/` and `/rooms/:slug` → `Auth`, stale localStorage user without a valid session is cleared on protected-route visits.
 
 Project management:
 - `documents/00-project-management/SPRINTS/023-room-entry-ui.md` — this file.
@@ -147,7 +148,7 @@ Status-code mapping (frontend-only, presentational):
 | manual-open | 401 | You are signed out. Log in again. |
 | manual-open | 404 | Room not found. |
 | manual-open | other | Could not open room. |
-| manual-open (archived room) | — | This room is no longer available. (also navigates; RoomView surfaces its own archived banner) |
+| manual-open (archived room) | — | This room is no longer available. (MUST NOT navigate; the user remains on RoomEntry and can still join via an invite-token redemption) |
 | create | 400 | Invalid or reserved slug or name. |
 | create | 401 | You are signed out. Log in again. |
 | create | 409 | A room with this slug already exists. |
@@ -160,17 +161,23 @@ Status-code mapping (frontend-only, presentational):
 
 The active-room list heading is **Active rooms**. The hint states that an invite is required to open a room the actor has not joined. Listed rooms navigate directly to `/rooms/{slug}` — the manual-open form calls `getRoom` first, but a listed room is NEVER probed with an additional membership check.
 
+### Archived-room behavior (manual-open)
+
+Per the R05b1 contract: an active room navigates to `RoomView`; an archived (or otherwise non-active) room shows "This room is no longer available." and **does not navigate**. The user remains on RoomEntry and can still join through an invite-token redemption if they hold one. The handler short-circuits with an immediate `return` after surfacing the error message; no `router.push` is invoked for non-active rooms.
+
 ### Invite-token sensitivity
 
-Treat invite tokens as sensitive across the entire flow:
+Treat invite tokens as sensitive across the entire flow. The raw (unencoded) token MUST NOT appear in:
 
-- never placed in a route query;
-- never persisted in localStorage or sessionStorage;
-- never printed to console;
-- never included in toast / error text;
-- cleared from the form input on both successful AND failed redemption.
+- the SPA / router URL (route path, route query, route params, or any other router state);
+- `localStorage` or `sessionStorage` (as a key OR as the value of any key);
+- `console.log` / `console.warn` / `console.error`;
+- toast messages, error text, or any other displayed message;
+- the rendered DOM text of RoomEntryView.
 
-The clear-on-failure path is intentional: a failed redemption must not leave the token lingering in the form after the user sees the error.
+The encoded backend API URL (`/api/invites/{encodedToken}/redeem`) DOES contain the encoded token — that is the documented wire shape and is verified separately by `frontend/src/services/__tests__/roomApi.spec.js`. The SPA-side restriction is on the raw token string and on every SPA-visible surface above.
+
+The invite input is cleared from the form on both successful AND failed redemption. The clear-on-failure path is intentional: a failed redemption must not leave the token lingering in the form after the user sees the error.
 
 ### Dashboard navigation
 
@@ -208,7 +215,7 @@ The clear-on-failure path is intentional: a failed redemption must not leave the
 - A stale refresh response does NOT overwrite a newer refresh result.
 - Opens a listed room on click without making an additional membership probe.
 - Renders an Open button for each listed room with the per-room data-testid.
-- Manual open by slug: active room navigates; 400/401/404 surface clear errors; archived room shows the "no longer available" message but still navigates.
+- Manual open by slug: active room navigates; 400/401/404 surface clear errors; archived room shows the "no longer available" message AND does NOT navigate.
 - Create room success clears the form, refreshes the list, and navigates.
 - Create room maps 400 / 401 / 409 / 500 to clear error messages.
 - Create room trims whitespace before submitting slug and name.
@@ -216,7 +223,7 @@ The clear-on-failure path is intentional: a failed redemption must not leave the
 - Invite redemption resolves `room_id` to slug via a refreshed active-room list and navigates.
 - Invite token is cleared after a successful redemption.
 - Invite token is cleared after a FAILED redemption (no lingering token in the form).
-- Invite token is NEVER placed in the URL, localStorage, sessionStorage, or console (log/warn/error spies + toast mock audit).
+- Invite token is NEVER placed in the SPA/router URL, route query/history, storage (every key/value of `localStorage` and `sessionStorage`), `console.log` / `console.warn` / `console.error`, toast messages, or the rendered DOM text. Every router `push` argument is also asserted to not contain the raw token.
 - Invite redemption existing-member outcome (room_id present) navigates normally.
 - Invite redemption with follow-up list failure surfaces a non-token success message and does NOT retry redemption.
 - Invite redemption maps 401 / 404 / 409 / 410 to distinct error messages.
@@ -233,10 +240,20 @@ The clear-on-failure path is intentional: a failed redemption must not leave the
 
 - `handleBack` navigates to `RoomEntry` (NOT `Dashboard`).
 
+### `frontend/src/router/__tests__/router.spec.js` — Production router guard (R05b1)
+
+- The production `frontend/src/router/index.js` exposes the `/rooms` route as `name: 'RoomEntry'` with `meta.requiresAuth: true`.
+- Unauthenticated `/rooms` redirects to `Auth`.
+- Authenticated `/rooms` lands on `RoomEntry`.
+- Authenticated `/auth` redirects to `Dashboard` (R14d owns changing the default destination).
+- Unauthenticated `/rooms/:slug` redirects to `Auth`.
+- Unauthenticated `/` redirects to `Auth`.
+- Stale `localStorage` user without a valid session is cleared on protected-route visits and the visit is redirected to `Auth`.
+
 ## Verification
 
 ```text
-cd frontend && npm run test:unit -- --run   # 345/345 pass
+cd frontend && npm run test:unit -- --run   # 352/352 pass
 cd frontend && npm run build                 # clean
 git diff --check                             # clean
 ```
@@ -262,11 +279,17 @@ R05b1 preserves: the global Dashboard, the login destination, the global `/ws` 1
 
 R05b1 does NOT introduce a `joinRoom` endpoint, a global error framework, or any change to the backend, SQL, WebSocket, Docker, Nginx, or auth contracts. R05b1 keeps the `/auth` redirect-to-dashboard contract intact.
 
-Verification (recorded 2026-07-16):
+Verification (recorded 2026-07-16, post corrective-pass):
 
-- `cd frontend && npm run test:unit -- --run` — **345 / 345 pass**.
-- `cd frontend && npm run build` — **clean** (RoomEntryView chunks present: `RoomEntryView-C2d2jp03.js`, `RoomEntryView-aRB4YKJ3.css`).
+- `cd frontend && npm run test:unit -- --run` — **352 / 352 pass** (345 baseline + 7 new production-router-guard tests in `frontend/src/router/__tests__/router.spec.js`).
+- `cd frontend && npm run build` — **clean** (RoomEntryView chunks present: `RoomEntryView-BT-bzez4.js`, `RoomEntryView-EmcJCVrD.css`).
 - `git diff --check` — **clean**.
+
+Corrective-pass changes (recorded 2026-07-16):
+
+- Archived (or otherwise non-active) rooms in the manual-open form now short-circuit with an immediate `return` after surfacing the "This room is no longer available." message — they MUST NOT navigate to `RoomView`. The user remains on `RoomEntry` and can still join through an invite-token redemption.
+- Invite-token sensitivity wording tightened: the raw (unencoded) token MUST NOT appear in the SPA / router URL, route query, route history, `localStorage` / `sessionStorage` (every key/value, not just the token string as a key), `console.log` / `console.warn` / `console.error`, toast messages, or the rendered DOM text. The encoded backend API URL (`/api/invites/{encodedToken}/redeem`) still contains the encoded token — that is the documented wire shape and is verified separately by `frontend/src/services/__tests__/roomApi.spec.js`.
+- New `frontend/src/router/__tests__/router.spec.js` exercises the production `frontend/src/router/index.js` so the production route registration + `beforeEach` guard are not silently regressed (unauthenticated `/rooms` → `Auth`, authenticated `/rooms` → `RoomEntry`, authenticated `/auth` → `Dashboard`).
 
 ## R05b2 — next slice (planned, NOT active)
 
