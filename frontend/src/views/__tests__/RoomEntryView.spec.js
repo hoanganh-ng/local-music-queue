@@ -190,8 +190,8 @@ describe('RoomEntryView', () => {
     expect(wrapper.find('[data-testid="manual-open-error"]').text()).toMatch(/signed out/i)
 
     // Archived room: surface the unavailable message AND MUST NOT
-    // navigate. The user remains on RoomEntry; they can still join
-    // through an invite-token redemption if they have one.
+    // navigate. The user remains on RoomEntry; archived rooms
+    // cannot be opened or joined.
     pushMock.mockClear()
     vm.manualSlug = 'archive'
     apiMock.getRoom.mockResolvedValueOnce({ id: 1, slug: 'archive', name: 'Archive', status: 'archived' })

@@ -25,9 +25,10 @@ vi.mock('../../views/RoomEntryView.vue', () => ({ default: { template: '<div />'
 vi.mock('../../views/__tests__/stub-empty', () => ({ default: { template: '<div />' } }))
 
 function loadProductionRouter() {
-  // Re-import fresh so each test starts from a clean module state.
-  // The router module captures a singleton router, so we read it
-  // directly via dynamic import.
+  // The production router is a module-level singleton (constructed
+  // once at first import). Tests share that cached instance; each
+  // case resets auth/session state in `beforeEach` and performs
+  // an explicit navigation so the guard runs against a clean slate.
   return import('../index')
 }
 

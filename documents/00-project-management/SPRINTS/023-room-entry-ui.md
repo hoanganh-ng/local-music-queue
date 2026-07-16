@@ -1,6 +1,6 @@
 # Sprint R05b1 — Room entry, creation, and invite redemption UI
 
-**Status (2026-07-16):** Implemented on `dev`. Pending Product Owner acceptance.
+**Status (2026-07-16):** **Closed on `dev` (2026-07-16) and accepted by the Product Owner on 2026-07-16.** R05b1 was implemented on `dev` (2026-07-16) at commit `245f3c3`, corrected at commit `24a52449` (corrective pass for archived-room navigation, production-router tests, tightened invite-token sensitivity wording and tests), and accepted by the Product Owner on 2026-07-16. The accepted runtime scope is: authenticated `/rooms` entry route; active-room listing, manual open by slug, create-room, and invite-redemption UI; `Dashboard → Rooms` navigation; `RoomView Back → RoomEntry`; no arbitrary `joinRoom` contract; no player-lease UI or heartbeat lifecycle work. R05b2 remains planned and inactive; R05b remains incomplete as an R14c prerequisite until R05b2 is separately implemented, reviewed, and accepted.
 
 R05b is split into two slices:
 
@@ -148,7 +148,7 @@ Status-code mapping (frontend-only, presentational):
 | manual-open | 401 | You are signed out. Log in again. |
 | manual-open | 404 | Room not found. |
 | manual-open | other | Could not open room. |
-| manual-open (archived room) | — | This room is no longer available. (MUST NOT navigate; the user remains on RoomEntry and can still join via an invite-token redemption) |
+| manual-open (archived room) | — | This room is no longer available. (MUST NOT navigate; the user remains on RoomEntry; archived rooms cannot be opened or joined) |
 | create | 400 | Invalid or reserved slug or name. |
 | create | 401 | You are signed out. Log in again. |
 | create | 409 | A room with this slug already exists. |
@@ -163,7 +163,7 @@ The active-room list heading is **Active rooms**. The hint states that an invite
 
 ### Archived-room behavior (manual-open)
 
-Per the R05b1 contract: an active room navigates to `RoomView`; an archived (or otherwise non-active) room shows "This room is no longer available." and **does not navigate**. The user remains on RoomEntry and can still join through an invite-token redemption if they hold one. The handler short-circuits with an immediate `return` after surfacing the error message; no `router.push` is invoked for non-active rooms.
+Per the R05b1 contract: an active room navigates to `RoomView`; an archived (or otherwise non-active) room shows "This room is no longer available." and **does not navigate**. The user remains on RoomEntry; archived rooms cannot be opened or joined (the backend `RedeemInvite` path rejects an archived room with `ErrArchived`, surfaced as HTTP 409). The handler short-circuits with an immediate `return` after surfacing the error message; no `router.push` is invoked for non-active rooms.
 
 ### Invite-token sensitivity
 
@@ -215,7 +215,7 @@ The invite input is cleared from the form on both successful AND failed redempti
 - A stale refresh response does NOT overwrite a newer refresh result.
 - Opens a listed room on click without making an additional membership probe.
 - Renders an Open button for each listed room with the per-room data-testid.
-- Manual open by slug: active room navigates; 400/401/404 surface clear errors; archived room shows the "no longer available" message AND does NOT navigate.
+- Manual open by slug: active room navigates; 400/401/404 surface clear errors; archived room shows the "no longer available" message AND does NOT navigate. The test asserts `pushMock` is never called for the archived case.
 - Create room success clears the form, refreshes the list, and navigates.
 - Create room maps 400 / 401 / 409 / 500 to clear error messages.
 - Create room trims whitespace before submitting slug and name.
@@ -287,9 +287,21 @@ Verification (recorded 2026-07-16, post corrective-pass):
 
 Corrective-pass changes (recorded 2026-07-16):
 
-- Archived (or otherwise non-active) rooms in the manual-open form now short-circuit with an immediate `return` after surfacing the "This room is no longer available." message — they MUST NOT navigate to `RoomView`. The user remains on `RoomEntry` and can still join through an invite-token redemption.
+- Archived (or otherwise non-active) rooms in the manual-open form now short-circuit with an immediate `return` after surfacing the "This room is no longer available." message — they MUST NOT navigate to `RoomView`. The user remains on `RoomEntry`; archived rooms cannot be opened or joined.
 - Invite-token sensitivity wording tightened: the raw (unencoded) token MUST NOT appear in the SPA / router URL, route query, route history, `localStorage` / `sessionStorage` (every key/value, not just the token string as a key), `console.log` / `console.warn` / `console.error`, toast messages, or the rendered DOM text. The encoded backend API URL (`/api/invites/{encodedToken}/redeem`) still contains the encoded token — that is the documented wire shape and is verified separately by `frontend/src/services/__tests__/roomApi.spec.js`.
-- New `frontend/src/router/__tests__/router.spec.js` exercises the production `frontend/src/router/index.js` so the production route registration + `beforeEach` guard are not silently regressed (unauthenticated `/rooms` → `Auth`, authenticated `/rooms` → `RoomEntry`, authenticated `/auth` → `Dashboard`).
+- New `frontend/src/router/__tests__/router.spec.js` exercises the production `frontend/src/router/index.js` so the production route registration + `beforeEach` guard are not silently regressed (unauthenticated `/rooms` → `Auth`, authenticated `/rooms` → `RoomEntry`, authenticated `/auth` → `Dashboard`). The production router is a module-level singleton (constructed once at first import); each test resets auth/session state in `beforeEach` and performs an explicit navigation so the guard runs against a clean slate.
+
+## Closure pass (2026-07-16)
+
+Documentation-only closure. R05b1 was accepted by the Product Owner on 2026-07-16 at corrective commit `24a52449`. The closure pass recorded here corrects the inaccurate explanatory wording in three locations:
+
+- `frontend/src/views/RoomEntryView.vue` — `openBySlug` comment no longer claims a user can join an archived room through invite redemption. Archived rooms cannot be opened or joined (the backend `RedeemInvite` path rejects an archived room with `ErrArchived`, surfaced as HTTP 409).
+- `frontend/src/views/__tests__/RoomEntryView.spec.js` — archived-case comment now reads "The user remains on RoomEntry; archived rooms cannot be opened or joined."
+- `documents/00-project-management/SPRINTS/023-room-entry-ui.md` — archived-room status-code table row, the "Archived-room behavior (manual-open)" section, and the test inventory bullet all use the corrected wording.
+
+The closure pass also corrects the `frontend/src/router/__tests__/router.spec.js` comment that implied each `import('../index')` produces a fresh production-router module: the production router is a cached module-level singleton; tests share that instance and reset auth/session state in `beforeEach` before each navigation.
+
+The closure pass changes NO runtime behavior. It records R05b1 as closed/accepted, leaves R05b2 planned and inactive, and leaves R05b incomplete as an R14c prerequisite until R05b2 is separately implemented, reviewed, and accepted.
 
 ## R05b2 — next slice (planned, NOT active)
 

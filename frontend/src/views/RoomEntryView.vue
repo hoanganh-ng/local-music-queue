@@ -301,10 +301,11 @@ async function openBySlug() {
     }
     // Archived rooms (or any non-active status) MUST NOT navigate.
     // Per the R05b1 contract: active room → navigate; archived room
-    // → show unavailable message and remain on RoomEntry. The user
-    // can still open the room via an invite-token redemption; we
-    // never silently push them to a RoomView that would render the
-    // archived banner for a slug they typed by hand.
+    // → show unavailable message and remain on RoomEntry. Archived
+    // rooms cannot be opened or joined (the backend RedeemInvite
+    // path rejects an archived room with ErrArchived, surfaced as
+    // HTTP 409), so we never silently push the user into a RoomView
+    // for an archived slug they typed by hand.
     if (room.status && room.status !== 'active') {
       manualOpenError.value = 'This room is no longer available.'
       return
