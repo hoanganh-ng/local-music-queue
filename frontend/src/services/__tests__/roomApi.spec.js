@@ -520,3 +520,127 @@ describe('Room Entry / Create / Redeem API (R05b1)', () => {
     expect(api.joinRoom).toBeUndefined()
   })
 })
+
+// --- R05b2: player-lease API ---
+
+describe('Player Lease API (R05b2)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    sessionStorage.clear()
+    sessionHelper.clearSession()
+    vi.restoreAllMocks()
+  })
+
+  function mockFetchOk(json = {}, status = 200) {
+    const mockFetch = vi.fn().mockResolvedValue({
+      status, ok: true, json: async () => json
+    })
+    global.fetch = mockFetch
+    return mockFetch
+  }
+
+  it('claimRoomPlayerLease targets POST /rooms/{slug}/player/claim with NO body and bearer when valid', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    const mockFetch = mockFetchOk({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' }, 201)
+    const res = await api.claimRoomPlayerLease('lobby')
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/player\/claim$/)
+    expect(init.method).toBe('POST')
+    expect(init.body === undefined || init.body === '' || init.body === null).toBe(true)
+    expect(init.headers['Authorization']).toBe('Bearer tok')
+    expect(res.claimed_by_user_id).toBe(1)
+  })
+
+  it('heartbeatRoomPlayerLease targets POST /rooms/{slug}/player/heartbeat with NO body', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    const mockFetch = mockFetchOk({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't2', expires_at: 't2' })
+    const res = await api.heartbeatRoomPlayerLease('lobby')
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/player\/heartbeat$/)
+    expect(init.method).toBe('POST')
+    expect(init.body === undefined || init.body === '' || init.body === null).toBe(true)
+    expect(init.headers['Authorization']).toBe('Bearer tok')
+    expect(res.last_heartbeat_at).toBe('t2')
+  })
+
+  it('releaseRoomPlayerLease targets POST /rooms/{slug}/player/release with NO body and returns null on 204', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    const mockFetch = vi.fn().mockResolvedValue({ status: 204, ok: true, json: async () => '' })
+    global.fetch = mockFetch
+    const res = await api.releaseRoomPlayerLease('lobby')
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/player\/release$/)
+    expect(init.method).toBe('POST')
+    expect(init.body === undefined || init.body === '' || init.body === null).toBe(true)
+    expect(init.headers['Authorization']).toBe('Bearer tok')
+    expect(res).toBeNull()
+  })
+
+  it('getRoomPlayerLease targets GET /rooms/{slug}/player/lease with NO body', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    const mockFetch = mockFetchOk({ id: 1, room_id: 7, claimed_by_user_id: 2, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    const res = await api.getRoomPlayerLease('lobby')
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/lobby\/player\/lease$/)
+    expect(init.method).toBe('GET')
+    expect(init.body === undefined || init.body === '' || init.body === null).toBe(true)
+    expect(init.headers['Authorization']).toBe('Bearer tok')
+    expect(res.claimed_by_user_id).toBe(2)
+  })
+
+  it('getRoomPlayerLease URL-encodes slugs with reserved characters', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    const mockFetch = mockFetchOk({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    await api.getRoomPlayerLease('weird slug')
+    const [url] = mockFetch.mock.calls[0]
+    expect(url).toMatch(/\/api\/rooms\/weird%20slug\/player\/lease$/)
+  })
+
+  it('claimRoomPlayerLease propagates APIError on 400 / 401 / 403 / 404 / 409 / 410', async () => {
+    for (const status of [400, 401, 403, 404, 409, 410]) {
+      const mockFetch = vi.fn().mockResolvedValue({ status, ok: false, text: async () => `err ${status}` })
+      global.fetch = mockFetch
+      await expect(api.claimRoomPlayerLease('lobby')).rejects.toMatchObject({ status })
+    }
+  })
+
+  it('heartbeatRoomPlayerLease propagates APIError on 400 / 401 / 403 / 404 / 409 / 410', async () => {
+    for (const status of [400, 401, 403, 404, 409, 410]) {
+      const mockFetch = vi.fn().mockResolvedValue({ status, ok: false, text: async () => `err ${status}` })
+      global.fetch = mockFetch
+      await expect(api.heartbeatRoomPlayerLease('lobby')).rejects.toMatchObject({ status })
+    }
+  })
+
+  it('releaseRoomPlayerLease propagates APIError on 400 / 401 / 403 / 404 / 409', async () => {
+    for (const status of [400, 401, 403, 404, 409]) {
+      const mockFetch = vi.fn().mockResolvedValue({ status, ok: false, text: async () => `err ${status}` })
+      global.fetch = mockFetch
+      await expect(api.releaseRoomPlayerLease('lobby')).rejects.toMatchObject({ status })
+    }
+  })
+
+  it('getRoomPlayerLease propagates APIError on 400 / 401 / 403 / 404 / 409', async () => {
+    for (const status of [400, 401, 403, 404, 409]) {
+      const mockFetch = vi.fn().mockResolvedValue({ status, ok: false, text: async () => `err ${status}` })
+      global.fetch = mockFetch
+      await expect(api.getRoomPlayerLease('lobby')).rejects.toMatchObject({ status })
+    }
+  })
+
+  it('lifecycle requests never carry identity or lease fields', async () => {
+    const future = new Date(Date.now() + 1000 * 60 * 60).toISOString()
+    sessionHelper.saveSession('tok', future)
+    const mockFetch = mockFetchOk({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' }, 201)
+    await api.claimRoomPlayerLease('lobby')
+    const [url, init] = mockFetch.mock.calls[0]
+    const bodyText = init.body ?? '{}'
+    const wire = JSON.stringify({ url, ...(bodyText ? { body: JSON.parse(bodyText) } : {}) })
+    expect(wire).not.toMatch(/(user_id|user_role|added_by|requested_by|display_name|device_id|browser_id|claimed_at|last_heartbeat_at|expires_at)/)
+  })
+})

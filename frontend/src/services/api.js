@@ -420,5 +420,56 @@ export const api = {
     return this.request(`/invites/${encodeURIComponent(String(token == null ? '' : token))}/redeem`, {
       method: 'POST'
     })
+  },
+
+  // --- R05b2: player lease (frontend) ---
+  //
+  // Thin wrappers around the existing player-lease routes registered
+  // in cmd/server/main.go (lines 477–488). Bearer-token auth via
+  // api.request; identity comes from the session, never the body. Slugs
+  // are URL-encoded through encodeURIComponent so reserved characters
+  // survive the trip without changing the path shape. None of the four
+  // methods carries any client-supplied identity field — the backend
+  // ignores them when present and uses the bearer-token-resolved user
+  // as the source of truth.
+  //
+  //   - claimRoomPlayerLease: POST /api/rooms/{slug}/player/claim.
+  //     Host-only. Returns the post-mutation entity.PlayerLease
+  //     (id, room_id, claimed_by_user_id, claimed_at,
+  //     last_heartbeat_at, expires_at, ended_at?). 409 if a valid
+  //     lease already exists.
+  //   - heartbeatRoomPlayerLease: POST
+  //     /api/rooms/{slug}/player/heartbeat. Current-holder-only.
+  //     Renews expires_at and returns the post-mutation lease. 403
+  //     for non-holder, 410 past grace.
+  //   - releaseRoomPlayerLease: POST
+  //     /api/rooms/{slug}/player/release. Host-only. Ends the lease
+  //     and archives the room. Returns 204 → null. 404 if no active
+  //     lease exists (no mutation, no broadcast).
+  //   - getRoomPlayerLease: GET /api/rooms/{slug}/player/lease. Any
+  //     active member may read. Returns the current lease or 404
+  //     when none exists.
+  async claimRoomPlayerLease(slug) {
+    return this.request(`/rooms/${encodeURIComponent(String(slug == null ? '' : slug))}/player/claim`, {
+      method: 'POST'
+    })
+  },
+
+  async heartbeatRoomPlayerLease(slug) {
+    return this.request(`/rooms/${encodeURIComponent(String(slug == null ? '' : slug))}/player/heartbeat`, {
+      method: 'POST'
+    })
+  },
+
+  async releaseRoomPlayerLease(slug) {
+    return this.request(`/rooms/${encodeURIComponent(String(slug == null ? '' : slug))}/player/release`, {
+      method: 'POST'
+    })
+  },
+
+  async getRoomPlayerLease(slug) {
+    return this.request(`/rooms/${encodeURIComponent(String(slug == null ? '' : slug))}/player/lease`, {
+      method: 'GET'
+    })
   }
 }
