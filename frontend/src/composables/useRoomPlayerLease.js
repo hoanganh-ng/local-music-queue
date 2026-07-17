@@ -52,7 +52,13 @@ export function useRoomPlayerLease(slugRef, deps) {
   // request. Only ONE lifecycle request may be active at a time.
   let inFlight = false
   let idleWaiters = []
-  let pendingTick = false
+  // Generation-aware pending-tick marker. `-1` means no follow-up is owed.
+  // When a visibility/online trigger — or a slug-change initial read —
+  // arrives while the gate is held, this records the generation current at
+  // that moment. releaseGate() then starts EXACTLY ONE immediate follow-up
+  // for whatever generation is current when the gate frees, so completion
+  // of an OLD-generation request still launches the NEW room's initial read.
+  let pendingTick = -1
   // Dedicated destructive-submit guard so rapid Release clicks send the
   // archive request at most once.
   let releaseInFlight = false
@@ -99,6 +105,33 @@ export function useRoomPlayerLease(slugRef, deps) {
   function whenIdle() {
     if (!inFlight) return Promise.resolve()
     return new Promise((resolve) => { idleWaiters.push(resolve) })
+  }
+
+  // Records that a follow-up tick is owed, tagged with the current
+  // generation for context. `releaseGate` always drains it for whatever
+  // generation is current when the gate frees.
+  function queuePendingTick() {
+    pendingTick = generation
+  }
+
+  function hasPendingTick() {
+    return pendingTick >= 0
+  }
+
+  // The ONE gate-release path shared by periodic ticks, Claim, and Release.
+  // Frees the request gate, then — if a trigger arrived while the gate was
+  // held and the lifecycle is still live — starts exactly one immediate
+  // follow-up tick for the CURRENT generation. Draining is deliberately NOT
+  // gated on the completing request's own generation: after a slug change,
+  // the OLD-generation request must still release the gate and launch the
+  // NEW room's queued initial read. scheduleTick coalesces if a request is
+  // somehow still active, so overlapping requests are impossible.
+  function releaseGate() {
+    markIdle()
+    if (hasPendingTick() && !stopLifecycle) {
+      pendingTick = -1
+      scheduleTick(0)
+    }
   }
 
   // Terminal stop used by explicit release success and by the
@@ -285,7 +318,7 @@ export function useRoomPlayerLease(slugRef, deps) {
     // Visibility/online-driven immediate tick. If a tick is already
     // in flight, just remember we owe one follow-up tick.
     if (inFlight) {
-      pendingTick = true
+      queuePendingTick()
       return
     }
     const myGeneration = generation
@@ -299,7 +332,7 @@ export function useRoomPlayerLease(slugRef, deps) {
     if (myGeneration !== generation) return
     if (stopLifecycle) return
     if (inFlight) {
-      pendingTick = true
+      queuePendingTick()
       return
     }
     markBusy()
@@ -312,14 +345,11 @@ export function useRoomPlayerLease(slugRef, deps) {
         await readLease(myGeneration)
       }
     } finally {
-      markIdle()
-      if (pendingTick && !stopLifecycle && myGeneration === generation) {
-        pendingTick = false
-        // One IMMEDIATE follow-up tick after the in-flight request
-        // resolved. A visibility/online trigger that arrived mid-request
-        // must not wait a full normal interval.
-        scheduleTick(0)
-      }
+      // Release through the shared helper so a queued trigger — including a
+      // slug-change initial read that coalesced while THIS (possibly
+      // now-stale) request was active — fires exactly one immediate
+      // follow-up for the CURRENT generation.
+      releaseGate()
     }
   }
 
@@ -372,7 +402,10 @@ export function useRoomPlayerLease(slugRef, deps) {
           deps.toast.error('Could not claim the player lease.')
         }
       } finally {
-        markIdle()
+        // Shared gate release: a visibility/online trigger that coalesced
+        // during the claim fires its immediate follow-up now instead of
+        // waiting for the next normal interval.
+        releaseGate()
       }
     } finally {
       isClaimInFlight.value = false
@@ -422,7 +455,10 @@ export function useRoomPlayerLease(slugRef, deps) {
           deps.toast.error('Could not release the player.')
         }
       } finally {
-        markIdle()
+        // Shared gate release. On release SUCCESS stopLifecycle is set, so
+        // releaseGate does NOT start a follow-up; on a recoverable error the
+        // lifecycle continues and any queued trigger fires immediately.
+        releaseGate()
       }
     } finally {
       releaseInFlight = false

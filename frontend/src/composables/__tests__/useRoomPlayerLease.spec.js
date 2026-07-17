@@ -535,4 +535,107 @@ describe('useRoomPlayerLease', () => {
     expect(apiMock.heartbeatRoomPlayerLease).not.toHaveBeenCalled()
     lease.dispose()
   })
+
+  // --- R05b2 corrective pass: generation-aware pending-tick drain ---
+
+  it('a slug change during an in-flight old-slug GET starts exactly one new-room GET after the old request releases the gate', async () => {
+    // Old-slug initial GET stays in flight across the slug change.
+    let resolveOldGet
+    apiMock.getRoomPlayerLease.mockImplementationOnce(() => new Promise((r) => { resolveOldGet = r }))
+    const { slugRef, deps } = makeDeps()
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
+    await settle()
+    expect(apiMock.getRoomPlayerLease).toHaveBeenCalledTimes(1)
+    expect(apiMock.getRoomPlayerLease).toHaveBeenLastCalledWith('lobby')
+    expect(lease.state.value).toBe('loading')
+
+    // Navigate to the new slug while the OLD GET is still in flight. The
+    // new-room read must coalesce into the generation-aware pending tick
+    // rather than fire a second concurrent GET.
+    slugRef.value = 'lounge'
+    await nextTick()
+    expect(apiMock.getRoomPlayerLease).toHaveBeenCalledTimes(1)
+
+    // The new-room GET (issued once the gate frees) resolves held_by_me.
+    apiMock.getRoomPlayerLease.mockResolvedValueOnce({ id: 5, room_id: 9, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    // Resolving the stale OLD-slug GET releases the gate; completion of the
+    // old generation MUST launch the queued NEW-room read for the current
+    // generation (pre-fix this was dropped and the room stuck in loading).
+    resolveOldGet({ id: 99, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    await settle()
+    await settle()
+
+    // Exactly one new-room GET fired, against the NEW slug, and the new room
+    // reached a resolved lease state.
+    expect(apiMock.getRoomPlayerLease).toHaveBeenCalledTimes(2)
+    expect(apiMock.getRoomPlayerLease).toHaveBeenLastCalledWith('lounge')
+    expect(lease.state.value).toBe('held_by_me')
+    expect(lease.lease.value.id).toBe(5)
+    lease.dispose()
+  })
+
+  it('a slug change during an in-flight heartbeat starts the new-room GET after the heartbeat releases the gate', async () => {
+    apiMock.getRoomPlayerLease.mockResolvedValueOnce({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    let resolveHb
+    apiMock.heartbeatRoomPlayerLease.mockImplementationOnce(() => new Promise((r) => { resolveHb = r }))
+    const { slugRef, deps } = makeDeps()
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
+    await settle()
+    expect(lease.state.value).toBe('held_by_me')
+    // Start a heartbeat and leave it in flight.
+    vi.advanceTimersByTime(20_000)
+    await settle()
+    expect(apiMock.heartbeatRoomPlayerLease).toHaveBeenCalledTimes(1)
+
+    // Navigate away while the heartbeat is still in flight.
+    apiMock.getRoomPlayerLease.mockClear()
+    apiMock.getRoomPlayerLease.mockResolvedValueOnce({ id: 5, room_id: 9, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    slugRef.value = 'lounge'
+    await nextTick()
+    // The new-room read coalesced behind the in-flight heartbeat.
+    expect(apiMock.getRoomPlayerLease).not.toHaveBeenCalled()
+
+    // The stale heartbeat resolves; releasing the gate launches the queued
+    // new-room initial read for the current generation.
+    resolveHb({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't2', expires_at: 't2' })
+    await settle()
+    await settle()
+    expect(apiMock.getRoomPlayerLease).toHaveBeenCalledTimes(1)
+    expect(apiMock.getRoomPlayerLease).toHaveBeenLastCalledWith('lounge')
+    expect(lease.state.value).toBe('held_by_me')
+    expect(lease.lease.value.id).toBe(5)
+    lease.dispose()
+  })
+
+  it('an online event during Claim produces exactly one immediate post-Claim tick', async () => {
+    apiMock.getRoomPlayerLease.mockRejectedValue(Object.assign(new Error('no lease'), { status: 404 }))
+    let resolveClaim
+    apiMock.claimRoomPlayerLease.mockImplementationOnce(() => new Promise((r) => { resolveClaim = r }))
+    const { slugRef, deps } = makeDeps()
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
+    await settle()
+    expect(lease.state.value).toBe('none')
+
+    const claimP = lease.claim()
+    await settle()
+    expect(apiMock.claimRoomPlayerLease).toHaveBeenCalledTimes(1)
+
+    // Online fires WHILE the claim holds the gate — it must coalesce into
+    // the pending tick, not run a second concurrent request.
+    apiMock.heartbeatRoomPlayerLease.mockClear()
+    window.dispatchEvent(new Event('online'))
+    await settle()
+    expect(apiMock.heartbeatRoomPlayerLease).not.toHaveBeenCalled()
+
+    // Claim resolves held_by_me; releasing the gate fires exactly one
+    // immediate follow-up tick (a heartbeat) instead of waiting for the 20s
+    // normal timer (pre-fix Claim's markIdle did not drain the pending tick).
+    resolveClaim({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    await claimP
+    await settle()
+    await settle()
+    expect(lease.state.value).toBe('held_by_me')
+    expect(apiMock.heartbeatRoomPlayerLease).toHaveBeenCalledTimes(1)
+    lease.dispose()
+  })
 })
