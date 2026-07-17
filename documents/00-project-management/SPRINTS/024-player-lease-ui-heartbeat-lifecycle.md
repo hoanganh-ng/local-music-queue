@@ -5,8 +5,10 @@ Owner on 2026-07-17.** R05b1 was closed and accepted on 2026-07-16.
 R05b2 is the second and final slice of the legacy R05b bucket; it
 implements the player-lease UI and heartbeat lifecycle in `RoomView`
 against the already-accepted backend contract. During Architect review,
-corrective passes hardened the `useRoomPlayerLease` lifecycle
-(generation-aware pending-tick drain + terminal-boundary guards). With
+an accepted corrective sequence hardened the `useRoomPlayerLease`
+lifecycle: `1f63a3a6` (generation-aware pending-tick drain + shared
+gate-release helper) and `a9e09880` (terminal-boundary guards),
+following the first-review commit `3c5ab0fd`. With
 R05b2 accepted, the legacy R05b bucket (R05b1 + R05b2) is **COMPLETE**,
 satisfying the R05b blocking prerequisite for R14c. **No sprint is
 currently active on `dev`.** R09h and every R14 implementation slice
@@ -277,6 +279,23 @@ NEVER call `release`.
 - Claim 409 refreshes once; refresh 200 applies the new holder.
 - Claim 409 with refresh 404 surfaces a generic conflict toast.
 
+#### Accepted corrective-pass race/terminal-boundary regressions
+
+Added by the accepted corrective sequence (`1f63a3a6`, `a9e09880`):
+
+- A slug change during an in-flight old-slug GET starts exactly one
+  new-room GET after the old request releases the shared gate.
+- A slug change during an in-flight heartbeat starts the new-room GET
+  after the heartbeat releases the gate.
+- An `online` event during Claim produces exactly one immediate
+  post-Claim tick.
+- A Claim queued behind a passive GET aborts if that GET reports the
+  room archived (409) — no claim request crosses the terminal boundary.
+- A Release queued behind a heartbeat aborts if that heartbeat reports
+  410 — no release request crosses the boundary.
+- Stale pending work in a terminal room fires no extra request after a
+  later slug change.
+
 ### `frontend/src/views/__tests__/RoomView.spec.js` — RoomView (R05b2 player-lease UI)
 
 - Renders an always-visible Player device panel even with an empty
@@ -297,7 +316,7 @@ NEVER call `release`.
 ## Verification
 
 ```text
-cd frontend && npm run test:unit -- --run   # 391/391 pass
+cd frontend && npm run test:unit -- --run   # 408/408 pass (post-corrective)
 cd frontend && npm run build                 # clean (built in ~240ms)
 git diff --check                             # clean
 ```
