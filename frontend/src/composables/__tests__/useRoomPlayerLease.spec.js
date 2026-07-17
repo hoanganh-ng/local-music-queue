@@ -638,4 +638,86 @@ describe('useRoomPlayerLease', () => {
     expect(apiMock.heartbeatRoomPlayerLease).toHaveBeenCalledTimes(1)
     lease.dispose()
   })
+
+  // --- R05b2 corrective pass: queued actions must not cross a terminal boundary ---
+
+  it('a Claim queued behind a passive GET aborts if that GET reports the room archived (409)', async () => {
+    // Initial GET stays in flight so a claim can queue behind it.
+    let rejectGet
+    apiMock.getRoomPlayerLease.mockImplementationOnce(() => new Promise((_res, rej) => { rejectGet = rej }))
+    const { slugRef, deps } = makeDeps()
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
+    await settle()
+    const claimP = lease.claim()
+    await settle()
+    // Claim waits for the gate; it must not have fired yet.
+    expect(apiMock.claimRoomPlayerLease).not.toHaveBeenCalled()
+    // The passive GET reports the room archived — terminal (stopLifecycle set
+    // WITHOUT a generation bump).
+    rejectGet(Object.assign(new Error('archived'), { status: 409 }))
+    await settle()
+    await claimP
+    await settle()
+    // The queued claim must NOT cross the terminal boundary.
+    expect(apiMock.claimRoomPlayerLease).not.toHaveBeenCalled()
+    expect(lease.state.value).toBe('unavailable')
+    lease.dispose()
+  })
+
+  it('a Release queued behind a heartbeat aborts if that heartbeat reports 410 (expired/archiving)', async () => {
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    let rejectHb
+    apiMock.heartbeatRoomPlayerLease.mockImplementationOnce(() => new Promise((_res, rej) => { rejectHb = rej }))
+    const { slugRef, deps } = makeDeps()
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
+    await settle()
+    expect(lease.state.value).toBe('held_by_me')
+    // Start a heartbeat and leave it in flight.
+    vi.advanceTimersByTime(20_000)
+    await settle()
+    expect(apiMock.heartbeatRoomPlayerLease).toHaveBeenCalledTimes(1)
+    // Queue a release behind the in-flight heartbeat.
+    const relP = lease.release()
+    await settle()
+    expect(apiMock.releaseRoomPlayerLease).not.toHaveBeenCalled()
+    // The heartbeat reports 410 — terminal (stopLifecycle set WITHOUT a
+    // generation bump).
+    rejectHb(Object.assign(new Error('gone'), { status: 410 }))
+    await settle()
+    await relP
+    await settle()
+    // The queued release must NOT cross the terminal boundary.
+    expect(apiMock.releaseRoomPlayerLease).not.toHaveBeenCalled()
+    expect(lease.state.value).toBe('expired_pending_archive')
+    lease.dispose()
+  })
+
+  it('stale pending work in a terminal room fires no extra request after a later slug change', async () => {
+    // Initial GET stays in flight so a trigger can coalesce into pendingTick.
+    let rejectGet
+    apiMock.getRoomPlayerLease.mockImplementationOnce(() => new Promise((_res, rej) => { rejectGet = rej }))
+    const { slugRef, deps } = makeDeps()
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
+    await settle()
+    // A trigger arrives mid-request — recorded as pending work.
+    window.dispatchEvent(new Event('online'))
+    await settle()
+    // The initial GET reports the room archived — terminal, so the pending
+    // tick cannot drain (stopLifecycle) and is NOT bumped by a generation.
+    rejectGet(Object.assign(new Error('archived'), { status: 409 }))
+    await settle()
+    expect(lease.state.value).toBe('unavailable')
+
+    // Later slug change. reset() must clear the stale pending tick so the new
+    // room issues exactly ONE initial GET — not an extra coalesced one.
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 5, room_id: 9, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    slugRef.value = 'lounge'
+    await nextTick()
+    await settle()
+    await settle()
+    const loungeCalls = apiMock.getRoomPlayerLease.mock.calls.filter((c) => c[0] === 'lounge')
+    expect(loungeCalls.length).toBe(1)
+    expect(lease.state.value).toBe('held_by_me')
+    lease.dispose()
+  })
 })

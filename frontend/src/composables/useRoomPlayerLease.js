@@ -141,6 +141,7 @@ export function useRoomPlayerLease(slugRef, deps) {
     stopLifecycle = true
     generation += 1
     clearTimers()
+    pendingTick = -1
     lease.value = null
     state.value = 'unavailable'
   }
@@ -181,6 +182,18 @@ export function useRoomPlayerLease(slugRef, deps) {
 
   function currentSlug() {
     return slugRef && slugRef.value != null ? String(slugRef.value) : null
+  }
+
+  // Guard for actions that awaited the request gate (Claim, Release). The
+  // queued action must abort if the lifecycle advanced while it waited:
+  //   - the generation changed (slug change / dispose), OR
+  //   - stopLifecycle was set by a terminal response that does NOT bump the
+  //     generation (lease GET 409/401/403, heartbeat 409/410), OR
+  //   - the active slug no longer matches the one captured at entry.
+  // Without the stopLifecycle + slug checks a queued action could cross a
+  // terminal boundary and act on an unavailable / stale room.
+  function canProceedAfterWait(myGeneration, slug) {
+    return myGeneration === generation && !stopLifecycle && currentSlug() === slug
   }
 
   async function readLease(myGeneration) {
@@ -364,7 +377,7 @@ export function useRoomPlayerLease(slugRef, deps) {
       // passive GET/heartbeat and blocks passive ticks while it runs; a
       // stale passive 404 can no longer overwrite held_by_me.
       await whenIdle()
-      if (myGeneration !== generation) return
+      if (!canProceedAfterWait(myGeneration, slug)) return
       markBusy()
       try {
         const response = await api.claimRoomPlayerLease(slug)
@@ -423,7 +436,7 @@ export function useRoomPlayerLease(slugRef, deps) {
       // Acquire the single request gate so no heartbeat is concurrently
       // active while the destructive release runs.
       await whenIdle()
-      if (myGeneration !== generation) return
+      if (!canProceedAfterWait(myGeneration, slug)) return
       markBusy()
       try {
         await api.releaseRoomPlayerLease(slug)
@@ -469,6 +482,7 @@ export function useRoomPlayerLease(slugRef, deps) {
     generation += 1
     stopLifecycle = true
     clearTimers()
+    pendingTick = -1
     lease.value = null
     state.value = 'loading'
   }
