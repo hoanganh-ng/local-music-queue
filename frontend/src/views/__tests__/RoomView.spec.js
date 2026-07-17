@@ -2101,4 +2101,53 @@ describe('RoomView (R05b2 player-lease UI)', () => {
     wrapper.unmount()
     globalStore.clearUser()
   })
+
+  // --- R05b2 corrective pass: lease state must NOT alter unrelated gates ---
+
+  it('lease held_by_other leaves the queue canMutate/canClear gate unchanged', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    // Lease held by ANOTHER user.
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 999, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+    globalStore.applyRoomMembersChanged('lobby', { members: [{ user_id: 1, role: 'host' }] })
+    globalStore.setRoomQueueConnected('lobby', true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const vm = wrapper.vm
+    expect(vm.playerLease.state.value).toBe('held_by_other')
+    // Queue gates depend only on auth + connected + archived + removed,
+    // NOT on the lease holder. They stay enabled.
+    expect(vm.canMutate).toBe(true)
+    expect(vm.canClear).toBe(true)
+    // Only direct playback control is gated on being the lease holder.
+    expect(vm.canControlPlayback).toBe(false)
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
+
+  it('lease held_by_other leaves the chat canEditChat/canSendChat gates unchanged', async () => {
+    apiMock.getRoomQueue.mockResolvedValue({ songs: [], current_index: -1, current_song: null, status: 'stopped', queue: [], history: [] })
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 999, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    globalStore.setUser({ id: 1, display_name: 'Me', role: 'host' })
+    globalStore.applyRoomMembersChanged('lobby', { members: [{ user_id: 1, role: 'host' }] })
+    globalStore.setRoomQueueConnected('lobby', true)
+    const { wrapper, router } = mountRoomView()
+    await router.push('/rooms/lobby')
+    await flushPromises()
+    globalStore.setRoomQueueConnected('lobby', true)
+    await flushPromises()
+    const vm = wrapper.vm
+    expect(vm.playerLease.state.value).toBe('held_by_other')
+    // Chat editing is unaffected by lease state.
+    expect(vm.canEditChat).toBe(true)
+    // A non-empty draft can be sent regardless of who holds the lease.
+    vm.chatDraft = 'hello'
+    await flushPromises()
+    expect(vm.canSendChat).toBe(true)
+    wrapper.unmount()
+    globalStore.clearUser()
+  })
 })

@@ -44,8 +44,18 @@ export function useRoomPlayerLease(slugRef, deps) {
   // Timers + single-flight guards.
   let timer = null
   let archiveTimer = null
+  // Single request-ownership gate. `inFlight` is the ONE flag every
+  // lease network call acquires: initial GET, periodic tick, claim,
+  // release, holder-loss GET, and heartbeat-403 recovery. `idleWaiters`
+  // lets claim / release await the gate becoming free (as a microtask,
+  // before any pending setTimeout tick) instead of racing a passive
+  // request. Only ONE lifecycle request may be active at a time.
   let inFlight = false
+  let idleWaiters = []
   let pendingTick = false
+  // Dedicated destructive-submit guard so rapid Release clicks send the
+  // archive request at most once.
+  let releaseInFlight = false
   let stopLifecycle = false
   let listenersAttached = false
 
@@ -68,6 +78,38 @@ export function useRoomPlayerLease(slugRef, deps) {
       clearTimeout(archiveTimer)
       archiveTimer = null
     }
+  }
+
+  function markBusy() {
+    inFlight = true
+  }
+
+  function markIdle() {
+    inFlight = false
+    if (idleWaiters.length > 0) {
+      const waiters = idleWaiters
+      idleWaiters = []
+      for (const resolve of waiters) resolve()
+    }
+  }
+
+  // Resolves as soon as no lease request is in flight. A caller awaiting
+  // this runs as a microtask before any pending setTimeout tick, so it
+  // acquires the gate (markBusy) before a passive tick can start.
+  function whenIdle() {
+    if (!inFlight) return Promise.resolve()
+    return new Promise((resolve) => { idleWaiters.push(resolve) })
+  }
+
+  // Terminal stop used by explicit release success and by the
+  // archived/removed reaction. Bumping the generation invalidates any
+  // in-flight request so a late resolution cannot reapply the lease.
+  function enterTerminalUnavailable() {
+    stopLifecycle = true
+    generation += 1
+    clearTimers()
+    lease.value = null
+    state.value = 'unavailable'
   }
 
   function attachListeners() {
@@ -162,11 +204,11 @@ export function useRoomPlayerLease(slugRef, deps) {
       scheduleNext(myGeneration, NORMAL_INTERVAL_MS)
     } catch (e) {
       if (myGeneration !== generation) return
-      handleHeartbeatError(myGeneration, e)
+      await handleHeartbeatError(myGeneration, e)
     }
   }
 
-  function handleHeartbeatError(myGeneration, e) {
+  async function handleHeartbeatError(myGeneration, e) {
     const status = e && e.status
     if (status === 400 || status === 401) {
       // Stop heartbeating; surface via toast.
@@ -174,9 +216,11 @@ export function useRoomPlayerLease(slugRef, deps) {
       stopLifecycle = true
       clearTimers()
     } else if (status === 403) {
-      // Exit holder mode; refresh once.
+      // Exit holder mode; refresh once. Awaited so the recovery GET
+      // completes inside the held gate — it must not run after the tick
+      // clears inFlight.
       deps.toast.error('You are no longer the lease holder.')
-      readLease(myGeneration)
+      await readLease(myGeneration)
     } else if (status === 404) {
       lease.value = null
       state.value = 'none'
@@ -258,7 +302,7 @@ export function useRoomPlayerLease(slugRef, deps) {
       pendingTick = true
       return
     }
-    inFlight = true
+    markBusy()
     try {
       const l = lease.value
       const uid = currentUserId()
@@ -268,11 +312,13 @@ export function useRoomPlayerLease(slugRef, deps) {
         await readLease(myGeneration)
       }
     } finally {
-      inFlight = false
+      markIdle()
       if (pendingTick && !stopLifecycle && myGeneration === generation) {
         pendingTick = false
-        // One follow-up tick after the in-flight request resolved.
-        scheduleTick(NORMAL_INTERVAL_MS)
+        // One IMMEDIATE follow-up tick after the in-flight request
+        // resolved. A visibility/online trigger that arrived mid-request
+        // must not wait a full normal interval.
+        scheduleTick(0)
       }
     }
   }
@@ -281,41 +327,52 @@ export function useRoomPlayerLease(slugRef, deps) {
     if (isClaimInFlight.value) return
     const slug = currentSlug()
     if (!slug) return
-    isClaimInFlight.value = true
     const myGeneration = generation
+    isClaimInFlight.value = true
     try {
-      const response = await api.claimRoomPlayerLease(slug)
+      // Acquire the single request gate so claim serializes AFTER any
+      // passive GET/heartbeat and blocks passive ticks while it runs; a
+      // stale passive 404 can no longer overwrite held_by_me.
+      await whenIdle()
       if (myGeneration !== generation) return
-      applyLease(myGeneration, response)
-      scheduleNext(myGeneration, NORMAL_INTERVAL_MS)
-    } catch (e) {
-      if (myGeneration !== generation) return
-      const status = e && e.status
-      if (status === 409) {
-        // Someone else won the race; refresh once.
-        try {
-          const fresh = await api.getRoomPlayerLease(slug)
-          if (myGeneration !== generation) return
-          applyLease(myGeneration, fresh)
-        } catch (innerErr) {
-          if (myGeneration !== generation) return
-          const s = innerErr && innerErr.status
-          if (s === 409) {
-            state.value = 'unavailable'
-            if (deps.onArchived) deps.onArchived()
-          } else if (s === 404) {
-            state.value = 'none'
-            deps.toast.error('Claim is in conflict with another holder.')
-          } else {
-            deps.toast.error('Could not claim the player lease.')
+      markBusy()
+      try {
+        const response = await api.claimRoomPlayerLease(slug)
+        if (myGeneration !== generation) return
+        applyLease(myGeneration, response)
+        scheduleNext(myGeneration, NORMAL_INTERVAL_MS)
+      } catch (e) {
+        if (myGeneration !== generation) return
+        const status = e && e.status
+        if (status === 409) {
+          // Someone else won the race; refresh once. The refresh GET runs
+          // inside the held gate (no re-acquire).
+          try {
+            const fresh = await api.getRoomPlayerLease(slug)
+            if (myGeneration !== generation) return
+            applyLease(myGeneration, fresh)
+          } catch (innerErr) {
+            if (myGeneration !== generation) return
+            const s = innerErr && innerErr.status
+            if (s === 409) {
+              state.value = 'unavailable'
+              if (deps.onArchived) deps.onArchived()
+            } else if (s === 404) {
+              state.value = 'none'
+              deps.toast.error('Claim is in conflict with another holder.')
+            } else {
+              deps.toast.error('Could not claim the player lease.')
+            }
           }
+        } else if (status === 403) {
+          deps.toast.error('Only the host can claim the player.')
+        } else if (status === 401) {
+          deps.toast.error('You are signed out. Log in again.')
+        } else {
+          deps.toast.error('Could not claim the player lease.')
         }
-      } else if (status === 403) {
-        deps.toast.error('Only the host can claim the player.')
-      } else if (status === 401) {
-        deps.toast.error('You are signed out. Log in again.')
-      } else {
-        deps.toast.error('Could not claim the player lease.')
+      } finally {
+        markIdle()
       }
     } finally {
       isClaimInFlight.value = false
@@ -323,34 +380,52 @@ export function useRoomPlayerLease(slugRef, deps) {
   }
 
   async function release() {
+    // Destructive: at most one archive request even under rapid clicks.
+    if (releaseInFlight || stopLifecycle) return
     const slug = currentSlug()
     if (!slug) return
     const myGeneration = generation
+    releaseInFlight = true
     try {
-      await api.releaseRoomPlayerLease(slug)
+      // Acquire the single request gate so no heartbeat is concurrently
+      // active while the destructive release runs.
+      await whenIdle()
       if (myGeneration !== generation) return
-      state.value = 'unavailable'
-      lease.value = null
-      stopLifecycle = true
-      clearTimers()
-      if (deps.onArchived) deps.onArchived()
-      deps.toast.success(`Room "${slug}" archived.`)
-    } catch (e) {
-      if (myGeneration !== generation) return
-      const status = e && e.status
-      if (status === 404) {
-        // No active lease; the backend defines this as no mutation,
-        // no broadcast. Do NOT mark archived locally.
-        deps.toast.error('No active lease to release.')
-      } else if (status === 401) {
-        deps.toast.error('You are signed out. Log in again.')
-      } else if (status === 403) {
-        deps.toast.error('Only the host can release the player.')
-      } else if (status === 409) {
-        deps.toast.error('Room is archived.')
-      } else {
-        deps.toast.error('Could not release the player.')
+      markBusy()
+      try {
+        await api.releaseRoomPlayerLease(slug)
+        if (myGeneration !== generation) return
+        // Invalidate the generation FIRST so any older in-flight heartbeat
+        // that resolves 200 afterward is discarded and cannot reapply the
+        // lease.
+        generation += 1
+        stopLifecycle = true
+        clearTimers()
+        state.value = 'unavailable'
+        lease.value = null
+        if (deps.onArchived) deps.onArchived()
+        deps.toast.success(`Room "${slug}" archived.`)
+      } catch (e) {
+        if (myGeneration !== generation) return
+        const status = e && e.status
+        if (status === 404) {
+          // No active lease; the backend defines this as no mutation,
+          // no broadcast. Do NOT mark archived locally.
+          deps.toast.error('No active lease to release.')
+        } else if (status === 401) {
+          deps.toast.error('You are signed out. Log in again.')
+        } else if (status === 403) {
+          deps.toast.error('Only the host can release the player.')
+        } else if (status === 409) {
+          deps.toast.error('Room is archived.')
+        } else {
+          deps.toast.error('Could not release the player.')
+        }
+      } finally {
+        markIdle()
       }
+    } finally {
+      releaseInFlight = false
     }
   }
 
@@ -367,18 +442,39 @@ export function useRoomPlayerLease(slugRef, deps) {
     if (newSlug === oldSlug) return
     reset()
     stopLifecycle = false
+    releaseInFlight = false
     state.value = 'loading'
     const myGeneration = generation
     if (!newSlug) return
-    readLease(myGeneration)
+    if (deps.isRoomDisabled && deps.isRoomDisabled.value) {
+      enterTerminalUnavailable()
+      return
+    }
+    // Route the initial read through runOneTick so it is single-flighted.
+    runOneTick(myGeneration)
   })
+
+  // React to the room becoming archived/removed. The flag is owned by
+  // RoomView and flips on the R10b WebSocket envelope. Immediately stop
+  // the heartbeat, clear the lease, and enter the terminal unavailable
+  // state instead of waiting for the next REST failure.
+  if (deps.isRoomDisabled) {
+    watch(deps.isRoomDisabled, (disabled) => {
+      if (disabled && !stopLifecycle) enterTerminalUnavailable()
+    })
+  }
 
   // Initial kick.
   attachListeners()
   generation += 1
   state.value = 'loading'
-  if (currentSlug()) {
-    readLease(generation)
+  if (deps.isRoomDisabled && deps.isRoomDisabled.value) {
+    enterTerminalUnavailable()
+  } else if (currentSlug()) {
+    // Route the initial read through runOneTick so it is single-flighted;
+    // an immediate visibility/online trigger coalesces into pendingTick
+    // instead of firing a second concurrent GET.
+    runOneTick(generation)
   } else {
     state.value = 'none'
   }

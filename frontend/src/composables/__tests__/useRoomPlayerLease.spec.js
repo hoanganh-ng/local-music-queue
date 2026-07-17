@@ -35,6 +35,16 @@ function makeDeps(overrides = {}) {
 }
 
 describe('useRoomPlayerLease', () => {
+  // Track every composable created in a test so afterEach disposes it.
+  // Without this, a composable's global visibilitychange/online listeners
+  // leak across tests and fire extra requests against the shared apiMock
+  // when a later test dispatches those global events.
+  let createdLeases = []
+  function trackLease(l) {
+    createdLeases.push(l)
+    return l
+  }
+
   beforeEach(() => {
     vi.useFakeTimers()
     localStorage.clear()
@@ -49,6 +59,12 @@ describe('useRoomPlayerLease', () => {
   })
 
   afterEach(() => {
+    // Dispose every tracked composable so its listeners/timers cannot leak
+    // into the next test.
+    for (const l of createdLeases) {
+      try { l.dispose() } catch (e) { /* ignore */ }
+    }
+    createdLeases = []
     vi.useRealTimers()
   })
 
@@ -63,7 +79,7 @@ describe('useRoomPlayerLease', () => {
 
   it('initial state is loading until the first GET resolves', async () => {
     const { slugRef, deps } = makeDeps()
-    const lease = useRoomPlayerLease(slugRef, deps)
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
     expect(lease.state.value).toBe('loading')
     await settle()
     expect(apiMock.getRoomPlayerLease).toHaveBeenCalledWith('lobby')
@@ -71,7 +87,7 @@ describe('useRoomPlayerLease', () => {
 
   it('initial GET resolving with no lease (404) sets state to none', async () => {
     const { slugRef, deps } = makeDeps()
-    const lease = useRoomPlayerLease(slugRef, deps)
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     expect(lease.state.value).toBe('none')
     expect(lease.lease.value).toBeNull()
@@ -80,7 +96,7 @@ describe('useRoomPlayerLease', () => {
   it('initial GET held by current user sets state to held_by_me', async () => {
     apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
     const { slugRef, deps } = makeDeps()
-    const lease = useRoomPlayerLease(slugRef, deps)
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     expect(lease.state.value).toBe('held_by_me')
     expect(lease.lease.value.claimed_by_user_id).toBe(1)
@@ -89,7 +105,7 @@ describe('useRoomPlayerLease', () => {
   it('initial GET held by another user sets state to held_by_other', async () => {
     apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 2, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
     const { slugRef, deps } = makeDeps()
-    const lease = useRoomPlayerLease(slugRef, deps)
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     expect(lease.state.value).toBe('held_by_other')
     expect(lease.lease.value.claimed_by_user_id).toBe(2)
@@ -98,7 +114,7 @@ describe('useRoomPlayerLease', () => {
   it('a non-holder never heartbeats — every tick is a GET', async () => {
     apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 2, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
     const { slugRef, deps } = makeDeps()
-    useRoomPlayerLease(slugRef, deps)
+    trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     apiMock.getRoomPlayerLease.mockClear()
     vi.advanceTimersByTime(20_000)
@@ -112,7 +128,7 @@ describe('useRoomPlayerLease', () => {
   it('the current holder heartbeats every 20 seconds', async () => {
     apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
     const { slugRef, deps } = makeDeps()
-    useRoomPlayerLease(slugRef, deps)
+    trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     expect(apiMock.heartbeatRoomPlayerLease).toHaveBeenCalledTimes(0)
     vi.advanceTimersByTime(20_000)
@@ -126,7 +142,7 @@ describe('useRoomPlayerLease', () => {
   it('claim success begins the holder cadence and sets state to held_by_me', async () => {
     apiMock.getRoomPlayerLease.mockRejectedValue(Object.assign(new Error('no lease'), { status: 404 }))
     const { slugRef, deps } = makeDeps()
-    const lease = useRoomPlayerLease(slugRef, deps)
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     expect(lease.state.value).toBe('none')
     apiMock.claimRoomPlayerLease.mockResolvedValueOnce({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
@@ -140,7 +156,7 @@ describe('useRoomPlayerLease', () => {
   it('transient failures retry after 5 seconds without toast spam', async () => {
     apiMock.getRoomPlayerLease.mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }))
     const { slugRef, deps } = makeDeps()
-    useRoomPlayerLease(slugRef, deps)
+    trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     const initialCalls = apiMock.getRoomPlayerLease.mock.calls.length
     const initialToasts = toastMock.error.mock.calls.length
@@ -156,7 +172,7 @@ describe('useRoomPlayerLease', () => {
     apiMock.heartbeatRoomPlayerLease.mockRejectedValueOnce(Object.assign(new Error('forbidden'), { status: 403 }))
     apiMock.getRoomPlayerLease.mockResolvedValueOnce({ id: 1, room_id: 7, claimed_by_user_id: 2, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
     const { slugRef, deps } = makeDeps()
-    const lease = useRoomPlayerLease(slugRef, deps)
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     expect(lease.state.value).toBe('held_by_me')
     vi.advanceTimersByTime(20_000)
@@ -169,7 +185,7 @@ describe('useRoomPlayerLease', () => {
     apiMock.heartbeatRoomPlayerLease.mockRejectedValueOnce(Object.assign(new Error('not found'), { status: 404 }))
     // After holder-mode exit, the composable calls GET; default 404 mock fires.
     const { slugRef, deps } = makeDeps()
-    const lease = useRoomPlayerLease(slugRef, deps)
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     expect(lease.state.value).toBe('held_by_me')
     vi.advanceTimersByTime(20_000)
@@ -181,7 +197,7 @@ describe('useRoomPlayerLease', () => {
     apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
     apiMock.heartbeatRoomPlayerLease.mockRejectedValueOnce(Object.assign(new Error('archived'), { status: 409 }))
     const { slugRef, deps } = makeDeps()
-    useRoomPlayerLease(slugRef, deps)
+    trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     vi.advanceTimersByTime(20_000)
     await settle()
@@ -192,7 +208,7 @@ describe('useRoomPlayerLease', () => {
     apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
     apiMock.heartbeatRoomPlayerLease.mockRejectedValueOnce(Object.assign(new Error('gone'), { status: 410 }))
     const { slugRef, deps } = makeDeps()
-    const lease = useRoomPlayerLease(slugRef, deps)
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     vi.advanceTimersByTime(20_000)
     await settle()
@@ -207,7 +223,7 @@ describe('useRoomPlayerLease', () => {
   it('hidden state never calls release', async () => {
     apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
     const { slugRef, deps } = makeDeps()
-    useRoomPlayerLease(slugRef, deps)
+    trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
     document.dispatchEvent(new Event('visibilitychange'))
@@ -219,7 +235,7 @@ describe('useRoomPlayerLease', () => {
   it('visibility → visible triggers an immediate tick', async () => {
     apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
     const { slugRef, deps } = makeDeps()
-    useRoomPlayerLease(slugRef, deps)
+    trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     apiMock.heartbeatRoomPlayerLease.mockClear()
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
@@ -232,7 +248,7 @@ describe('useRoomPlayerLease', () => {
   it('unmount (dispose) clears timers and listeners', async () => {
     apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
     const { slugRef, deps } = makeDeps()
-    const lease = useRoomPlayerLease(slugRef, deps)
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     lease.dispose()
     apiMock.getRoomPlayerLease.mockClear()
@@ -251,7 +267,7 @@ describe('useRoomPlayerLease', () => {
     apiMock.getRoomPlayerLease.mockImplementationOnce(() => new Promise((r) => { resolveOldGet = r }))
 
     const { slugRef, deps } = makeDeps()
-    const lease = useRoomPlayerLease(slugRef, deps)
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
     // Yield once so the GET is actually issued; leave it unresolved.
     await settle()
     expect(lease.state.value).toBe('loading')
@@ -277,7 +293,7 @@ describe('useRoomPlayerLease', () => {
     apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
     apiMock.releaseRoomPlayerLease.mockResolvedValue(null)
     const { slugRef, deps } = makeDeps()
-    const lease = useRoomPlayerLease(slugRef, deps)
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     await lease.release()
     expect(deps.onArchived).toHaveBeenCalled()
@@ -292,7 +308,7 @@ describe('useRoomPlayerLease', () => {
     apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
     apiMock.releaseRoomPlayerLease.mockRejectedValueOnce(Object.assign(new Error('no lease'), { status: 404 }))
     const { slugRef, deps } = makeDeps()
-    const lease = useRoomPlayerLease(slugRef, deps)
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     await lease.release()
     expect(deps.onArchived).not.toHaveBeenCalled()
@@ -305,7 +321,7 @@ describe('useRoomPlayerLease', () => {
     apiMock.claimRoomPlayerLease.mockRejectedValueOnce(Object.assign(new Error('lost race'), { status: 409 }))
     apiMock.getRoomPlayerLease.mockResolvedValueOnce({ id: 1, room_id: 7, claimed_by_user_id: 2, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
     const { slugRef, deps } = makeDeps()
-    const lease = useRoomPlayerLease(slugRef, deps)
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     expect(lease.state.value).toBe('none')
     await lease.claim()
@@ -320,12 +336,203 @@ describe('useRoomPlayerLease', () => {
     apiMock.claimRoomPlayerLease.mockRejectedValueOnce(Object.assign(new Error('lost race'), { status: 409 }))
     apiMock.getRoomPlayerLease.mockRejectedValueOnce(Object.assign(new Error('still no lease'), { status: 404 }))
     const { slugRef, deps } = makeDeps()
-    const lease = useRoomPlayerLease(slugRef, deps)
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
     await settle()
     await lease.claim()
     await settle()
     expect(toastMock.error).toHaveBeenCalled()
     expect(toastMock.error.mock.calls.some(c => /conflict with another holder/i.test(c[0]))).toBe(true)
     expect(lease.lease.value).toBeNull()
+  })
+
+  // --- R05b2 corrective pass: single-flight request-ownership races ---
+
+  it('initial GET is single-flighted — an immediate visibility trigger fires no second concurrent GET', async () => {
+    let resolveInitial
+    apiMock.getRoomPlayerLease.mockImplementationOnce(() => new Promise((r) => { resolveInitial = r }))
+    const { slugRef, deps } = makeDeps()
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
+    await settle()
+    expect(apiMock.getRoomPlayerLease).toHaveBeenCalledTimes(1)
+    // Fire visibility while the initial GET is still in flight.
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await settle()
+    // The trigger coalesced — still exactly one in-flight GET.
+    expect(apiMock.getRoomPlayerLease).toHaveBeenCalledTimes(1)
+    resolveInitial({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    await settle()
+    expect(lease.state.value).toBe('held_by_me')
+    lease.dispose()
+  })
+
+  it('a passive GET in flight cannot overwrite a concurrent Claim — claim wins', async () => {
+    let rejectGet
+    apiMock.getRoomPlayerLease.mockImplementationOnce(() => new Promise((_res, rej) => { rejectGet = rej }))
+    apiMock.claimRoomPlayerLease.mockResolvedValueOnce({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    const { slugRef, deps } = makeDeps()
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
+    await settle()
+    // Passive GET is in flight; request a claim while it runs.
+    const claimP = lease.claim()
+    await settle()
+    // Claim must NOT have fired yet — it waits for the gate.
+    expect(apiMock.claimRoomPlayerLease).not.toHaveBeenCalled()
+    // The passive GET resolves as no-lease (404) — the stale outcome.
+    rejectGet(Object.assign(new Error('no lease'), { status: 404 }))
+    await settle()
+    await claimP
+    await settle()
+    expect(apiMock.claimRoomPlayerLease).toHaveBeenCalledTimes(1)
+    expect(lease.state.value).toBe('held_by_me')
+    expect(lease.lease.value.claimed_by_user_id).toBe(1)
+    lease.dispose()
+  })
+
+  it('Release wins over a concurrent heartbeat and the lease is not reapplied afterward', async () => {
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    let resolveHb
+    apiMock.heartbeatRoomPlayerLease.mockImplementationOnce(() => new Promise((r) => { resolveHb = r }))
+    const { slugRef, deps } = makeDeps()
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
+    await settle()
+    expect(lease.state.value).toBe('held_by_me')
+    // Start a heartbeat and leave it in flight.
+    vi.advanceTimersByTime(20_000)
+    await settle()
+    expect(apiMock.heartbeatRoomPlayerLease).toHaveBeenCalledTimes(1)
+    // Release while the heartbeat is still in flight.
+    const relP = lease.release()
+    await settle()
+    // Heartbeat resolves 200 (would reapply the lease pre-fix).
+    resolveHb({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't2', expires_at: 't2' })
+    await settle()
+    await relP
+    await settle()
+    expect(lease.state.value).toBe('unavailable')
+    expect(deps.onArchived).toHaveBeenCalled()
+    // No further heartbeat and the lease stays cleared.
+    apiMock.heartbeatRoomPlayerLease.mockClear()
+    vi.advanceTimersByTime(60_000)
+    await settle()
+    expect(apiMock.heartbeatRoomPlayerLease).not.toHaveBeenCalled()
+    expect(lease.lease.value).toBeNull()
+    lease.dispose()
+  })
+
+  it('rapid Release clicks submit the destructive archive request at most once', async () => {
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    let resolveRel
+    apiMock.releaseRoomPlayerLease.mockImplementationOnce(() => new Promise((r) => { resolveRel = r }))
+    const { slugRef, deps } = makeDeps()
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
+    await settle()
+    const p1 = lease.release()
+    const p2 = lease.release()
+    await settle()
+    resolveRel(null)
+    await Promise.all([p1, p2])
+    await settle()
+    expect(apiMock.releaseRoomPlayerLease).toHaveBeenCalledTimes(1)
+    expect(lease.state.value).toBe('unavailable')
+    lease.dispose()
+  })
+
+  it('an online event triggers an immediate recovery tick', async () => {
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    const { slugRef, deps } = makeDeps()
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
+    await settle()
+    apiMock.heartbeatRoomPlayerLease.mockClear()
+    window.dispatchEvent(new Event('online'))
+    await settle()
+    expect(apiMock.heartbeatRoomPlayerLease.mock.calls.length).toBeGreaterThanOrEqual(1)
+    lease.dispose()
+  })
+
+  it('a trigger during an active request produces one immediate follow-up (0ms, not 20s)', async () => {
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    let resolveHb
+    apiMock.heartbeatRoomPlayerLease.mockImplementationOnce(() => new Promise((r) => { resolveHb = r }))
+    apiMock.heartbeatRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't2', expires_at: 't2' })
+    const { slugRef, deps } = makeDeps()
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
+    await settle()
+    vi.advanceTimersByTime(20_000)
+    await settle()
+    expect(apiMock.heartbeatRoomPlayerLease).toHaveBeenCalledTimes(1)
+    // Trigger while the heartbeat is in flight — coalesces into pendingTick.
+    window.dispatchEvent(new Event('online'))
+    await settle()
+    expect(apiMock.heartbeatRoomPlayerLease).toHaveBeenCalledTimes(1)
+    // Resolve the in-flight heartbeat; the follow-up fires immediately
+    // (0ms) WITHOUT advancing a full 20s interval.
+    resolveHb({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't2', expires_at: 't2' })
+    await settle()
+    await settle()
+    expect(apiMock.heartbeatRoomPlayerLease).toHaveBeenCalledTimes(2)
+    lease.dispose()
+  })
+
+  it('410 enters expired_pending_archive, polls, and confirms archive completion', async () => {
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    apiMock.heartbeatRoomPlayerLease.mockRejectedValueOnce(Object.assign(new Error('gone'), { status: 410 }))
+    apiMock.getRoom.mockResolvedValue({ id: 7, slug: 'lobby', status: 'archived' })
+    const { slugRef, deps } = makeDeps()
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
+    await settle()
+    vi.advanceTimersByTime(20_000)
+    await settle()
+    expect(lease.state.value).toBe('expired_pending_archive')
+    // Archive poll runs after 5s and confirms the room is archived.
+    vi.advanceTimersByTime(5_000)
+    await settle()
+    expect(lease.state.value).toBe('unavailable')
+    expect(deps.onArchived).toHaveBeenCalled()
+    lease.dispose()
+  })
+
+  it('after dispose, visibility/online events trigger no API calls', async () => {
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    const { slugRef, deps } = makeDeps()
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
+    await settle()
+    lease.dispose()
+    apiMock.getRoomPlayerLease.mockClear()
+    apiMock.heartbeatRoomPlayerLease.mockClear()
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('online'))
+    vi.advanceTimersByTime(60_000)
+    await settle()
+    expect(apiMock.getRoomPlayerLease).not.toHaveBeenCalled()
+    expect(apiMock.heartbeatRoomPlayerLease).not.toHaveBeenCalled()
+  })
+
+  it('isRoomDisabled flipping true immediately enters terminal unavailable and stops heartbeats', async () => {
+    apiMock.getRoomPlayerLease.mockResolvedValue({ id: 1, room_id: 7, claimed_by_user_id: 1, claimed_at: 't', last_heartbeat_at: 't', expires_at: 't' })
+    const disabled = ref(false)
+    const slugRef = ref('lobby')
+    const currentUser = ref({ id: 1, display_name: 'Me' })
+    const deps = {
+      currentUser,
+      isRoomHost: computed(() => true),
+      isConnected: computed(() => true),
+      isRoomDisabled: computed(() => disabled.value),
+      onArchived: vi.fn(),
+      toast: toastMock,
+    }
+    const lease = trackLease(useRoomPlayerLease(slugRef, deps))
+    await settle()
+    expect(lease.state.value).toBe('held_by_me')
+    disabled.value = true
+    await nextTick()
+    expect(lease.state.value).toBe('unavailable')
+    expect(lease.lease.value).toBeNull()
+    apiMock.heartbeatRoomPlayerLease.mockClear()
+    vi.advanceTimersByTime(60_000)
+    await settle()
+    expect(apiMock.heartbeatRoomPlayerLease).not.toHaveBeenCalled()
+    lease.dispose()
   })
 })

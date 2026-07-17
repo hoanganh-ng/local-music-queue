@@ -1,11 +1,11 @@
 # Sprint R05b1 — Room entry, creation, and invite redemption UI
 
-**Status (2026-07-16):** **Closed on `dev` (2026-07-16) and accepted by the Product Owner on 2026-07-16.** R05b1 was implemented on `dev` (2026-07-16) at commit `245f3c3`, corrected at commit `24a52449` (corrective pass for archived-room navigation, production-router tests, tightened invite-token sensitivity wording and tests), and accepted by the Product Owner on 2026-07-16. The accepted runtime scope is: authenticated `/rooms` entry route; active-room listing, manual open by slug, create-room, and invite-redemption UI; `Dashboard → Rooms` navigation; `RoomView Back → RoomEntry`; no arbitrary `joinRoom` contract; no player-lease UI or heartbeat lifecycle work. R05b2 remains planned and inactive; R05b remains incomplete as an R14c prerequisite until R05b2 is separately implemented, reviewed, and accepted.
+**Status (2026-07-16):** **Closed on `dev` (2026-07-16) and accepted by the Product Owner on 2026-07-16.** R05b1 was implemented on `dev` (2026-07-16) at commit `245f3c3`, corrected at commit `24a52449` (corrective pass for archived-room navigation, production-router tests, tightened invite-token sensitivity wording and tests), and accepted by the Product Owner on 2026-07-16. The accepted runtime scope is: authenticated `/rooms` entry route; active-room listing, manual open by slug, create-room, and invite-redemption UI; `Dashboard → Rooms` navigation; `RoomView Back → RoomEntry`; no arbitrary `joinRoom` contract; no player-lease UI or heartbeat lifecycle work. R05b2 is active on `dev`; R05b remains incomplete as an R14c prerequisite until R05b2 is separately implemented, reviewed, and accepted.
 
 R05b is split into two slices:
 
-- **R05b1 — Room entry, creation, and invite redemption UI** — this file. Implemented on `dev` (2026-07-16). Pending Product Owner acceptance.
-- **R05b2 — Player-lease UI and heartbeat lifecycle** — planned and NOT active.
+- **R05b1 — Room entry, creation, and invite redemption UI** — this file. Implemented on `dev` (2026-07-16) and accepted by the Product Owner on 2026-07-16.
+- **R05b2 — Player-lease UI and heartbeat lifecycle** — active on `dev`.
 
 R05b remains incomplete as an R14c prerequisite until both slices are accepted.
 
