@@ -1,12 +1,16 @@
 # Sprint R05b2 — Player-lease UI and heartbeat lifecycle
 
-**Status (2026-07-16):** **Active on `dev` (2026-07-16).** R05b1 was
-closed and accepted on 2026-07-16. R05b2 is the second and final slice
-of the legacy R05b bucket; it implements the player-lease UI and
-heartbeat lifecycle in `RoomView` against the already-accepted backend
-contract. R05b remains incomplete as an R14c prerequisite until R05b2
-is reviewed and accepted. R09h and every R14 implementation slice
-remain planned and inactive.
+**Status (2026-07-17):** **Closed on `dev` and accepted by the Product
+Owner on 2026-07-17.** R05b1 was closed and accepted on 2026-07-16.
+R05b2 is the second and final slice of the legacy R05b bucket; it
+implements the player-lease UI and heartbeat lifecycle in `RoomView`
+against the already-accepted backend contract. During Architect review,
+corrective passes hardened the `useRoomPlayerLease` lifecycle
+(generation-aware pending-tick drain + terminal-boundary guards). With
+R05b2 accepted, the legacy R05b bucket (R05b1 + R05b2) is **COMPLETE**,
+satisfying the R05b blocking prerequisite for R14c. **No sprint is
+currently active on `dev`.** R09h and every R14 implementation slice
+(R14b / R09i / R14c / R14d / R14e) remain planned and inactive.
 
 ## Goal
 
@@ -59,7 +63,7 @@ Project management:
 - `documents/00-project-management/SPRINTS/active.md` — record R05b2
   implementation.
 - `documents/00-project-management/ROOM_EPIC_SPRINT_SEQUENCE.md` —
-  R05b2 active line; R05b still blocking R14c until R05b2 is accepted.
+  R05b2 closed/accepted line; R05b prerequisite for R14c satisfied.
 - `documents/00-project-management/PROJECT_STATE.md` — current-state
   summary refresh after R05b2 implementation.
 

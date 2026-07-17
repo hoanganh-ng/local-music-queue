@@ -1,6 +1,6 @@
 # Project State Baseline
 
-**Baseline Date:** 2026-06-19 (last refreshed 2026-07-16 after R05b1 closure pass on `dev`; R05b1 closed/accepted 2026-07-16; **R05b2 active on `dev` (2026-07-16) awaiting Architect review + Product Owner acceptance**; R14a closed/accepted 2026-07-16)
+**Baseline Date:** 2026-06-19 (last refreshed 2026-07-17 after R05b2 closure on `dev`; R05b1 closed/accepted 2026-07-16; **R05b2 closed/accepted 2026-07-17 — the legacy R05b bucket (R05b1 + R05b2) is COMPLETE, satisfying the R05b blocking prerequisite for R14c; no sprint is currently active on `dev`**; R14a closed/accepted 2026-07-16)
 **Branch:** dev
 **Original Sprint 001 Baseline Commit:** `0131b44ff1ac6b263cebef6d2526196042c5560f`
 **Sprint 003 Implementation Predecessor Commit:** `9c0fba72ca21f933c88817c3b4975bf3319f9b2b`

@@ -1,13 +1,13 @@
 # Sprint R05b1 — Room entry, creation, and invite redemption UI
 
-**Status (2026-07-16):** **Closed on `dev` (2026-07-16) and accepted by the Product Owner on 2026-07-16.** R05b1 was implemented on `dev` (2026-07-16) at commit `245f3c3`, corrected at commit `24a52449` (corrective pass for archived-room navigation, production-router tests, tightened invite-token sensitivity wording and tests), and accepted by the Product Owner on 2026-07-16. The accepted runtime scope is: authenticated `/rooms` entry route; active-room listing, manual open by slug, create-room, and invite-redemption UI; `Dashboard → Rooms` navigation; `RoomView Back → RoomEntry`; no arbitrary `joinRoom` contract; no player-lease UI or heartbeat lifecycle work. R05b2 is active on `dev`; R05b remains incomplete as an R14c prerequisite until R05b2 is separately implemented, reviewed, and accepted.
+**Status (2026-07-16):** **Closed on `dev` (2026-07-16) and accepted by the Product Owner on 2026-07-16.** R05b1 was implemented on `dev` (2026-07-16) at commit `245f3c3`, corrected at commit `24a52449` (corrective pass for archived-room navigation, production-router tests, tightened invite-token sensitivity wording and tests), and accepted by the Product Owner on 2026-07-16. The accepted runtime scope is: authenticated `/rooms` entry route; active-room listing, manual open by slug, create-room, and invite-redemption UI; `Dashboard → Rooms` navigation; `RoomView Back → RoomEntry`; no arbitrary `joinRoom` contract; no player-lease UI or heartbeat lifecycle work. R05b2 was closed on `dev` and accepted by the Product Owner on 2026-07-17; with both slices accepted, R05b is COMPLETE and its R14c prerequisite is satisfied.
 
 R05b is split into two slices:
 
 - **R05b1 — Room entry, creation, and invite redemption UI** — this file. Implemented on `dev` (2026-07-16) and accepted by the Product Owner on 2026-07-16.
-- **R05b2 — Player-lease UI and heartbeat lifecycle** — active on `dev`.
+- **R05b2 — Player-lease UI and heartbeat lifecycle** — closed on `dev` and accepted by the Product Owner on 2026-07-17.
 
-R05b remains incomplete as an R14c prerequisite until both slices are accepted.
+R05b is COMPLETE as an R14c prerequisite now that both slices are accepted (R05b1 on 2026-07-16, R05b2 on 2026-07-17).
 
 ## Goal
 
@@ -301,12 +301,12 @@ Documentation-only closure. R05b1 was accepted by the Product Owner on 2026-07-1
 
 The closure pass also corrects the `frontend/src/router/__tests__/router.spec.js` comment that implied each `import('../index')` produces a fresh production-router module: the production router is a cached module-level singleton; tests share that instance and reset auth/session state in `beforeEach` before each navigation.
 
-The closure pass changes NO runtime behavior. It records R05b1 as closed/accepted, leaves R05b2 planned and inactive, and leaves R05b incomplete as an R14c prerequisite until R05b2 is separately implemented, reviewed, and accepted.
+The closure pass changes NO runtime behavior. It records R05b1 as closed/accepted; at the time it left R05b2 planned and inactive (R05b2 has since been closed and accepted on 2026-07-17, completing R05b as an R14c prerequisite).
 
-## R05b2 — next slice (planned, NOT active)
+## R05b2 — second slice (closed and accepted 2026-07-17)
 
-R05b2 is the planned follow-up slice that lands the player-lease claim/read/heartbeat/release UI and timer-driven lifecycle. R05b2 is separate from R10c (R10c is the host-only delete-room / remove-member controls; R05b2 is the broader player-lease surface). R05b2 remains a BLOCKING PREREQUISITE for R14c — without it, retiring `/api/queue` / `/ws` etc. strands users on a global dashboard with no way to enter or operate a room. R05b2 is NOT pulled forward until the Product Owner accepts R05b1.
+R05b2 is the follow-up slice that landed the player-lease claim/read/heartbeat/release UI and timer-driven lifecycle. R05b2 is separate from R10c (R10c is the host-only delete-room / remove-member controls; R05b2 is the broader player-lease surface). R05b2 was a BLOCKING PREREQUISITE for R14c — without it, retiring `/api/queue` / `/ws` etc. strands users on a global dashboard with no way to enter or operate a room. R05b2 was closed on `dev` and accepted by the Product Owner on 2026-07-17, so this prerequisite is now satisfied.
 
 ## R05b status after R05b1 implementation
 
-R05b remains incomplete as an R14c prerequisite until both R05b1 AND R05b2 are accepted by the Product Owner.
+R05b is COMPLETE as an R14c prerequisite now that both R05b1 AND R05b2 are accepted by the Product Owner (R05b1 on 2026-07-16, R05b2 on 2026-07-17).
