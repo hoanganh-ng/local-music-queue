@@ -33,6 +33,15 @@ type voteTestBroadcaster struct {
 	voteUpdated  []voteUpdatedArg
 	voteResolved []voteResolvedArg
 	advanced     []recordingAdvancedCall
+	prioritized  []votePrioritizedArg
+}
+
+type votePrioritizedArg struct {
+	Slug      string
+	FromIndex int
+	ToIndex   int
+	Song      entity.Song
+	State     *entity.Queue
 }
 
 type voteUpdatedArg struct {
@@ -54,7 +63,12 @@ func (b *voteTestBroadcaster) BroadcastRoomQueueSongAdded(_ string, _ entity.Son
 }
 func (b *voteTestBroadcaster) BroadcastRoomQueueSongRemoved(_ string, _ int, _ *entity.Queue) {}
 func (b *voteTestBroadcaster) BroadcastRoomQueueCleared(_ string, _ *entity.Queue)        {}
-func (b *voteTestBroadcaster) BroadcastRoomQueueSongPrioritized(_ string, _, _ int, _ entity.Song, _ *entity.Queue) {
+func (b *voteTestBroadcaster) BroadcastRoomQueueSongPrioritized(slug string, from, to int, song entity.Song, state *entity.Queue) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.prioritized = append(b.prioritized, votePrioritizedArg{
+		Slug: slug, FromIndex: from, ToIndex: to, Song: song, State: state,
+	})
 }
 func (b *voteTestBroadcaster) BroadcastRoomPlaybackStatusChanged(_ string, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {
 }
@@ -551,6 +565,332 @@ func TestRoomVote_QueueAdvanceBetweenCastsDoesNotPass(t *testing.T) {
 func rr2Body(t *testing.T, rr *httptest.ResponseRecorder) string {
 	t.Helper()
 	return rr.Body.String()
+}
+
+// --- R09h prioritize handler tests ---
+//
+// votePrioritizeFixture mirrors voteRoomFixture but seeds a 3-song
+// queue ("cur-<slug>"@0, "mid-<slug>"@1, "last-<slug>"@2) so index 2
+// is a distinct non-current prioritize target. Prioritizing index 2
+// moves "last" to index 1 (immediately after current).
+func votePrioritizeFixture(t *testing.T, slug string, memberIDs []int) (*RoomVoteHandlers, *sql.DB, *roomqueue.Interactor, func()) {
+	t.Helper()
+	if len(memberIDs) == 0 {
+		t.Fatalf("votePrioritizeFixture: memberIDs must be non-empty")
+	}
+	rqh, db, cleanup := newRoomQueueHandlers(t)
+	seedUserQueue(t, db, memberIDs[0], "host-pv-"+slug+"@example.com", entity.RoleHost)
+	for i, id := range memberIDs[1:] {
+		seedUserQueue(t, db, id, fmt.Sprintf("guest-pv-%d-%s@example.com", i, slug), entity.RoleGuest)
+	}
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, slug, "PV-"+slug, memberIDs[0], time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := mustRoomIDQueue(t, db, slug)
+	for i, id := range memberIDs[1:] {
+		if err := roomRepo.AddMember(ctx, roomID, id, entity.RoomRoleGuest, time.Now().UTC()); err != nil {
+			t.Fatalf("add guest %d: %v", i+1, err)
+		}
+	}
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	q := entity.NewQueue()
+	q.Songs = []entity.Song{
+		{ID: "cur-" + slug, Title: "C", URL: "u", AddedBy: "host", AddedByID: memberIDs[0]},
+		{ID: "mid-" + slug, Title: "M", URL: "u", AddedBy: "host", AddedByID: memberIDs[0]},
+		{ID: "last-" + slug, Title: "L", URL: "u", AddedBy: "host", AddedByID: memberIDs[0]},
+	}
+	q.CurrentIndex = 0
+	q.Status = entity.StatusPlaying
+	if err := queueRepo.Save(ctx, roomID, q); err != nil {
+		t.Fatalf("save queue: %v", err)
+	}
+	inter := rqh.inter
+	rvh := NewRoomVoteHandlers(
+		roomvote.NewInteractor(inter, fixedResolver{count: len(memberIDs)}, 30*time.Second),
+		inter,
+	)
+	return rvh, db, inter, cleanup
+}
+
+// castPrioritize POSTs a prioritize vote with the given raw JSON body.
+func castPrioritize(t *testing.T, rvh *RoomVoteHandlers, slug string, actorUserID int, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/"+slug+"/vote/prioritize", bytes.NewReader([]byte(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rvh.HandleCastRoomVotePrioritize(rr, req, slug, actorUserID)
+	return rr
+}
+
+// TestRoomVotePrioritize_StrictBodyValidation pins the strict JSON
+// contract: missing, negative, malformed, trailing, and unknown
+// fields are all rejected with 400 BEFORE the interactor is reached.
+// The actor (200) is a valid member so ONLY the body shape drives the
+// rejection.
+func TestRoomVotePrioritize_StrictBodyValidation(t *testing.T) {
+	rvh, _, _, cleanup := votePrioritizeFixture(t, "pv-body", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing field", `{}`},
+		{"null field", `{"song_index":null}`},
+		{"negative", `{"song_index":-1}`},
+		{"malformed json", `{"song_index":`},
+		{"non-integer", `{"song_index":"2"}`},
+		{"float", `{"song_index":1.5}`},
+		{"trailing data", `{"song_index":2}{"song_index":1}`},
+		{"unknown field", `{"song_index":2,"actor":"evil"}`},
+		{"empty body", ``},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := castPrioritize(t, rvh, "pv-body", 200, tc.body)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("body=%q: expected 400, got %d body=%s", tc.body, rr.Code, rr.Body.String())
+			}
+		})
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if got := len(bc.voteUpdated); got != 0 {
+		t.Errorf("expected 0 broadcasts on body-validation rejections, got %d", got)
+	}
+}
+
+func TestRoomVotePrioritize_Unauthorized_Returns401(t *testing.T) {
+	rvh, _, _, cleanup := votePrioritizeFixture(t, "pv-401", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	rr := castPrioritize(t, rvh, "pv-401", 0, `{"song_index":2}`)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if got := len(bc.voteUpdated); got != 0 {
+		t.Errorf("expected 0 broadcasts on 401, got %d", got)
+	}
+}
+
+func TestRoomVotePrioritize_NonMember_Returns403(t *testing.T) {
+	rvh, _, _, cleanup := votePrioritizeFixture(t, "pv-403", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	rr := castPrioritize(t, rvh, "pv-403", 9999, `{"song_index":2}`)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("non-member: expected 403, got %d body=%s", rr.Code, rr2Body(t, rr))
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if got := len(bc.voteUpdated); got != 0 {
+		t.Errorf("expected 0 broadcasts on 403, got %d", got)
+	}
+}
+
+func TestRoomVotePrioritize_CurrentIndex_Returns400(t *testing.T) {
+	rvh, _, _, cleanup := votePrioritizeFixture(t, "pv-cur", []int{200, 300})
+	defer cleanup()
+
+	rr := castPrioritize(t, rvh, "pv-cur", 200, `{"song_index":0}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("current index: expected 400, got %d body=%s", rr.Code, rr2Body(t, rr))
+	}
+}
+
+func TestRoomVotePrioritize_OutOfRangeIndex_Returns400(t *testing.T) {
+	rvh, _, _, cleanup := votePrioritizeFixture(t, "pv-oor", []int{200, 300})
+	defer cleanup()
+
+	rr := castPrioritize(t, rvh, "pv-oor", 200, `{"song_index":99}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("out-of-range index: expected 400, got %d body=%s", rr.Code, rr2Body(t, rr))
+	}
+}
+
+func TestRoomVotePrioritize_PlainCast_NoPass_Returns204(t *testing.T) {
+	rvh, _, _, cleanup := votePrioritizeFixture(t, "pv-204", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	rr := castPrioritize(t, rvh, "pv-204", 200, `{"song_index":2}`)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if got := len(bc.voteUpdated); got != 1 {
+		t.Fatalf("expected 1 vote_updated, got %d", got)
+	}
+	if bc.voteUpdated[0].Session == nil || bc.voteUpdated[0].Session.Threshold != 2 {
+		t.Errorf("expected threshold=2 session, got %+v", bc.voteUpdated[0].Session)
+	}
+	if got := len(bc.voteResolved); got != 0 {
+		t.Errorf("expected 0 vote_resolved, got %d", got)
+	}
+	if got := len(bc.prioritized); got != 0 {
+		t.Errorf("expected 0 prioritized broadcasts, got %d", got)
+	}
+}
+
+func TestRoomVotePrioritize_PassingVote_Returns200AndBroadcasts(t *testing.T) {
+	rvh, _, inter, cleanup := votePrioritizeFixture(t, "pv-pass", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	// First vote: 204.
+	if rr := castPrioritize(t, rvh, "pv-pass", 200, `{"song_index":2}`); rr.Code != http.StatusNoContent {
+		t.Fatalf("first cast: expected 204, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	// Second distinct voter hits threshold 2 → passed.
+	rr := castPrioritize(t, rvh, "pv-pass", 300, `{"song_index":2}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("second cast: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Resolution string `json:"resolution"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Resolution != "passed" {
+		t.Errorf("expected resolution=passed, got %q", body.Resolution)
+	}
+
+	bc.mu.Lock()
+	if got := len(bc.voteUpdated); got != 2 {
+		t.Errorf("expected 2 vote_updated, got %d", got)
+	}
+	if got := len(bc.voteResolved); got != 1 {
+		t.Fatalf("expected 1 vote_resolved, got %d", got)
+	}
+	if bc.voteResolved[0].Outcome != "passed" || bc.voteResolved[0].SessionID == "" {
+		t.Errorf("expected resolved passed with session id, got %+v", bc.voteResolved[0])
+	}
+	if got := len(bc.prioritized); got != 1 {
+		t.Fatalf("expected 1 room_queue_song_prioritized, got %d", got)
+	}
+	if bc.prioritized[0].ToIndex != 1 || bc.prioritized[0].Song.ID != "last-pv-pass" {
+		t.Errorf("expected last-pv-pass moved to index 1, got %+v", bc.prioritized[0])
+	}
+	if !bc.prioritized[0].Song.IsPrioritized {
+		t.Errorf("expected broadcast song IsPrioritized=true")
+	}
+	bc.mu.Unlock()
+
+	// Reload: target moved to index 1 and persisted.
+	reloaded, err := inter.GetState(context.Background(), "pv-pass", 200)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Songs[1].ID != "last-pv-pass" || !reloaded.Songs[1].IsPrioritized {
+		t.Errorf("expected last-pv-pass prioritized at idx 1, got %+v", reloaded.Songs)
+	}
+}
+
+func TestRoomVotePrioritize_DuplicateBallot_Returns409(t *testing.T) {
+	rvh, _, _, cleanup := votePrioritizeFixture(t, "pv-dup", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	if rr := castPrioritize(t, rvh, "pv-dup", 200, `{"song_index":2}`); rr.Code != http.StatusNoContent {
+		t.Fatalf("first cast: expected 204, got %d", rr.Code)
+	}
+	rr := castPrioritize(t, rvh, "pv-dup", 200, `{"song_index":2}`)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("duplicate: expected 409, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if got := len(bc.voteUpdated); got != 1 {
+		t.Errorf("expected 1 vote_updated total (no broadcast on 409), got %d", got)
+	}
+}
+
+// TestRoomVotePrioritize_TargetRemovedBetweenCasts_NoPass pins the
+// removed-target live behavior: after the target song is removed from
+// the queue between casts, a resubmission carrying the now-out-of-range
+// index is rejected up front by CastPrioritizeVote's fresh-state index
+// validation (400 invalid index) and NEVER fires a prioritized
+// broadcast or a passed resolution. (The true stale-sentinel → 409
+// race is a concurrency window covered by the queue-layer PrioritizeVote
+// tests, the use-case StaleTargetSurfacesConflict test, and the
+// writeRoomVoteError mapping test below.)
+func TestRoomVotePrioritize_TargetRemovedBetweenCasts_NoPass(t *testing.T) {
+	rvh, db, _, cleanup := votePrioritizeFixture(t, "pv-stale", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	if rr := castPrioritize(t, rvh, "pv-stale", 200, `{"song_index":2}`); rr.Code != http.StatusNoContent {
+		t.Fatalf("first cast: expected 204, got %d", rr.Code)
+	}
+
+	// Remove the target song so the snapshot index no longer resolves.
+	roomID := mustRoomIDQueue(t, db, "pv-stale")
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	q, err := queueRepo.Load(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	q.Songs = q.Songs[:2] // drop last-pv-stale at index 2
+	if err := queueRepo.Save(context.Background(), roomID, q); err != nil {
+		t.Fatalf("save shrink: %v", err)
+	}
+
+	rr := castPrioritize(t, rvh, "pv-stale", 300, `{"song_index":2}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("removed target (index now out of range): expected 400, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if got := len(bc.prioritized); got != 0 {
+		t.Errorf("expected 0 prioritized broadcasts on removed target, got %d", got)
+	}
+	for _, r := range bc.voteResolved {
+		if r.Outcome == "passed" {
+			t.Errorf("expected NO vote_resolved{passed} on removed target, got %+v", r)
+		}
+	}
+}
+
+// TestRoomVotePrioritize_WriteRoomVoteError_MapsSentinels pins the
+// error mapping additions for the prioritize path: ErrInvalidIndex and
+// ErrVoteOnCurrentSong → 400, ErrStalePrioritizeSession → 409. The
+// distinct stale sentinel must NOT be confused with the skip stale
+// sentinel (also 409, but a different value).
+func TestRoomVotePrioritize_WriteRoomVoteError_MapsSentinels(t *testing.T) {
+	cases := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{"invalid index", roomqueue.ErrInvalidIndex, http.StatusBadRequest},
+		{"vote on current", entity.ErrVoteOnCurrentSong, http.StatusBadRequest},
+		{"stale prioritize", roomvote.ErrStalePrioritizeSession, http.StatusConflict},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			writeRoomVoteError(rr, tc.err)
+			if rr.Code != tc.wantStatus {
+				t.Errorf("err=%v: expected %d, got %d body=%s", tc.err, tc.wantStatus, rr.Code, rr.Body.String())
+			}
+		})
+	}
 }
 
 // Compile-time assertion: voteTestBroadcaster must satisfy

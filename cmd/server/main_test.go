@@ -106,3 +106,43 @@ func TestSetupApp_RegistersRoomWSRoute(t *testing.T) {
 		t.Fatalf("expected /ws/rooms/{slug} to be registered (401 without session token), got %d", rr.Code)
 	}
 }
+
+// TestSetupApp_RegistersRoomVotePrioritizeRoute pins the R09h wiring
+// contract: POST /api/rooms/{slug}/vote/prioritize is registered on
+// the same mux behind the roomAuth wrapper. A POST without a bearer
+// token returns 401 from roomAuth before the handler body parse,
+// proving the route is wired. A GET on the same path returns 405
+// (method not allowed), proving the pattern is POST-scoped and not a
+// catch-all.
+func TestSetupApp_RegistersRoomVotePrioritizeRoute(t *testing.T) {
+	scopedDSN := setupPostgresForTest(t)
+	if os.Getenv("YTDLP_PATH") == "" {
+		os.Setenv("YTDLP_PATH", "/bin/true")
+	}
+	os.Setenv("DATABASE_URL", scopedDSN)
+	defer os.Unsetenv("DATABASE_URL")
+
+	mux, _, _, _, _, cleanup, err := setupApp()
+	if err != nil {
+		t.Fatalf("setupApp: %v", err)
+	}
+	defer cleanup()
+
+	// POST without a bearer token: roomAuth short-circuits with 401.
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/anything/vote/prioritize", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected POST /api/rooms/{slug}/vote/prioritize registered (401 without token), got %d", rr.Code)
+	}
+
+	// GET on the same path: the pattern is POST-only, so ServeMux
+	// answers 405 Method Not Allowed (not 404), confirming the path
+	// exists and is method-scoped.
+	getReq := httptest.NewRequest(http.MethodGet, "/api/rooms/anything/vote/prioritize", nil)
+	getRR := httptest.NewRecorder()
+	mux.ServeHTTP(getRR, getReq)
+	if getRR.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected GET on prioritize route to be 405 (POST-scoped), got %d", getRR.Code)
+	}
+}

@@ -1636,3 +1636,218 @@ func TestRoomPlayback_PrevPlayback_MissingLeaseReturnsErrPlaybackLeaseLost(t *te
 		t.Fatalf("expected ErrPlaybackLeaseLost, got %v", err)
 	}
 }
+
+// --- R09h PrioritizeVote (queue-owned) tests ---
+//
+// PrioritizeVote is the queue-owned resolution the roomvote interactor
+// calls once a prioritize vote session passes. It re-resolves the room,
+// takes the queue mutation mutex, reloads fresh state, and re-validates
+// the (expectedSongID, expectedIndex) snapshot captured when the vote
+// session was created. It must move the target immediately after the
+// current song, save exactly once, and NEVER broadcast or touch
+// priority balances. Any race that removes, moves, duplicates, or
+// promotes the target to current surfaces ErrStalePrioritizeVote with
+// zero mutation.
+
+func TestRoomQueue_PrioritizeVote_HappyPathMovesTargetAndPersists(t *testing.T) {
+	inter, roomID := seedPrioritizeQueue(t, "rq-pv-ok")
+	ctx := context.Background()
+
+	queue, fromIndex, toIndex, song, err := inter.PrioritizeVote(ctx, "rq-pv-ok", "up2", 2)
+	if err != nil {
+		t.Fatalf("prioritize vote: %v", err)
+	}
+	if fromIndex != 2 || toIndex != 1 {
+		t.Errorf("expected from=2 to=1, got from=%d to=%d", fromIndex, toIndex)
+	}
+	if song.ID != "up2" || !song.IsPrioritized {
+		t.Errorf("expected moved up2 with IsPrioritized=true, got %+v", song)
+	}
+	if queue.Songs[1].ID != "up2" || !queue.Songs[1].IsPrioritized {
+		t.Errorf("expected up2 prioritized at idx 1, got %+v", queue.Songs[1])
+	}
+
+	persisted, err := inter.queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("load persisted: %v", err)
+	}
+	if persisted.Songs[1].ID != "up2" || !persisted.Songs[1].IsPrioritized {
+		t.Errorf("persisted: expected up2 prioritized at idx 1, got %+v", persisted.Songs[1])
+	}
+}
+
+func TestRoomQueue_PrioritizeVote_RemovedTargetReturnsStaleNoMutation(t *testing.T) {
+	inter, roomID := seedPrioritizeQueue(t, "rq-pv-removed")
+	ctx := context.Background()
+
+	// Shrink the queue so the snapshot index 2 no longer exists.
+	q, err := inter.queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	q.Songs = q.Songs[:2] // cur, up1
+	if err := inter.queueRepo.Save(ctx, roomID, q); err != nil {
+		t.Fatalf("save shrink: %v", err)
+	}
+
+	_, _, _, _, err = inter.PrioritizeVote(ctx, "rq-pv-removed", "up2", 2)
+	if !errors.Is(err, ErrStalePrioritizeVote) {
+		t.Fatalf("expected ErrStalePrioritizeVote, got %v", err)
+	}
+	persisted, err := inter.queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("load persisted: %v", err)
+	}
+	if len(persisted.Songs) != 2 || persisted.Songs[1].IsPrioritized {
+		t.Errorf("expected unchanged 2-song queue with no prioritization, got %+v", persisted.Songs)
+	}
+}
+
+func TestRoomQueue_PrioritizeVote_MovedTargetReturnsStaleNoMutation(t *testing.T) {
+	inter, roomID := seedPrioritizeQueue(t, "rq-pv-moved")
+	ctx := context.Background()
+
+	q, err := inter.queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// Swap up1 and up2 so index 2 no longer holds the target up2.
+	q.Songs[1], q.Songs[2] = q.Songs[2], q.Songs[1]
+	if err := inter.queueRepo.Save(ctx, roomID, q); err != nil {
+		t.Fatalf("save swap: %v", err)
+	}
+
+	_, _, _, _, err = inter.PrioritizeVote(ctx, "rq-pv-moved", "up2", 2)
+	if !errors.Is(err, ErrStalePrioritizeVote) {
+		t.Fatalf("expected ErrStalePrioritizeVote for moved target, got %v", err)
+	}
+	persisted, err := inter.queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("load persisted: %v", err)
+	}
+	if persisted.Songs[1].ID != "up2" || persisted.Songs[2].ID != "up1" {
+		t.Errorf("expected swap preserved (no mutation), got %+v", persisted.Songs)
+	}
+	for i := range persisted.Songs {
+		if persisted.Songs[i].IsPrioritized {
+			t.Errorf("expected no prioritization applied, got %+v", persisted.Songs[i])
+		}
+	}
+}
+
+func TestRoomQueue_PrioritizeVote_TargetBecameCurrentReturnsStale(t *testing.T) {
+	inter, roomID := seedPrioritizeQueue(t, "rq-pv-current")
+	ctx := context.Background()
+
+	q, err := inter.queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	q.CurrentIndex = 2 // up2 is now the currently-playing song
+	if err := inter.queueRepo.Save(ctx, roomID, q); err != nil {
+		t.Fatalf("save advance: %v", err)
+	}
+
+	_, _, _, _, err = inter.PrioritizeVote(ctx, "rq-pv-current", "up2", 2)
+	if !errors.Is(err, ErrStalePrioritizeVote) {
+		t.Fatalf("expected ErrStalePrioritizeVote when target is current, got %v", err)
+	}
+}
+
+func TestRoomQueue_PrioritizeVote_NoCurrentSongReturnsStale(t *testing.T) {
+	inter, roomID := seedPrioritizeQueue(t, "rq-pv-nocur")
+	ctx := context.Background()
+
+	// Empty queue: no current song to prioritize relative to.
+	empty := entity.NewQueue()
+	if err := inter.queueRepo.Save(ctx, roomID, empty); err != nil {
+		t.Fatalf("save empty: %v", err)
+	}
+
+	_, _, _, _, err := inter.PrioritizeVote(ctx, "rq-pv-nocur", "up2", 2)
+	if !errors.Is(err, ErrStalePrioritizeVote) {
+		t.Fatalf("expected ErrStalePrioritizeVote with no current song, got %v", err)
+	}
+}
+
+func TestRoomQueue_PrioritizeVote_DuplicateSongIDReturnsStaleNoMutation(t *testing.T) {
+	inter, roomID := seedPrioritizeQueue(t, "rq-pv-dup")
+	ctx := context.Background()
+
+	q, err := inter.queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// Introduce a second "up2" so the snapshot index is ambiguous.
+	q.Songs = append(q.Songs, entity.Song{ID: "up2", Title: "Dup", URL: "u", AddedBy: "Host U42", AddedByID: 42})
+	if err := inter.queueRepo.Save(ctx, roomID, q); err != nil {
+		t.Fatalf("save dup: %v", err)
+	}
+
+	_, _, _, _, err = inter.PrioritizeVote(ctx, "rq-pv-dup", "up2", 2)
+	if !errors.Is(err, ErrStalePrioritizeVote) {
+		t.Fatalf("expected ErrStalePrioritizeVote for ambiguous duplicate id, got %v", err)
+	}
+	persisted, err := inter.queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("load persisted: %v", err)
+	}
+	for i := range persisted.Songs {
+		if persisted.Songs[i].IsPrioritized {
+			t.Errorf("expected no mutation on ambiguous target, got prioritized %+v", persisted.Songs[i])
+		}
+	}
+}
+
+func TestRoomQueue_PrioritizeVote_DoesNotBroadcast(t *testing.T) {
+	inter, _ := seedPrioritizeQueue(t, "rq-pv-nobc")
+	ctx := context.Background()
+	bc := &recordingBroadcaster{}
+	inter.SetBroadcaster(bc)
+
+	if _, _, _, _, err := inter.PrioritizeVote(ctx, "rq-pv-nobc", "up2", 2); err != nil {
+		t.Fatalf("prioritize vote: %v", err)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if bc.prioN != 0 {
+		t.Errorf("PrioritizeVote must not broadcast; got prioN=%d", bc.prioN)
+	}
+}
+
+func TestRoomQueue_PrioritizeVote_DoesNotDebitPriorityBalance(t *testing.T) {
+	inter, db, queueRepo, cleanup := pgRoomQueueWithDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	if _, err := inter.roomRepo.CreateRoomAndHost(ctx, "rq-pv-nodebit", "PR", 42, testTime()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := mustRoomID(t, inter, "rq-pv-nodebit")
+	seed := entity.NewQueue()
+	seed.Songs = []entity.Song{
+		{ID: "cur", Title: "Cur", URL: "u", AddedBy: "Host U42", AddedByID: 42},
+		{ID: "up1", Title: "Up1", URL: "u", AddedBy: "Host U42", AddedByID: 42},
+		{ID: "up2", Title: "Up2", URL: "u", AddedBy: "Host U42", AddedByID: 42},
+	}
+	seed.CurrentIndex = 0
+	seed.Status = entity.StatusPlaying
+	if err := queueRepo.Save(ctx, roomID, seed); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Give the actor a non-zero balance and pin it survives the vote pass.
+	if _, err := db.ExecContext(ctx, `UPDATE users SET priority_balance = 5 WHERE id = 42`); err != nil {
+		t.Fatalf("set balance: %v", err)
+	}
+
+	if _, _, _, _, err := inter.PrioritizeVote(ctx, "rq-pv-nodebit", "up2", 2); err != nil {
+		t.Fatalf("prioritize vote: %v", err)
+	}
+
+	var bal int
+	if err := db.QueryRowContext(ctx, `SELECT priority_balance FROM users WHERE id = 42`).Scan(&bal); err != nil {
+		t.Fatalf("read balance: %v", err)
+	}
+	if bal != 5 {
+		t.Errorf("expected priority_balance unchanged at 5, got %d", bal)
+	}
+}

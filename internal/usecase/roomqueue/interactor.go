@@ -87,6 +87,16 @@ var (
 	// sentinel with zero side effects — no queue save, no history
 	// append, no broadcast.
 	ErrRoomAutoQueueStale = errors.New("room auto-queue candidate is stale")
+	// R09h: PrioritizeVote is called by the vote interactor only after a
+	// prioritize vote session for a specific upcoming song has been won.
+	// The (expectedSongID, expectedIndex) pair is snapshotted at session
+	// creation. If the stored snapshot index no longer identifies the
+	// same non-current target song (removed, moved, became current, or
+	// the same ID now appears more than once), PrioritizeVote returns
+	// this sentinel WITHOUT mutating state. Mirrors ErrStaleSkipVote:
+	// the caller (roomvote) maps it to HTTP 409 and does NOT broadcast a
+	// resolved event. No priority balances are touched on any path.
+	ErrStalePrioritizeVote = errors.New("prioritize target moved under the vote session")
 )
 
 // Interactor owns the room-scoped queue use cases. The mutex serializes
@@ -858,6 +868,87 @@ func (i *Interactor) SkipVote(ctx context.Context, slug, expectedSongID string) 
 	// current==last.
 	defer i.maybeCheckRoomAutoQueue(ctx, slug, queue)
 	return queue, prevIdx, queue.CurrentIndex, newSong, nil
+}
+
+// --- R09h vote-driven prioritize ---
+
+// PrioritizeVote moves a non-current upcoming song to the slot
+// immediately after the currently-playing song on behalf of a winning
+// prioritize vote session. Lease-bypassing and role-bypassing —
+// vote-to-prioritize is intentionally democratic, mirroring vote-to-
+// skip. The caller (roomvote.Interactor) supplies the
+// (expectedSongID, expectedIndex) pair snapshotted when the vote
+// session was created.
+//
+// It re-resolves the active room, acquires the queue mutation mutex,
+// loads fresh state, and verifies that the stored snapshot index still
+// identifies the same non-current target song. It rejects
+// removed/moved/ambiguous/now-current targets as stale, returning
+// ErrStalePrioritizeVote WITHOUT mutating anything. On success it calls
+// the existing entity Queue.Prioritize, saves exactly once, and returns
+// the authoritative (queue, fromIndex, toIndex, song) tuple the
+// room_queue_song_prioritized broadcast needs. It does NOT broadcast
+// and does NOT touch priority balances.
+func (i *Interactor) PrioritizeVote(ctx context.Context, slug, expectedSongID string, expectedIndex int) (*entity.Queue, int, int, entity.Song, error) {
+	roomObj, err := i.resolveActiveRoom(ctx, slug)
+	if err != nil {
+		return nil, 0, 0, entity.Song{}, err
+	}
+
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	queue, err := i.loadQueue(ctx, roomObj.ID)
+	if err != nil {
+		return nil, 0, 0, entity.Song{}, err
+	}
+
+	// Stale #1: no current song to prioritize relative to.
+	if queue.CurrentIndex < 0 || queue.CurrentIndex >= len(queue.Songs) {
+		return nil, 0, 0, entity.Song{}, ErrStalePrioritizeVote
+	}
+	// Stale #2: snapshot index out of range (song removed / queue shrank).
+	if expectedIndex < 0 || expectedIndex >= len(queue.Songs) {
+		return nil, 0, 0, entity.Song{}, ErrStalePrioritizeVote
+	}
+	// Stale #3: the song at the snapshot index is no longer the target
+	// (moved / replaced).
+	if queue.Songs[expectedIndex].ID != expectedSongID {
+		return nil, 0, 0, entity.Song{}, ErrStalePrioritizeVote
+	}
+	// Stale #4: the target became the currently-playing song.
+	if expectedIndex == queue.CurrentIndex {
+		return nil, 0, 0, entity.Song{}, ErrStalePrioritizeVote
+	}
+	// Stale #5: ambiguous — the same song ID now appears more than once,
+	// so the snapshot index no longer uniquely identifies the target.
+	count := 0
+	for idx := range queue.Songs {
+		if queue.Songs[idx].ID == expectedSongID {
+			count++
+		}
+	}
+	if count != 1 {
+		return nil, 0, 0, entity.Song{}, ErrStalePrioritizeVote
+	}
+
+	if err := queue.Prioritize(expectedIndex); err != nil {
+		// The guards above already cover the entity rejections; translate
+		// any residual index/current error to the stale sentinel so a race
+		// never surfaces a raw entity error to the vote caller.
+		return nil, 0, 0, entity.Song{}, ErrStalePrioritizeVote
+	}
+	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
+		return nil, 0, 0, entity.Song{}, fmt.Errorf("save room queue: %w", err)
+	}
+	// The destination is always "immediately after the current song" per
+	// the entity invariant. Recompute the post-mutation slot so to_index
+	// is exact and the payload carries IsPrioritized=true.
+	toIndex := queue.CurrentIndex + 1
+	if toIndex >= len(queue.Songs) {
+		toIndex = len(queue.Songs) - 1
+	}
+	return queue, expectedIndex, toIndex, queue.Songs[toIndex], nil
 }
 
 // --- R09f per-room auto-queue ---

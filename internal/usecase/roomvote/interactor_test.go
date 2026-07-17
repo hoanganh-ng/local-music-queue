@@ -24,16 +24,31 @@ type fakeRoomQueue struct {
 	skipCount int
 	skipCalls []skipCall
 
+	prioritizeCount int
+	prioritizeCalls []prioritizeCall
+
 	// staleOnNextSkip, when true, makes the next SkipVote call advance
 	// the queue by 1 BEFORE checking expectedSongID. This simulates the
 	// race where the lease-holder skipped the queue between the vote
 	// interactor's GetStateByRoomID and SkipVote calls.
 	staleOnNextSkip bool
+
+	// staleOnNextPrioritize, when true, makes the next PrioritizeVote
+	// call return ErrStalePrioritizeVote WITHOUT mutating. Simulates the
+	// race where the target song was removed/moved between the vote
+	// interactor's GetStateByRoomID and PrioritizeVote calls.
+	staleOnNextPrioritize bool
 }
 
 type skipCall struct {
 	Slug         string
 	ExpectedSong string
+}
+
+type prioritizeCall struct {
+	Slug          string
+	ExpectedSong  string
+	ExpectedIndex int
 }
 
 func newFakeRoomQueue() *fakeRoomQueue {
@@ -131,6 +146,62 @@ func (a queueAdapter) SkipVote(_ context.Context, slug, expectedSongID string) (
 	out := *q
 	out.Songs = append([]entity.Song(nil), q.Songs...)
 	return &out, prevIdx, q.CurrentIndex, &newSong, nil
+}
+
+// PrioritizeVote mirrors the real (*roomqueue.Interactor).PrioritizeVote
+// contract: it re-validates the (expectedSongID, expectedIndex) snapshot
+// against fresh state and refuses removed/moved/ambiguous/now-current
+// targets with ErrStalePrioritizeVote (no mutation). On success it moves
+// the target immediately after the current song via entity.Prioritize.
+func (a queueAdapter) PrioritizeVote(_ context.Context, slug, expectedSongID string, expectedIndex int) (*entity.Queue, int, int, entity.Song, error) {
+	a.f.mu.Lock()
+	defer a.f.mu.Unlock()
+	a.f.prioritizeCount++
+	a.f.prioritizeCalls = append(a.f.prioritizeCalls, prioritizeCall{Slug: slug, ExpectedSong: expectedSongID, ExpectedIndex: expectedIndex})
+	r, ok := a.f.rooms[slug]
+	if !ok {
+		return nil, 0, 0, entity.Song{}, room.ErrRoomNotFound
+	}
+	q, ok := a.f.queues[r.ID]
+	if !ok {
+		return nil, 0, 0, entity.Song{}, roomqueue.ErrStalePrioritizeVote
+	}
+	// Simulated race: target moved/removed under the vote.
+	if a.f.staleOnNextPrioritize {
+		a.f.staleOnNextPrioritize = false
+		return nil, 0, 0, entity.Song{}, roomqueue.ErrStalePrioritizeVote
+	}
+	if q.CurrentIndex < 0 || q.CurrentIndex >= len(q.Songs) {
+		return nil, 0, 0, entity.Song{}, roomqueue.ErrStalePrioritizeVote
+	}
+	if expectedIndex < 0 || expectedIndex >= len(q.Songs) {
+		return nil, 0, 0, entity.Song{}, roomqueue.ErrStalePrioritizeVote
+	}
+	if q.Songs[expectedIndex].ID != expectedSongID {
+		return nil, 0, 0, entity.Song{}, roomqueue.ErrStalePrioritizeVote
+	}
+	if expectedIndex == q.CurrentIndex {
+		return nil, 0, 0, entity.Song{}, roomqueue.ErrStalePrioritizeVote
+	}
+	count := 0
+	for idx := range q.Songs {
+		if q.Songs[idx].ID == expectedSongID {
+			count++
+		}
+	}
+	if count != 1 {
+		return nil, 0, 0, entity.Song{}, roomqueue.ErrStalePrioritizeVote
+	}
+	if err := q.Prioritize(expectedIndex); err != nil {
+		return nil, 0, 0, entity.Song{}, roomqueue.ErrStalePrioritizeVote
+	}
+	toIndex := q.CurrentIndex + 1
+	if toIndex >= len(q.Songs) {
+		toIndex = len(q.Songs) - 1
+	}
+	out := *q
+	out.Songs = append([]entity.Song(nil), q.Songs...)
+	return &out, expectedIndex, toIndex, out.Songs[toIndex], nil
 }
 
 // stubResolver is a Resolver backed by a map.
@@ -575,5 +646,266 @@ func TestRoomVote_Threshold_StrictMajorityMatrix(t *testing.T) {
 		if got := threshold(tc.n); got != tc.want {
 			t.Errorf("threshold(%d) = %d, want %d", tc.n, got, tc.want)
 		}
+	}
+}
+
+// --- R09h prioritize vote tests ---
+
+// seedRoomWithThreeSongs puts an active room + a 3-song queue at index
+// 0 in the fake, so indexes 1 and 2 are distinct non-current targets.
+func seedRoomWithThreeSongs(t *testing.T, fq *fakeRoomQueue, slug string, roomID int64) {
+	t.Helper()
+	fq.mu.Lock()
+	defer fq.mu.Unlock()
+	fq.rooms[slug] = &entity.Room{ID: roomID, Slug: slug, Status: entity.RoomStatusActive}
+	fq.queues[roomID] = &entity.Queue{
+		Songs: []entity.Song{
+			{ID: "song1", Title: "S1", URL: "u", AddedBy: "Host", AddedByID: 42},
+			{ID: "song2", Title: "S2", URL: "u", AddedBy: "Host", AddedByID: 42},
+			{ID: "song3", Title: "S3", URL: "u", AddedBy: "Host", AddedByID: 42},
+		},
+		CurrentIndex: 0,
+		Status:       entity.StatusPlaying,
+		Elapsed:      0,
+		History:      []entity.Activity{},
+	}
+}
+
+func TestRoomVotePrioritize_NonMemberForbidden(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithThreeSongs(t, fq, "alpha", 1)
+	fq.members[1] = map[int]bool{42: true}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 999); !errors.Is(err, room.ErrForbidden) {
+		t.Fatalf("expected ErrForbidden for non-member, got %v", err)
+	}
+}
+
+func TestRoomVotePrioritize_InvalidIndexRejected(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithThreeSongs(t, fq, "alpha", 1)
+	fq.members[1] = map[int]bool{42: true}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 99, 42); !errors.Is(err, roomqueue.ErrInvalidIndex) {
+		t.Fatalf("expected ErrInvalidIndex for out-of-range index, got %v", err)
+	}
+}
+
+func TestRoomVotePrioritize_CurrentSongRejected(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithThreeSongs(t, fq, "alpha", 1)
+	fq.members[1] = map[int]bool{42: true}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 0, 42); !errors.Is(err, entity.ErrVoteOnCurrentSong) {
+		t.Fatalf("expected ErrVoteOnCurrentSong for current index, got %v", err)
+	}
+}
+
+func TestRoomVotePrioritize_FirstVoteCreatesSessionSnapshot(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithThreeSongs(t, fq, "alpha", 1)
+	fq.members[1] = map[int]bool{42: true}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+
+	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42)
+	if err != nil {
+		t.Fatalf("cast: %v", err)
+	}
+	if out.Session == nil {
+		t.Fatalf("expected session populated")
+	}
+	if out.Passed || out.Resolution != "" {
+		t.Fatalf("expected not passed (1 vote < threshold 2), got passed=%v res=%q", out.Passed, out.Resolution)
+	}
+	if out.Session.Type != entity.VoteTypePrioritize {
+		t.Errorf("expected type prioritize, got %q", out.Session.Type)
+	}
+	if out.Session.SongID != "song3" || out.Session.SongIndex != 2 {
+		t.Errorf("expected snapshot song3@2, got %s@%d", out.Session.SongID, out.Session.SongIndex)
+	}
+	if got := inter.ActivePrioritizeSession("alpha", "song3"); got == nil {
+		t.Errorf("expected active prioritize session for song3")
+	}
+	// A prioritize vote must NOT create a skip session for the same room.
+	if got := inter.ActiveSession("alpha", "song1"); got != nil {
+		t.Errorf("prioritize vote must not create a skip session")
+	}
+}
+
+func TestRoomVotePrioritize_DuplicateBallotRejected(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithThreeSongs(t, fq, "alpha", 1)
+	fq.members[1] = map[int]bool{42: true}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 42); err != nil {
+		t.Fatalf("first cast: %v", err)
+	}
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 42); !errors.Is(err, entity.ErrAlreadyVoted) {
+		t.Fatalf("expected ErrAlreadyVoted on duplicate ballot, got %v", err)
+	}
+}
+
+func TestRoomVotePrioritize_PassMovesTargetOnce(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithThreeSongs(t, fq, "alpha", 1)
+	fq.members[1] = map[int]bool{42: true, 99: true}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+
+	// Threshold is max(2, 1/2+1) = 2. Two distinct voters pass it.
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+		t.Fatalf("first cast: %v", err)
+	}
+	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 99)
+	if err != nil {
+		t.Fatalf("second cast: %v", err)
+	}
+	if !out.Passed || out.Resolution != "passed" {
+		t.Fatalf("expected passed resolution, got passed=%v res=%q", out.Passed, out.Resolution)
+	}
+	if out.PrioritizeQueue == nil {
+		t.Fatalf("expected PrioritizeQueue populated on pass")
+	}
+	// song3 moves to slot immediately after current (index 1).
+	if out.ToIndex != 1 {
+		t.Errorf("expected ToIndex=1, got %d", out.ToIndex)
+	}
+	if out.PrioritizeSong.ID != "song3" {
+		t.Errorf("expected moved song3, got %s", out.PrioritizeSong.ID)
+	}
+	if !out.PrioritizeSong.IsPrioritized {
+		t.Errorf("expected IsPrioritized=true on broadcast song")
+	}
+	// The snapshot index (2) was passed to PrioritizeVote, not a live
+	// recompute, and it must have been called exactly once.
+	if fq.prioritizeCount != 1 {
+		t.Errorf("expected exactly 1 PrioritizeVote call, got %d", fq.prioritizeCount)
+	}
+	if len(fq.prioritizeCalls) != 1 || fq.prioritizeCalls[0].ExpectedIndex != 2 || fq.prioritizeCalls[0].ExpectedSong != "song3" {
+		t.Errorf("expected PrioritizeVote(song3, idx2), got %+v", fq.prioritizeCalls)
+	}
+	// Session cleared after pass.
+	if got := inter.ActivePrioritizeSession("alpha", "song3"); got != nil {
+		t.Errorf("expected session cleared after pass")
+	}
+}
+
+func TestRoomVotePrioritize_StaleTargetSurfacesConflict(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithThreeSongs(t, fq, "alpha", 1)
+	fq.members[1] = map[int]bool{42: true, 99: true}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+		t.Fatalf("first cast: %v", err)
+	}
+	// The target moves/was removed between the passing vote's load and
+	// the PrioritizeVote resolution.
+	fq.mu.Lock()
+	fq.staleOnNextPrioritize = true
+	fq.mu.Unlock()
+	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 99)
+	if !errors.Is(err, ErrStalePrioritizeSession) {
+		t.Fatalf("expected ErrStalePrioritizeSession, got %v", err)
+	}
+	if out == nil || !out.StaleSession || out.Resolution != "" {
+		t.Fatalf("expected StaleSession outcome with empty resolution, got %+v", out)
+	}
+}
+
+func TestRoomVotePrioritize_DistinctTargetsAreIndependentSessions(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithThreeSongs(t, fq, "alpha", 1)
+	fq.members[1] = map[int]bool{42: true}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 42); err != nil {
+		t.Fatalf("cast song2: %v", err)
+	}
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+		t.Fatalf("cast song3: %v", err)
+	}
+	if inter.ActivePrioritizeSession("alpha", "song2") == nil {
+		t.Errorf("expected independent session for song2")
+	}
+	if inter.ActivePrioritizeSession("alpha", "song3") == nil {
+		t.Errorf("expected independent session for song3")
+	}
+}
+
+func TestRoomVotePrioritize_CrossRoomIsolation(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithThreeSongs(t, fq, "alpha", 1)
+	seedRoomWithThreeSongs(t, fq, "beta", 2)
+	fq.members[1] = map[int]bool{42: true}
+	fq.members[2] = map[int]bool{42: true}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1, "beta": 1}}, 30*time.Second)
+
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 42); err != nil {
+		t.Fatalf("cast alpha: %v", err)
+	}
+	if inter.ActivePrioritizeSession("alpha", "song2") == nil {
+		t.Errorf("expected alpha session")
+	}
+	if inter.ActivePrioritizeSession("beta", "song2") != nil {
+		t.Errorf("beta must not share alpha's prioritize session")
+	}
+}
+
+func TestRoomVotePrioritize_ExpirySweepEvictsSession(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithThreeSongs(t, fq, "alpha", 1)
+	fq.members[1] = map[int]bool{42: true}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	t0, clock := nowClock()
+	inter.SetClock(clock)
+
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+		t.Fatalf("cast: %v", err)
+	}
+	// Advance the clock past expiry and sweep.
+	inter.SetClock(func() time.Time { return t0.Add(31 * time.Second) })
+	out, err := inter.ExpireSessions(context.Background())
+	if err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 expired prioritize outcome, got %d", len(out))
+	}
+	if out[0].RoomSlug != "alpha" {
+		t.Errorf("expected slug alpha recovered from prioritize key, got %q", out[0].RoomSlug)
+	}
+	if out[0].Session == nil || out[0].Session.Type != entity.VoteTypePrioritize {
+		t.Errorf("expected evicted prioritize session, got %+v", out[0].Session)
+	}
+	if got := inter.ActivePrioritizeSession("alpha", "song3"); got != nil {
+		t.Errorf("expected prioritize session evicted after sweep")
+	}
+}
+
+// TestRoomVotePrioritize_SkipSessionUntouched pins that casting a
+// prioritize vote never disturbs a concurrent skip session for the same
+// room (they share the map but keys never collide across types).
+func TestRoomVotePrioritize_SkipSessionUntouched(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithThreeSongs(t, fq, "alpha", 1)
+	fq.members[1] = map[int]bool{42: true}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+
+	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42); err != nil {
+		t.Fatalf("skip cast: %v", err)
+	}
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+		t.Fatalf("prioritize cast: %v", err)
+	}
+	// Both sessions coexist.
+	if inter.ActiveSession("alpha", "song1") == nil {
+		t.Errorf("skip session for current song must survive a prioritize cast")
+	}
+	if inter.ActivePrioritizeSession("alpha", "song3") == nil {
+		t.Errorf("prioritize session must exist alongside skip session")
 	}
 }

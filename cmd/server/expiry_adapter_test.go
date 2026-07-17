@@ -121,6 +121,51 @@ func TestExpiryAdapter_FansOutExpiredResolution(t *testing.T) {
 	}
 }
 
+// TestExpiryAdapter_FansOutPrioritizeAndSkipResolutions pins the R09h
+// generalization at the server-owned adapter layer: the sweep is
+// type-agnostic, so a mixed batch of skip and prioritize expired
+// outcomes each fans out exactly one BroadcastRoomVoteResolved with
+// outcome="expired" and the slug recovered from the (generalized)
+// session key. This also guards that adding prioritize sessions did
+// not regress skip expiry fan-out.
+func TestExpiryAdapter_FansOutPrioritizeAndSkipResolutions(t *testing.T) {
+	hub := newExpiryTestHub()
+	t.Cleanup(hub.Close)
+
+	f := &fakeRoomvoteForExpiry{
+		expired: []roomvote.ExpiredOutcome{
+			{
+				SessionID: "skip:alpha:s1",
+				RoomSlug:  "alpha",
+				Session:   &entity.VoteSession{ID: "skip:alpha:s1", Type: entity.VoteTypeSkip, SongID: "s1"},
+			},
+			{
+				SessionID: "prioritize:beta:s3",
+				RoomSlug:  "beta",
+				Session:   &entity.VoteSession{ID: "prioritize:beta:s3", Type: entity.VoteTypePrioritize, SongID: "s3"},
+			},
+		},
+	}
+	ad := expiryAdapter{broadcaster: hub, vote: f}
+	ad.runOnce(context.Background())
+
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if got := len(hub.resolved); got != 2 {
+		t.Fatalf("expected 2 resolved broadcasts, got %d (%+v)", got, hub.resolved)
+	}
+	slugs := map[string]string{}
+	for _, r := range hub.resolved {
+		slugs[r.slug] = r.outcome
+	}
+	if slugs["alpha"] != "expired" {
+		t.Errorf("expected skip room alpha resolved expired, got %q", slugs["alpha"])
+	}
+	if slugs["beta"] != "expired" {
+		t.Errorf("expected prioritize room beta resolved expired, got %q", slugs["beta"])
+	}
+}
+
 // TestExpiryAdapter_RunnerTickCallsExpireSessions ensures the runner
 // calls ExpireSessions at least twice within ~3x the configured
 // interval.

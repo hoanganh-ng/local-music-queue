@@ -551,6 +551,24 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	mux.HandleFunc("POST /api/rooms/{slug}/vote/skip", roomAuth(func(w http.ResponseWriter, r *http.Request) {
 		roomVoteHandlers.HandleCastRoomVoteSkip(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
+	// R09h: room vote-to-prioritize. POST /api/rooms/{slug}/vote/prioritize
+	// sits behind roomAuth (bearer token) and is restricted to active room
+	// members (any role); like vote-to-skip it BYPASSES the player-lease
+	// rule and requires no room/global role. The body is exactly
+	// {"song_index": <integer>} with strict decoding (missing, negative,
+	// malformed, trailing, and unknown fields are rejected). Prioritize
+	// vote sessions share the roomvote in-memory map (keyed
+	// prioritize:{slug}:{songID}), 30-second expiry, single-instance only;
+	// expiry is handled by the existing shared sweep, not a second loop.
+	// On a passed vote the target song is moved immediately after the
+	// current song via the existing roomqueue mutex and the matching
+	// per-room WebSocket events (room_vote_updated + room_vote_resolved +
+	// room_queue_song_prioritized) ride /ws/rooms/{slug} only. The global
+	// /ws inventory, global /api/vote/..., global /api/queue/..., priority
+	// balances, and auto-queue are all unchanged.
+	mux.HandleFunc("POST /api/rooms/{slug}/vote/prioritize", roomAuth(func(w http.ResponseWriter, r *http.Request) {
+		roomVoteHandlers.HandleCastRoomVotePrioritize(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
+	}))
 	// R09f: per-room auto-queue endpoints.
 	//   GET   /api/rooms/{slug}/autoqueue/status  — any active member.
 	//   POST  /api/rooms/{slug}/autoqueue/toggle  — host/admin only.

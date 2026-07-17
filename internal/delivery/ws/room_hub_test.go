@@ -1123,6 +1123,96 @@ func TestRoomHub_BroadcastRoomVoteUpdated_ReachesRoomClients(t *testing.T) {
 	}
 }
 
+// TestRoomHub_BroadcastRoomVoteUpdated_PrioritizeSessionOmitsVotedBy
+// pins the R09h wire contract: a prioritize vote session
+// (Type=prioritize, key prioritize:{slug}:{songID}) rides the SAME
+// room_vote_updated envelope as skip and the sanitised DTO must never
+// leak voted_by / VotedBy. The session shape (type, song_id,
+// song_index, threshold, vote_count) must survive to the client.
+func TestRoomHub_BroadcastRoomVoteUpdated_PrioritizeSessionOmitsVotedBy(t *testing.T) {
+	resolver := newStubRoomResolver()
+	resolver.SetRoom("alpha", &entity.Room{ID: 11, Slug: "alpha", Status: entity.RoomStatusActive})
+	resolver.SetQueue(11, &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "S1"}, {ID: "s3", Title: "S3"}}})
+
+	hub := NewRoomWSHub(resolver, resolver, resolver)
+	hub.SetOriginChecker(func(_ *http.Request) bool { return true })
+	hub.SetSessionResolver(&stubSessionResolver{
+		users: map[string]*entity.User{"valid": {ID: 1, Role: entity.RoleHost, DisplayName: "H"}},
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/rooms/{slug}", hub.RegisterHandler)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	go hub.Run()
+	defer hub.Close()
+
+	conn := dialRoomWS(t, server, "alpha", "valid")
+	defer conn.Close()
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("read initial sync: %v", err)
+	}
+
+	now := time.Now()
+	session := &entity.VoteSession{
+		ID:        "prioritize:alpha:s3",
+		Type:      entity.VoteTypePrioritize,
+		SongID:    "s3",
+		SongTitle: "S3",
+		SongIndex: 1,
+		VotedBy:   map[int]bool{1: true, 2: true},
+		Threshold: 2,
+		CreatedAt: now,
+		ExpiresAt: now.Add(30 * time.Second),
+	}
+	state := &entity.Queue{Songs: []entity.Song{{ID: "s1", Title: "S1"}, {ID: "s3", Title: "S3"}}}
+	hub.BroadcastRoomVoteUpdated("alpha", session, 1, state)
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read vote-updated broadcast: %v", err)
+	}
+	var env struct {
+		Type string              `json:"type"`
+		Data RoomVoteUpdatedData `json:"data"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal vote-updated: %v", err)
+	}
+	if env.Type != EventRoomVoteUpdated {
+		t.Fatalf("expected type %q, got %q", EventRoomVoteUpdated, env.Type)
+	}
+	if env.Data.Session == nil {
+		t.Fatalf("expected non-nil session")
+	}
+	if env.Data.Session.Type != string(entity.VoteTypePrioritize) {
+		t.Errorf("expected session.type=prioritize, got %q", env.Data.Session.Type)
+	}
+	if env.Data.Session.ID != "prioritize:alpha:s3" {
+		t.Errorf("expected session.id=prioritize:alpha:s3, got %q", env.Data.Session.ID)
+	}
+	if env.Data.Session.SongID != "s3" || env.Data.Session.SongIndex != 1 {
+		t.Errorf("expected snapshot s3@1, got %s@%d", env.Data.Session.SongID, env.Data.Session.SongIndex)
+	}
+	if env.Data.Session.Threshold != 2 || env.Data.Session.VoteCount != 2 {
+		t.Errorf("expected threshold=2 vote_count=2, got threshold=%d vote_count=%d", env.Data.Session.Threshold, env.Data.Session.VoteCount)
+	}
+
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	if bytes.Contains(raw, []byte("voted_by")) {
+		t.Fatalf("prioritize payload must not contain voted_by, got %s", string(raw))
+	}
+	if bytes.Contains(raw, []byte("VotedBy")) {
+		t.Fatalf("prioritize payload must not contain VotedBy, got %s", string(raw))
+	}
+}
+
 // TestRoomHub_BroadcastRoomVoteResolved_ReachesRoomClients pins the
 // room_vote_resolved envelope: type string, payload field shape, and
 // hub-loop seq invariant.

@@ -1,6 +1,7 @@
 package http
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -126,13 +127,108 @@ func (h *RoomVoteHandlers) HandleCastRoomVoteSkip(w http.ResponseWriter, r *http
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// roomVotePrioritizeRequest is the strict body shape for POST
+// /api/rooms/{slug}/vote/prioritize. SongIndex is a *int so a missing
+// field is distinguishable from an explicit 0. Unknown fields are
+// rejected via DisallowUnknownFields; trailing data is rejected via
+// dec.More().
+type roomVotePrioritizeRequest struct {
+	SongIndex *int `json:"song_index"`
+}
+
+// HandleCastRoomVotePrioritize: POST /api/rooms/{slug}/vote/prioritize
+// — any active room member. The request body is exactly
+// {"song_index": <integer>} with strict JSON decoding: missing,
+// negative, malformed, trailing, and unknown fields are all rejected
+// with 400. The actor user id is supplied by roomAuth via actorFromCtx;
+// body-supplied identity fields are ignored.
+//
+// Response semantics mirror HandleCastRoomVoteSkip minus the eviction-
+// on-entry "expired" branch (prioritize sessions expire only via the
+// shared sweep):
+//
+//	204 No Content — the vote was cast and did not pass; the handler
+//	  has already dispatched room_vote_updated with the post-cast
+//	  session.
+//	200 OK {"resolution":"passed"} — the vote passed the threshold; the
+//	  handler has already dispatched room_vote_updated,
+//	  room_vote_resolved, AND room_queue_song_prioritized.
+//	400 Bad Request — malformed slug, malformed/invalid body, or
+//	  out-of-range / current-song index.
+//	401 Unauthorized — defense-in-depth when actorUserID == 0.
+//	403 Forbidden — actor is not an active member of the room.
+//	404 Not Found — room slug unknown.
+//	409 Conflict — room archived, duplicate vote, or stale target (the
+//	  target moved under the vote).
+//	410 Gone — session expired between checks.
+//	500 Internal Server Error — anything else.
+func (h *RoomVoteHandlers) HandleCastRoomVotePrioritize(w http.ResponseWriter, r *http.Request, slug string, actorUserID int) {
+	if actorUserID == 0 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req roomVotePrioritizeRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if dec.More() {
+		http.Error(w, "unexpected trailing data in request body", http.StatusBadRequest)
+		return
+	}
+	if req.SongIndex == nil {
+		http.Error(w, "song_index is required", http.StatusBadRequest)
+		return
+	}
+	if *req.SongIndex < 0 {
+		http.Error(w, "song_index must be non-negative", http.StatusBadRequest)
+		return
+	}
+
+	out, err := h.vote.CastPrioritizeVote(r.Context(), slug, *req.SongIndex, actorUserID)
+	if err != nil {
+		writeRoomVoteError(w, err)
+		return
+	}
+
+	if out.Resolution == "passed" {
+		if bc := h.queue.Broadcaster(); bc != nil {
+			bc.BroadcastRoomVoteUpdated(slug, out.Session, actorUserID, out.PrioritizeQueue)
+			bc.BroadcastRoomVoteResolved(slug, out.Session.ID, "passed", out.PrioritizeQueue)
+			bc.BroadcastRoomQueueSongPrioritized(slug, out.FromIndex, out.ToIndex, out.PrioritizeSong, out.PrioritizeQueue)
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"resolution": "passed"})
+		return
+	}
+
+	// Plain cast (no resolution): fan out room_vote_updated with the
+	// current (pre-pass) queue state.
+	if out.Session != nil {
+		if bc := h.queue.Broadcaster(); bc != nil {
+			state := out.PrioritizeQueue
+			if state == nil {
+				if q, qerr := h.queue.GetState(r.Context(), slug, actorUserID); qerr == nil {
+					state = q
+				}
+			}
+			bc.BroadcastRoomVoteUpdated(slug, out.Session, actorUserID, state)
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // writeRoomVoteError maps use-case sentinel errors to the documented
 // status codes. Mirrors the roomqueue handler's writeRoomQueueError
 // surface so clients see consistent semantics across the migration.
 func writeRoomVoteError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, room.ErrInvalidSlug),
-		errors.Is(err, entity.ErrNoCurrentSong):
+		errors.Is(err, entity.ErrNoCurrentSong),
+		errors.Is(err, roomqueue.ErrInvalidIndex),
+		errors.Is(err, entity.ErrVoteOnCurrentSong):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, room.ErrRoomNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -146,6 +242,12 @@ func writeRoomVoteError(w http.ResponseWriter, err error) {
 		// Rare race: session existed but expired between the eviction
 		// check and the cast. The client can retry.
 		http.Error(w, "vote session expired", http.StatusGone)
+	case errors.Is(err, roomvote.ErrStalePrioritizeSession):
+		// The prioritize target moved / was removed / became current
+		// under the vote session. 409 surfaces the conflict; the client
+		// should re-fetch state. Checked BEFORE ErrStaleSession because
+		// the two are distinct sentinel values.
+		http.Error(w, "prioritize target moved under the vote", http.StatusConflict)
 	case errors.Is(err, roomvote.ErrStaleSession):
 		// The queue advanced under the vote session (lease-holder skip
 		// or PlaybackEnded landed first). 409 surfaces the conflict;

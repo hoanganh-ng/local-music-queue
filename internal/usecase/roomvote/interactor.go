@@ -36,19 +36,27 @@ import (
 // want the roomvote-package shape. Pass-through on resolution.
 var ErrStaleSession = roomqueue.ErrStaleSkipVote
 
+// ErrStalePrioritizeSession mirrors roomqueue.ErrStalePrioritizeVote
+// for callers who want the roomvote-package shape. Pass-through on
+// resolution: a passing prioritize vote whose target moved/was removed
+// under it surfaces this so the handler maps it to HTTP 409.
+var ErrStalePrioritizeSession = roomqueue.ErrStalePrioritizeVote
+
 // QueueSkipping is the slice of the roomqueue interactor surface that
-// CastSkipVote + ExpireSessions require. Defined in this package (not
-// on the queue package) to keep the dependency one-way and to let tests
-// inject a fake without constructing a real *roomqueue.Interactor.
+// CastSkipVote + CastPrioritizeVote + ExpireSessions require. Defined
+// in this package (not on the queue package) to keep the dependency
+// one-way and to let tests inject a fake without constructing a real
+// *roomqueue.Interactor.
 //
 // The production *roomqueue.Interactor satisfies this interface because
-// it implements all four methods (RoomBySlug + IsMember were added in
-// Task 4; SkipVote was added in Task 4; GetStateByRoomID is from R07d).
+// it implements all methods (RoomBySlug + IsMember + SkipVote from R09b;
+// GetStateByRoomID from R07d; PrioritizeVote from R09h).
 type QueueSkipping interface {
 	RoomBySlug(ctx context.Context, slug string) (*entity.Room, error)
 	IsMember(ctx context.Context, roomID int64, actorUserID int) bool
 	GetStateByRoomID(ctx context.Context, roomID int64) (*entity.Queue, error)
 	SkipVote(ctx context.Context, slug, expectedSongID string) (*entity.Queue, int, int, *entity.Song, error)
+	PrioritizeVote(ctx context.Context, slug, expectedSongID string, expectedIndex int) (*entity.Queue, int, int, entity.Song, error)
 }
 
 // Resolver exposes the unique-connected-user count for a room so the
@@ -135,6 +143,34 @@ type ExpiredOutcome struct {
 	RoomSlug   string
 	Session    *entity.VoteSession
 	StateQueue *entity.Queue
+}
+
+// PrioritizeOutcome represents a single prioritize-vote cast's result.
+// Mirrors Outcome but carries the room_queue_song_prioritized event
+// tuple instead of the skip/advance tuple. The handler fans out
+// room_vote_updated on every call (Session != nil). When
+// Resolution == "passed", it additionally fans out
+// room_vote_resolved{"passed"} and room_queue_song_prioritized with the
+// (FromIndex, ToIndex, PrioritizeSong, PrioritizeQueue) payload.
+//
+// Unlike CastSkipVote, the prioritize cast has no eviction-on-entry
+// "expired" branch: multiple prioritize sessions can coexist per room
+// (one per target song), so expiry is handled entirely by the shared
+// ExpireSessions sweep. Resolution is therefore only "" or "passed".
+//
+// StaleSession is true when the PrioritizeVote call was refused because
+// the target song moved / was removed / became current under the vote;
+// the handler maps that to HTTP 409 and does NOT broadcast
+// room_vote_resolved (the queue moved past the vote).
+type PrioritizeOutcome struct {
+	Session         *entity.VoteSession
+	Passed          bool
+	Resolution      string // "" | "passed"
+	PrioritizeQueue *entity.Queue
+	FromIndex       int
+	ToIndex         int
+	PrioritizeSong  entity.Song
+	StaleSession    bool
 }
 
 // CastSkipVote casts one skip vote for the current song of the room.
@@ -283,6 +319,124 @@ func (i *Interactor) CastSkipVote(ctx context.Context, slug string, actorUserID 
 	return out, nil
 }
 
+// CastPrioritizeVote casts one prioritize vote for a specific upcoming
+// song of the room, identified by its current queue index. Any active
+// member may vote; no room role, global role, or player lease is
+// required. Sessions are keyed prioritize:{slug}:{songID}, created
+// lazily on first vote, and expire after the interactor's expiry
+// window. Multiple prioritize sessions can coexist per room (one per
+// target song), unlike skip which is single-per-room (keyed on the
+// current song).
+//
+// The target must be a valid, non-current song at the moment the
+// session is created; the (songID, songIndex) pair is snapshotted into
+// the session so resolution can detect a stale target. On a passing
+// vote the interactor calls (*QueueSkipping).PrioritizeVote(ctx, slug,
+// session.SongID, session.SongIndex) — which runs under the roomqueue
+// mutex and re-validates the snapshot against fresh state before
+// mutating. The interactor MUST NOT mutate room_queue_state directly
+// and MUST NOT touch priority balances.
+//
+// Errors:
+//   room.ErrInvalidSlug        → malformed slug
+//   room.ErrRoomNotFound       → no room for slug
+//   room.ErrArchived           → room archived
+//   room.ErrForbidden          → actor is not an active member
+//   roomqueue.ErrInvalidIndex  → songIndex out of range
+//   entity.ErrVoteOnCurrentSong → songIndex identifies the current song
+//   entity.ErrAlreadyVoted     → this user already voted this session
+//   entity.ErrVoteSessionExpired → session existed but expired
+//   ErrStalePrioritizeSession  → vote passed but PrioritizeVote refused
+//                                because the target moved under us
+//
+// Actor identity comes ONLY from the resolved session token; the
+// actorUserID parameter is authoritative and body-supplied identity is
+// ignored by the caller.
+func (i *Interactor) CastPrioritizeVote(ctx context.Context, slug string, songIndex, actorUserID int) (*PrioritizeOutcome, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	now := i.now()
+
+	roomObj, err := i.queueInter.RoomBySlug(ctx, slug)
+	if err != nil {
+		if errors.Is(err, room.ErrInvalidSlug) ||
+			errors.Is(err, room.ErrRoomNotFound) ||
+			errors.Is(err, room.ErrArchived) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("get room: %w", err)
+	}
+
+	if !i.queueInter.IsMember(ctx, roomObj.ID, actorUserID) {
+		return nil, room.ErrForbidden
+	}
+
+	queue, err := i.queueInter.GetStateByRoomID(ctx, roomObj.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load room queue: %w", err)
+	}
+	if queue == nil || songIndex < 0 || songIndex >= len(queue.Songs) {
+		return nil, roomqueue.ErrInvalidIndex
+	}
+	if queue.CurrentIndex >= 0 && songIndex == queue.CurrentIndex {
+		return nil, entity.ErrVoteOnCurrentSong
+	}
+	target := queue.Songs[songIndex]
+	key := prioritizeSessionKey(slug, target.ID)
+
+	out := &PrioritizeOutcome{}
+
+	// Reuse-or-create the session for this exact (slug, songID). Expiry
+	// of other sessions is handled by the shared ExpireSessions sweep,
+	// so there is no eviction-on-entry branch here.
+	session, exists := i.sessions[key]
+	if !exists || session.IsExpiredAt(now) {
+		n := 0
+		if i.resolver != nil {
+			n = i.resolver.UniqueConnectedUserIDs(slug)
+		}
+		session = entity.NewVoteSession(entity.VoteTypePrioritize, target, songIndex, threshold(n), i.expiry)
+		// NewVoteSession stamps ExpiresAt from time.Now; re-stamp with our
+		// clock so test clocks drive expiry.
+		session.CreatedAt = now
+		session.ExpiresAt = now.Add(i.expiry)
+		i.sessions[key] = session
+	}
+
+	if err := session.Cast(actorUserID); err != nil {
+		return nil, err
+	}
+	out.Session = session
+
+	if !session.IsPassed() {
+		return out, nil
+	}
+
+	out.Passed = true
+
+	// Delete the session BEFORE calling PrioritizeVote so a concurrent
+	// cast starts a fresh session rather than re-passing this one.
+	delete(i.sessions, key)
+
+	q, fromIdx, toIdx, song, err := i.queueInter.PrioritizeVote(ctx, slug, session.SongID, session.SongIndex)
+	if err != nil {
+		if errors.Is(err, roomqueue.ErrStalePrioritizeVote) {
+			out.StaleSession = true
+			out.Resolution = ""
+			return out, ErrStalePrioritizeSession
+		}
+		return nil, err
+	}
+
+	out.Resolution = "passed"
+	out.PrioritizeQueue = q
+	out.FromIndex = fromIdx
+	out.ToIndex = toIdx
+	out.PrioritizeSong = song
+	return out, nil
+}
+
 // ExpireSessions evicts any sessions whose Expiry time has passed and
 // returns them as ExpiredOutcomes for the caller to broadcast. The
 // handler invokes this on a best-effort ticker; failure is non-fatal.
@@ -322,11 +476,28 @@ func (i *Interactor) ActiveSession(slug, songID string) *entity.VoteSession {
 	return i.sessions[sessionKey(slug, songID)]
 }
 
+// ActivePrioritizeSession returns a snapshot of the in-memory
+// prioritize session for a (slug, songID) pair, or nil when none
+// exists. Used by tests.
+func (i *Interactor) ActivePrioritizeSession(slug, songID string) *entity.VoteSession {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.sessions[prioritizeSessionKey(slug, songID)]
+}
+
 // --- helpers ---
 
 // sessionKey derives the in-memory key for a (slug, songID) pair.
 func sessionKey(slug, songID string) string {
 	return fmt.Sprintf("skip:%s:%s", slug, songID)
+}
+
+// prioritizeSessionKey derives the in-memory key for a prioritize vote
+// session over a (slug, songID) pair. Prioritize sessions share the
+// same map as skip sessions but never collide because the type prefix
+// differs.
+func prioritizeSessionKey(slug, songID string) string {
+	return fmt.Sprintf("prioritize:%s:%s", slug, songID)
 }
 
 // hasSlugPrefix reports whether key encodes a session for slug. Keys
