@@ -64,6 +64,21 @@ room-prioritize contract.
   subsequent ballots within the window add the voter to `VotedBy`
   (`map[int]bool`). Sessions are single-instance only and never
   persisted.
+- A prioritize ballot that arrives after the prior session for the
+  **exact same** `(slug, songID)` target has expired evicts and
+  snapshots that old session, creates a fresh session, casts on it, and
+  returns `Resolution="expired"`. The handler fans out one
+  `room_vote_resolved{"expired"}` for the evicted session BEFORE the
+  fresh session's `room_vote_updated`, then replies HTTP
+  `200 {"resolution":"expired"}`. Eviction-on-entry is scoped to THIS
+  key only, so a coexisting session for a different target song is left
+  to the shared sweep.
+- A live (non-expired) session keyed on the same song ID whose
+  snapshotted index no longer matches the requested index (two distinct
+  queue entries share one video ID) is rejected immediately with
+  `ErrStalePrioritizeSession` **before** its ballot map is touched, so
+  ballots for one entry can never accrue toward a different entry's
+  session.
 - Threshold is captured at session creation via
   `(*RoomWSHub).UniqueConnectedUserIDs(slug)` using the existing room
   strict-majority helper `max(2, n/2 + 1)`. `entity.MajorityThreshold`
@@ -74,6 +89,14 @@ room-prioritize contract.
   started. The skip cast's eviction-on-entry predicate (`hasSlugPrefix`)
   still matches only `skip:{slug}:` keys, so a skip cast never disturbs
   a coexisting prioritize session.
+- The ticker-driven `ExpireSessions` sweep reports each expired
+  prioritize session's `session_id` as the session's own
+  `session.ID` (`prioritize:{songID}`) — the SAME identifier the client
+  saw on `room_vote_updated` and the passed / expired-on-entry
+  resolutions — so a client can correlate the ticker expiry with the
+  session it was tracking. Skip sessions retain the internal map key
+  (`skip:{slug}:{songID}`) as their expiry `session_id` to preserve the
+  accepted R09b identifier contract.
 
 ### Queue-owned prioritize
 
@@ -81,9 +104,12 @@ room-prioritize contract.
   acquires the existing queue mutation mutex, loads fresh state, and
   verifies the stored snapshot index still identifies the same
   non-current target song. It rejects removed, moved, ambiguous
-  (duplicate song ID), current, or no-current-song targets as stale
-  with the sentinel `ErrStalePrioritizeVote` and **zero** side effects
-  (no partial mutation, no save). On success it calls the existing
+  (duplicate song ID), and no-current-song targets as stale with the
+  sentinel `ErrStalePrioritizeVote` (mapped to HTTP `409`) and **zero**
+  side effects (no partial mutation, no save). A target that became the
+  currently-playing song is a distinct case: it returns
+  `entity.ErrVoteOnCurrentSong` (mapped to HTTP `400`, **not** `409`),
+  also with zero side effects. On success it calls the existing
   `entity.Queue.Prioritize`, saves exactly once, and returns the
   authoritative event tuple `(state, fromIndex, toIndex, song)`. It
   never broadcasts and never touches priority balances.
@@ -130,12 +156,20 @@ Focused tests were added at each layer:
 - **Use case** (`internal/usecase/roomvote`): membership, invalid /
   current-song index rejection, threshold at creation, duplicate
   ballots, pass → queue-owned prioritize, stale target surfaces
-  conflict, expiry sweep recovers the slug from a prioritize key, and
-  skip/prioritize session isolation.
+  conflict, a same-song-ID/different-index live session rejected with
+  `ErrStalePrioritizeSession` without touching its ballot map, an
+  expired matching session restarting a fresh session with
+  `Resolution="expired"` (fresh-session identity, reset ballots,
+  unchanged conflicting ballots, zero prioritize calls), the expiry
+  sweep recovering the slug from a prioritize key AND reporting the
+  prioritize expiry `session_id` as `session.ID`
+  (`prioritize:{songID}`) while a coexisting skip session keeps its
+  map-key identifier, and skip/prioritize session isolation.
 - **Queue** (`internal/usecase/roomqueue`, DB-gated): happy-path move +
-  persist, removed / moved / became-current / no-current / duplicate
-  song ID all return stale with no mutation, no broadcast, and no
-  priority debit.
+  persist; removed / moved / no-current / duplicate song ID all return
+  `ErrStalePrioritizeVote` (409) with no mutation, no broadcast, and no
+  priority debit; a became-current target returns
+  `entity.ErrVoteOnCurrentSong` (400) with the same zero side effects.
 - **Handler** (`internal/delivery/http`): strict body validation table,
   401 unauthenticated, 403 non-member, 400 current / out-of-range
   index, 204 plain cast, 200 + broadcasts on pass, 409 duplicate
@@ -155,10 +189,30 @@ Focused tests were added at each layer:
 
 ## Verification
 
-- `go test ./...`
-- `go test -race ./...`
-- `go vet ./...`
+- `go vet ./cmd/... ./internal/...`
+- `go test ./cmd/... ./internal/...`
+- `go test -race ./cmd/... ./internal/...`
+- PostgreSQL-backed scoped tests (the DB-gated `roomqueue` prioritize
+  cases run against a live PostgreSQL instance, not skipped)
+- PostgreSQL-backed focused prioritize tests
 - `git diff --check`
+
+## Corrective history
+
+- The runtime freshness corrections (expired-restart on next ballot,
+  same-ID/different-index guard, became-current →
+  `entity.ErrVoteOnCurrentSong` → `400`) landed at actual `dev` head
+  `357f4d2bd90efe2749dc5d5560fb652267ec1277`. An earlier review cited
+  the predecessor `6c5dd479…`; the actual corrective head is
+  `357f4d2…` and its commit spans six runtime/test files despite a
+  documentation-flavoured commit message.
+- A follow-up pass (baseline `357f4d2…`) corrected the ticker-driven
+  `ExpireSessions` prioritize `session_id` to use `session.ID`
+  (`prioritize:{songID}`) so it correlates with `room_vote_updated`,
+  added a focused expiry-identifier regression test, and reconciled
+  this document, `SPRINTS/active.md`, and the stale prioritize handler
+  comments with the accepted contract. The accepted skip identifier
+  contract was left unchanged.
 
 See the *Implementation summary (R09h)* / *Closure* records appended
 here once the Product Owner accepts.

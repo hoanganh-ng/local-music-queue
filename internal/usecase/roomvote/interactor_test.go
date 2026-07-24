@@ -640,6 +640,70 @@ func TestRoomVote_ExpireSessionsReturnsExpiredOutcomes(t *testing.T) {
 	}
 }
 
+// TestRoomVote_ExpireSessionsPrioritizeUsesSessionID pins the R09h-fix
+// identifier contract for the ticker-driven expiry sweep: an expired
+// PRIORITIZE session must report ExpiredOutcome.SessionID equal to the
+// session.ID ("prioritize:{songID}") the client saw on
+// room_vote_updated — NOT the internal map key
+// ("prioritize:{slug}:{songID}") — so a client can correlate the ticker
+// expiry with the session it was tracking. The coexisting SKIP session
+// keeps the internal map key to preserve the accepted R09b contract.
+func TestRoomVote_ExpireSessionsPrioritizeUsesSessionID(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithTwoSongs(t, fq, "alpha", 1)
+	fq.members[1] = map[int]bool{42: true}
+	clockVal, _ := nowClock()
+	clock := clockVal
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter.SetClock(func() time.Time { return clock })
+
+	// Seed a skip session (current song song1) and a prioritize session
+	// (upcoming song song2 at index 1).
+	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42); err != nil {
+		t.Fatalf("skip cast: %v", err)
+	}
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 42); err != nil {
+		t.Fatalf("prioritize cast: %v", err)
+	}
+
+	// Advance past expiry and sweep.
+	clock = clockVal.Add(31 * time.Second)
+	out, err := inter.ExpireSessions(context.Background())
+	if err != nil {
+		t.Fatalf("ExpireSessions: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("expected 2 expired outcomes, got %d (%+v)", len(out), out)
+	}
+
+	byType := map[entity.VoteType]ExpiredOutcome{}
+	for _, e := range out {
+		if e.Session == nil {
+			t.Fatalf("nil Session in expired outcome: %+v", e)
+		}
+		byType[e.Session.Type] = e
+	}
+
+	prio, ok := byType[entity.VoteTypePrioritize]
+	if !ok {
+		t.Fatalf("no prioritize outcome in %+v", out)
+	}
+	if prio.SessionID != "prioritize:song2" {
+		t.Errorf("prioritize expiry SessionID = %q, want %q (session.ID, not the map key)", prio.SessionID, "prioritize:song2")
+	}
+	if prio.SessionID != prio.Session.ID {
+		t.Errorf("prioritize expiry SessionID %q must equal session.ID %q", prio.SessionID, prio.Session.ID)
+	}
+
+	skip, ok := byType[entity.VoteTypeSkip]
+	if !ok {
+		t.Fatalf("no skip outcome in %+v", out)
+	}
+	if skip.SessionID != "skip:alpha:song1" {
+		t.Errorf("skip expiry SessionID = %q, want %q (accepted R09b map-key contract preserved)", skip.SessionID, "skip:alpha:song1")
+	}
+}
+
 // TestRoomVote_Threshold_StrictMajorityMatrix pins the strict-majority
 // rule: threshold(n) = max(2, n/2 + 1) for n = 1,2,3,4,5.
 //

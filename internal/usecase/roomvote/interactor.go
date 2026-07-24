@@ -490,7 +490,10 @@ func (i *Interactor) CastPrioritizeVote(ctx context.Context, slug string, songIn
 // handler invokes this on a best-effort ticker; failure is non-fatal.
 //
 // Sessions are evicted across ALL rooms (the in-memory map is small).
-// StateQueue is best-effort and may be nil.
+// StateQueue is best-effort and may be nil. ExpiredOutcome.SessionID is
+// the prioritize session.ID ("prioritize:{songID}") for prioritize
+// sessions so it matches room_vote_updated; skip sessions keep the
+// internal map key to preserve the accepted R09b contract.
 func (i *Interactor) ExpireSessions(ctx context.Context) ([]ExpiredOutcome, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -506,8 +509,18 @@ func (i *Interactor) ExpireSessions(ctx context.Context) ([]ExpiredOutcome, erro
 		if r, err := i.queueInter.RoomBySlug(ctx, slug); err == nil {
 			q, _ = i.queueInter.GetStateByRoomID(ctx, r.ID)
 		}
+		// Prioritize outcomes must carry the SAME session identifier a
+		// client saw on room_vote_updated and the passed / expired-on-
+		// entry paths — session.ID ("prioritize:{songID}") — so a client
+		// can correlate a ticker expiry with the session it was tracking.
+		// Skip outcomes keep the internal map key to preserve the accepted
+		// R09b identifier contract (changing it needs a separate approval).
+		sessionID := key
+		if s != nil && s.Type == entity.VoteTypePrioritize {
+			sessionID = s.ID
+		}
 		out = append(out, ExpiredOutcome{
-			SessionID:  key,
+			SessionID:  sessionID,
 			RoomSlug:   slug,
 			Session:    s,
 			StateQueue: q,

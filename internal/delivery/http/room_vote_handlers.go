@@ -143,9 +143,9 @@ type roomVotePrioritizeRequest struct {
 // with 400. The actor user id is supplied by roomAuth via actorFromCtx;
 // body-supplied identity fields are ignored.
 //
-// Response semantics mirror HandleCastRoomVoteSkip minus the eviction-
-// on-entry "expired" branch (prioritize sessions expire only via the
-// shared sweep):
+// Response semantics mirror HandleCastRoomVoteSkip, including the
+// eviction-on-entry "expired" branch scoped to the exact target key
+// (other prioritize sessions still expire via the shared sweep):
 //
 //	204 No Content — the vote was cast and did not pass; the handler
 //	  has already dispatched room_vote_updated with the post-cast
@@ -258,10 +258,14 @@ func writeRoomVoteError(w http.ResponseWriter, err error) {
 		// check and the cast. The client can retry.
 		http.Error(w, "vote session expired", http.StatusGone)
 	case errors.Is(err, roomvote.ErrStalePrioritizeSession):
-		// The prioritize target moved / was removed / became current
-		// under the vote session. 409 surfaces the conflict; the client
-		// should re-fetch state. Checked BEFORE ErrStaleSession because
-		// the two are distinct sentinel values.
+		// The prioritize target moved / was removed / became ambiguous
+		// (duplicate song ID) under the vote session, so the snapshot
+		// index no longer uniquely identifies it. 409 surfaces the
+		// conflict; the client should re-fetch state. A target that
+		// became the CURRENT song is a distinct case: it returns
+		// entity.ErrVoteOnCurrentSong (400) via the branch above, not
+		// this sentinel. Checked BEFORE ErrStaleSession because the two
+		// are distinct sentinel values.
 		http.Error(w, "prioritize target moved under the vote", http.StatusConflict)
 	case errors.Is(err, roomvote.ErrStaleSession):
 		// The queue advanced under the vote session (lease-holder skip
