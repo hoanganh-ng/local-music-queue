@@ -909,3 +909,105 @@ func TestRoomVotePrioritize_SkipSessionUntouched(t *testing.T) {
 		t.Errorf("prioritize session must exist alongside skip session")
 	}
 }
+
+// ---- skip-behavior regression (session-key generalization) ----
+
+// TestSplitSessionKey_ParsesSkipPrioritizeAndDegrades pins that the
+// shared session-key parser recovers the slug (and songID) for both
+// skip and prioritize keys, and degrades gracefully on malformed keys.
+// The skip cases are the regression guard: generalizing the parser for
+// prioritize keys must not change how existing skip keys are decoded.
+func TestSplitSessionKey_ParsesSkipPrioritizeAndDegrades(t *testing.T) {
+	cases := []struct {
+		name       string
+		key        string
+		wantSlug   string
+		wantSongID string
+	}{
+		{"skip key", "skip:alpha:song1", "alpha", "song1"},
+		{"prioritize key", "prioritize:alpha:song3", "alpha", "song3"},
+		{"skip songID with colon-free id", "skip:beta:s-42", "beta", "s-42"},
+		{"prioritize songID retains later colons", "prioritize:beta:a:b", "beta", "a:b"},
+		{"malformed skip missing song", "skip:alpha", "alpha", ""},
+		{"malformed prioritize missing song", "prioritize:alpha", "alpha", ""},
+		{"unprefixed degrades", "alpha", "alpha", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			slug, songID := splitSessionKey(tc.key)
+			if slug != tc.wantSlug || songID != tc.wantSongID {
+				t.Errorf("splitSessionKey(%q) = (%q, %q), want (%q, %q)",
+					tc.key, slug, songID, tc.wantSlug, tc.wantSongID)
+			}
+		})
+	}
+}
+
+// TestHasSlugPrefix_MatchesSkipNotPrioritize pins that the skip
+// eviction-on-entry predicate matches only "skip:{slug}:" keys and
+// never prioritize keys for the same slug, nor prefix-only slug
+// collisions. This is the invariant that keeps a skip cast from
+// evicting a coexisting prioritize session.
+func TestHasSlugPrefix_MatchesSkipNotPrioritize(t *testing.T) {
+	cases := []struct {
+		name string
+		key  string
+		slug string
+		want bool
+	}{
+		{"skip key for slug", "skip:alpha:song1", "alpha", true},
+		{"prioritize key for slug", "prioritize:alpha:song3", "alpha", false},
+		{"skip key other slug", "skip:beta:song1", "alpha", false},
+		{"prefix-only slug collision", "skip:alphabet:song1", "alpha", false},
+		{"skip key missing song segment", "skip:alpha", "alpha", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasSlugPrefix(tc.key, tc.slug); got != tc.want {
+				t.Errorf("hasSlugPrefix(%q, %q) = %v, want %v", tc.key, tc.slug, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRoomVoteSkip_EvictionOnEntry_LeavesPrioritizeSession is the
+// behavioral reverse of SkipSessionUntouched: a skip cast that runs its
+// eviction-on-entry sweep must evict an expired *skip* session for the
+// slug (existing R09b behavior) while leaving a coexisting expired
+// prioritize session in the map untouched (only the shared
+// ExpireSessions sweep may reap it).
+func TestRoomVoteSkip_EvictionOnEntry_LeavesPrioritizeSession(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithThreeSongs(t, fq, "alpha", 1)
+	fq.members[1] = map[int]bool{42: true, 7: true}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 2}}, 30*time.Second)
+	t0, clock := nowClock()
+	inter.SetClock(clock)
+
+	// Seed a skip session (current song1) and a prioritize session
+	// (song3) at t0.
+	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42); err != nil {
+		t.Fatalf("skip cast: %v", err)
+	}
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+		t.Fatalf("prioritize cast: %v", err)
+	}
+
+	// Advance past expiry so both sessions are expired, then cast skip
+	// again. Eviction-on-entry must reap the expired skip session
+	// (surfacing an "expired" resolution) and rebuild a fresh one.
+	inter.SetClock(func() time.Time { return t0.Add(31 * time.Second) })
+	out, err := inter.CastSkipVote(context.Background(), "alpha", 7)
+	if err != nil {
+		t.Fatalf("second skip cast: %v", err)
+	}
+	if out == nil || out.ExpiredID != sessionKey("alpha", "song1") {
+		t.Errorf("expected eviction-on-entry to reap expired skip session, got %+v", out)
+	}
+
+	// The expired prioritize session must remain in the map: the skip
+	// eviction loop only touches skip-prefixed keys.
+	if inter.ActivePrioritizeSession("alpha", "song3") == nil {
+		t.Errorf("skip eviction-on-entry must not reap a prioritize session")
+	}
+}
