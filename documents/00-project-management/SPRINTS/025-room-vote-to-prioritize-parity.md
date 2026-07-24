@@ -1,12 +1,17 @@
 # R09h – Room vote-to-prioritize parity
 
-**Status:** R09h was **implemented on `dev`; Product Owner acceptance
-pending**. R09h is the room-scoped democratic **vote-to-prioritize**
-parity slice for the R09 player-control epic and the second-listed
-blocking prerequisite for the entire R14c cutover (sequence
-`R05b → R09h → R14b → R09i → R14d → R14c → R14e`). It is backend +
-WebSocket only (no frontend UI; matches the R09b vote-to-skip scope).
-R14b, R09i, and every later R14 slice remain planned and NOT active.
+**Status:** R09h was **implemented on `dev` and accepted by the
+Product Owner on 2026-07-24** at commit
+`95ea6a36dfab80c476db4d8b7dad1d2799977d4d` (acceptance recorded on the
+room epic Issue #17, which remains open for the broader room epic).
+R09h is the room-scoped democratic **vote-to-prioritize** parity slice
+for the R09 player-control epic and the second-listed blocking
+prerequisite for the entire R14c cutover (sequence
+`R05b → R09h → R14b → R09i → R14d → R14c → R14e`); that R09h
+prerequisite for R14c is now **satisfied**. It is backend + WebSocket
+only (no frontend UI; matches the R09b vote-to-skip scope). With R09h
+closed, **no sprint is active on `dev`**; R14b, R09i, R14d, R14c, and
+R14e remain planned and NOT active.
 
 **Sprint name:** Room vote-to-prioritize parity
 
@@ -214,5 +219,15 @@ Focused tests were added at each layer:
   comments with the accepted contract. The accepted skip identifier
   contract was left unchanged.
 
-See the *Implementation summary (R09h)* / *Closure* records appended
-here once the Product Owner accepts.
+## Closure
+
+R09h is **closed and accepted by the Product Owner on 2026-07-24** at
+commit `95ea6a36dfab80c476db4d8b7dad1d2799977d4d`, recorded on the room
+epic Issue #17 (which remains open because it tracks the broader room
+epic). The R09h blocking prerequisite for the R14c cutover is
+**satisfied**. No sprint is active on `dev` after this closure; R14b,
+R09i, R14d, R14c, and R14e remain planned and NOT active. This closure
+pass is documentation-only — it changes no runtime code, tests,
+routes, WebSocket events, migrations, or contracts — and leaves the
+accepted R09h implementation and the corrective history above
+unchanged.
