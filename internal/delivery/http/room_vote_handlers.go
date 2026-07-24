@@ -153,6 +153,10 @@ type roomVotePrioritizeRequest struct {
 //	200 OK {"resolution":"passed"} — the vote passed the threshold; the
 //	  handler has already dispatched room_vote_updated,
 //	  room_vote_resolved, AND room_queue_song_prioritized.
+//	200 OK {"resolution":"expired"} — the ballot arrived after the prior
+//	  session for this target had expired; the handler has already
+//	  dispatched room_vote_resolved{"expired"} for the evicted session
+//	  AND room_vote_updated for the fresh session.
 //	400 Bad Request — malformed slug, malformed/invalid body, or
 //	  out-of-range / current-song index.
 //	401 Unauthorized — defense-in-depth when actorUserID == 0.
@@ -194,7 +198,18 @@ func (h *RoomVoteHandlers) HandleCastRoomVotePrioritize(w http.ResponseWriter, r
 		return
 	}
 
-	if out.Resolution == "passed" {
+	switch out.Resolution {
+	case "expired":
+		// The prior session for this exact target expired; broadcast its
+		// resolution BEFORE the fresh session's update so clients render
+		// the final state of the old session first, then reply 200.
+		if bc := h.queue.Broadcaster(); bc != nil {
+			bc.BroadcastRoomVoteResolved(slug, out.ExpiredID, "expired", out.ExpiredQueue)
+			bc.BroadcastRoomVoteUpdated(slug, out.Session, actorUserID, out.ExpiredQueue)
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"resolution": "expired"})
+		return
+	case "passed":
 		if bc := h.queue.Broadcaster(); bc != nil {
 			bc.BroadcastRoomVoteUpdated(slug, out.Session, actorUserID, out.PrioritizeQueue)
 			bc.BroadcastRoomVoteResolved(slug, out.Session.ID, "passed", out.PrioritizeQueue)

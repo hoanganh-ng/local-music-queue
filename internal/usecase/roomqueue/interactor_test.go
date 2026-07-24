@@ -1735,7 +1735,7 @@ func TestRoomQueue_PrioritizeVote_MovedTargetReturnsStaleNoMutation(t *testing.T
 	}
 }
 
-func TestRoomQueue_PrioritizeVote_TargetBecameCurrentReturnsStale(t *testing.T) {
+func TestRoomQueue_PrioritizeVote_TargetBecameCurrentReturnsCurrentSong(t *testing.T) {
 	inter, roomID := seedPrioritizeQueue(t, "rq-pv-current")
 	ctx := context.Background()
 
@@ -1748,9 +1748,24 @@ func TestRoomQueue_PrioritizeVote_TargetBecameCurrentReturnsStale(t *testing.T) 
 		t.Fatalf("save advance: %v", err)
 	}
 
+	// Became-current is a current-song rejection (mapped to HTTP 400),
+	// NOT a moved/removed stale target (409).
 	_, _, _, _, err = inter.PrioritizeVote(ctx, "rq-pv-current", "up2", 2)
-	if !errors.Is(err, ErrStalePrioritizeVote) {
-		t.Fatalf("expected ErrStalePrioritizeVote when target is current, got %v", err)
+	if !errors.Is(err, entity.ErrVoteOnCurrentSong) {
+		t.Fatalf("expected entity.ErrVoteOnCurrentSong when target is current, got %v", err)
+	}
+	if errors.Is(err, ErrStalePrioritizeVote) {
+		t.Fatalf("became-current must NOT surface as ErrStalePrioritizeVote")
+	}
+	// Zero mutation on the current-song branch.
+	persisted, err := inter.queueRepo.Load(ctx, roomID)
+	if err != nil {
+		t.Fatalf("load persisted: %v", err)
+	}
+	for i := range persisted.Songs {
+		if persisted.Songs[i].IsPrioritized {
+			t.Errorf("expected no mutation on became-current target, got prioritized %+v", persisted.Songs[i])
+		}
 	}
 }
 

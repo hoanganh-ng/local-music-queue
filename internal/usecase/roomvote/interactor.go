@@ -153,24 +153,41 @@ type ExpiredOutcome struct {
 // room_vote_resolved{"passed"} and room_queue_song_prioritized with the
 // (FromIndex, ToIndex, PrioritizeSong, PrioritizeQueue) payload.
 //
-// Unlike CastSkipVote, the prioritize cast has no eviction-on-entry
-// "expired" branch: multiple prioritize sessions can coexist per room
-// (one per target song), so expiry is handled entirely by the shared
-// ExpireSessions sweep. Resolution is therefore only "" or "passed".
+// When Resolution == "expired", the ballot arrived after the prior
+// session for this exact (slug, songID) target had expired: the old
+// session is evicted and snapshotted into ExpiredID / ExpiredSession /
+// ExpiredQueue, a fresh session is created and cast, and the handler
+// fans out one room_vote_resolved{"expired"} for the evicted session
+// followed by one room_vote_updated for the fresh session, replying
+// 200 {"resolution":"expired"}. Unlike skip, prioritize expiry is
+// otherwise handled entirely by the shared ExpireSessions sweep;
+// eviction-on-entry here is scoped to the exact target key only, so a
+// prioritize ballot never disturbs a coexisting session for a
+// different target song. Resolution is therefore "", "passed", or
+// "expired".
 //
 // StaleSession is true when the PrioritizeVote call was refused because
-// the target song moved / was removed / became current under the vote;
-// the handler maps that to HTTP 409 and does NOT broadcast
-// room_vote_resolved (the queue moved past the vote).
+// the target song moved / was removed under the vote; the handler maps
+// that to HTTP 409 and does NOT broadcast room_vote_resolved (the queue
+// moved past the vote).
 type PrioritizeOutcome struct {
 	Session         *entity.VoteSession
 	Passed          bool
-	Resolution      string // "" | "passed"
+	Resolution      string // "" | "passed" | "expired"
 	PrioritizeQueue *entity.Queue
 	FromIndex       int
 	ToIndex         int
 	PrioritizeSong  entity.Song
 	StaleSession    bool
+	// ExpiredID / ExpiredQueue / ExpiredSession describe a prioritize
+	// session that was evicted on entry to CastPrioritizeVote because it
+	// had expired. The handler fans out a single
+	// RoomVoteResolved{outcome:"expired"} for the evicted session before
+	// broadcasting RoomVoteUpdated for the fresh session. All three
+	// fields are zero-valued when no eviction happened.
+	ExpiredID      string
+	ExpiredQueue   *entity.Queue
+	ExpiredSession *entity.VoteSession
 }
 
 // CastSkipVote casts one skip vote for the current song of the room.
@@ -344,10 +361,15 @@ func (i *Interactor) CastSkipVote(ctx context.Context, slug string, actorUserID 
 //   room.ErrForbidden          → actor is not an active member
 //   roomqueue.ErrInvalidIndex  → songIndex out of range
 //   entity.ErrVoteOnCurrentSong → songIndex identifies the current song
+//                                (at cast time OR the target became the
+//                                current song under a passing vote)
 //   entity.ErrAlreadyVoted     → this user already voted this session
 //   entity.ErrVoteSessionExpired → session existed but expired
-//   ErrStalePrioritizeSession  → vote passed but PrioritizeVote refused
-//                                because the target moved under us
+//   ErrStalePrioritizeSession  → a live session for this song ID exists
+//                                at a DIFFERENT index (same-ID/different-
+//                                entry conflict), OR the vote passed but
+//                                PrioritizeVote refused because the
+//                                target moved / was removed under us
 //
 // Actor identity comes ONLY from the resolved session token; the
 // actorUserID parameter is authoritative and body-supplied identity is
@@ -387,11 +409,37 @@ func (i *Interactor) CastPrioritizeVote(ctx context.Context, slug string, songIn
 
 	out := &PrioritizeOutcome{}
 
-	// Reuse-or-create the session for this exact (slug, songID). Expiry
-	// of other sessions is handled by the shared ExpireSessions sweep,
-	// so there is no eviction-on-entry branch here.
 	session, exists := i.sessions[key]
-	if !exists || session.IsExpiredAt(now) {
+
+	// Conflict guard (same songID, different index): a live session
+	// keyed on this target song ID whose snapshot index no longer matches
+	// the requested index means two distinct queue entries share the same
+	// video ID. Reject immediately as a stale conflict WITHOUT touching
+	// the existing ballot map, so ballots for one entry can never accrue
+	// toward a different entry's session.
+	if exists && !session.IsExpiredAt(now) && session.SongIndex != songIndex {
+		return nil, ErrStalePrioritizeSession
+	}
+
+	// Expired matching session: the prior session for this exact target
+	// expired. Snapshot + evict it so the handler can broadcast a single
+	// room_vote_resolved{"expired"} for the old session, then fall through
+	// to create a fresh session and cast on it. Eviction is scoped to
+	// THIS key only, so a coexisting session for a different target song
+	// is never disturbed (that is left to the shared ExpireSessions
+	// sweep).
+	if exists && session.IsExpiredAt(now) {
+		out.Resolution = "expired"
+		out.ExpiredID = session.ID
+		out.ExpiredSession = session
+		out.ExpiredQueue = queue
+		delete(i.sessions, key)
+		exists = false
+	}
+
+	// Reuse-or-create the session for this exact (slug, songID). Expiry
+	// of OTHER sessions is handled by the shared ExpireSessions sweep.
+	if !exists {
 		n := 0
 		if i.resolver != nil {
 			n = i.resolver.UniqueConnectedUserIDs(slug)

@@ -893,6 +893,144 @@ func TestRoomVotePrioritize_WriteRoomVoteError_MapsSentinels(t *testing.T) {
 	}
 }
 
+// TestRoomVotePrioritize_ExpiredMatchingSession_Returns200Expired pins
+// the expired-on-next-ballot behavior end to end at the handler seam:
+// after a first ballot opens a session and that session expires, the
+// NEXT ballot on the exact same target must evict the expired session,
+// open a fresh one, and return 200 {"resolution":"expired"}. The
+// handler must fan out EXACTLY one room_vote_resolved{expired} for the
+// evicted session followed by one fresh room_vote_updated — and no
+// prioritized broadcast (threshold is not met by the single fresh
+// ballot).
+func TestRoomVotePrioritize_ExpiredMatchingSession_Returns200Expired(t *testing.T) {
+	rvh, _, _, cleanup := votePrioritizeFixture(t, "pv-exp", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	// First ballot opens the session (threshold 2, 1 vote → 204).
+	if rr := castPrioritize(t, rvh, "pv-exp", 200, `{"song_index":2}`); rr.Code != http.StatusNoContent {
+		t.Fatalf("first cast: expected 204, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	first := rvh.vote.ActivePrioritizeSession("pv-exp", "last-pv-exp")
+	if first == nil {
+		t.Fatalf("expected a live session after first cast")
+	}
+
+	// Advance the vote interactor clock past the 30s expiry window so the
+	// existing matching session is expired at the next ballot. The fresh
+	// session created on the next cast is stamped from the same advanced
+	// clock, so it is NOT already-expired.
+	rvh.vote.SetClock(func() time.Time { return time.Now().Add(31 * time.Second) })
+
+	rr := castPrioritize(t, rvh, "pv-exp", 300, `{"song_index":2}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expired restart: expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Resolution string `json:"resolution"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Resolution != "expired" {
+		t.Errorf("expected resolution=expired, got %q", body.Resolution)
+	}
+
+	// The live session for this target must now be a FRESH instance: a
+	// distinct object from the evicted one, carrying only the restarting
+	// caller's single ballot (the evicted ballot from user 200 is gone).
+	// The session ID is deterministic ("prioritize:<songID>"), so freshness
+	// is asserted by instance identity + ballot map, not by ID.
+	restarted := rvh.vote.ActivePrioritizeSession("pv-exp", "last-pv-exp")
+	if restarted == nil {
+		t.Fatalf("expected a fresh live session after the expired restart")
+	}
+	if restarted == first {
+		t.Errorf("expected the restart to create a NEW session instance, got the evicted one")
+	}
+	if restarted.VoteCount() != 1 || restarted.VotedBy[200] {
+		t.Errorf("expected fresh session with only the restart ballot, got count=%d votedBy=%v", restarted.VoteCount(), restarted.VotedBy)
+	}
+
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if got := len(bc.voteResolved); got != 1 {
+		t.Fatalf("expected 1 vote_resolved, got %d", got)
+	}
+	if bc.voteResolved[0].Outcome != "expired" {
+		t.Errorf("expected resolved outcome=expired, got %q", bc.voteResolved[0].Outcome)
+	}
+	if bc.voteResolved[0].SessionID != first.ID {
+		t.Errorf("expected resolved to reference the evicted session id %q, got %q", first.ID, bc.voteResolved[0].SessionID)
+	}
+	// One vote_updated per cast (the 204 first ballot and the fresh
+	// restarted session), both dispatched by the handler.
+	if got := len(bc.voteUpdated); got != 2 {
+		t.Errorf("expected 2 vote_updated (first ballot + fresh restart), got %d", got)
+	}
+	if got := len(bc.prioritized); got != 0 {
+		t.Errorf("expected 0 prioritized broadcasts on expired restart, got %d", got)
+	}
+}
+
+// TestRoomVotePrioritize_SameSongIDDifferentIndex_Returns409 pins the
+// same-video-ID/different-index conflict guard at the handler seam:
+// once a live session for a song ID is anchored at one snapshot index,
+// a ballot naming a DIFFERENT index that resolves to the SAME song ID
+// must be rejected 409 up front, WITHOUT mutating the existing ballot
+// map and WITHOUT any prioritized broadcast.
+func TestRoomVotePrioritize_SameSongIDDifferentIndex_Returns409(t *testing.T) {
+	rvh, db, _, cleanup := votePrioritizeFixture(t, "pv-conf", []int{200, 300})
+	defer cleanup()
+	bc := &voteTestBroadcaster{}
+	rvh.queue.SetBroadcaster(bc)
+
+	// First ballot anchors a session on "last-pv-conf" at index 2.
+	if rr := castPrioritize(t, rvh, "pv-conf", 200, `{"song_index":2}`); rr.Code != http.StatusNoContent {
+		t.Fatalf("first cast: expected 204, got %d", rr.Code)
+	}
+	anchored := rvh.vote.ActivePrioritizeSession("pv-conf", "last-pv-conf")
+	if anchored == nil || anchored.SongIndex != 2 || anchored.VoteCount() != 1 {
+		t.Fatalf("expected anchored session at index 2 with 1 ballot, got %+v", anchored)
+	}
+
+	// Introduce a second queue entry that shares the SAME video ID at a
+	// different index (index 1). Now index 1 and index 2 both carry
+	// "last-pv-conf".
+	roomID := mustRoomIDQueue(t, db, "pv-conf")
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	q, err := queueRepo.Load(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	q.Songs[1].ID = "last-pv-conf"
+	if err := queueRepo.Save(context.Background(), roomID, q); err != nil {
+		t.Fatalf("save dup id: %v", err)
+	}
+
+	// A ballot on index 1 resolves to the same song ID whose live session
+	// is anchored at index 2 → stale conflict 409, no ballot change.
+	rr := castPrioritize(t, rvh, "pv-conf", 300, `{"song_index":1}`)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("same-id/different-index: expected 409, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// The anchored session must be untouched (still 1 ballot at index 2).
+	after := rvh.vote.ActivePrioritizeSession("pv-conf", "last-pv-conf")
+	if after == nil || after.SongIndex != 2 || after.VoteCount() != 1 {
+		t.Errorf("expected anchored session unchanged (index 2, 1 ballot), got %+v", after)
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if got := len(bc.voteUpdated); got != 1 {
+		t.Errorf("expected 1 vote_updated total (no broadcast on 409), got %d", got)
+	}
+	if got := len(bc.prioritized); got != 0 {
+		t.Errorf("expected 0 prioritized broadcasts on conflict, got %d", got)
+	}
+}
+
 // Compile-time assertion: voteTestBroadcaster must satisfy
 // roomqueue.Broadcaster. Keeps the test from silently breaking if the
 // interface grows or shrinks.

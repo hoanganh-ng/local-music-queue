@@ -38,6 +38,14 @@ type fakeRoomQueue struct {
 	// race where the target song was removed/moved between the vote
 	// interactor's GetStateByRoomID and PrioritizeVote calls.
 	staleOnNextPrioritize bool
+
+	// currentOnNextPrioritize, when true, makes the next PrioritizeVote
+	// call return entity.ErrVoteOnCurrentSong WITHOUT mutating. Simulates
+	// the race where the target became the currently-playing song between
+	// the vote interactor's GetStateByRoomID and PrioritizeVote calls; the
+	// queue owner surfaces the current-song sentinel (HTTP 400), NOT a
+	// moved/removed stale conflict (409).
+	currentOnNextPrioritize bool
 }
 
 type skipCall struct {
@@ -171,6 +179,12 @@ func (a queueAdapter) PrioritizeVote(_ context.Context, slug, expectedSongID str
 		a.f.staleOnNextPrioritize = false
 		return nil, 0, 0, entity.Song{}, roomqueue.ErrStalePrioritizeVote
 	}
+	// Simulated race: target became the currently-playing song under the
+	// vote. Current-song rejection, NOT a stale conflict.
+	if a.f.currentOnNextPrioritize {
+		a.f.currentOnNextPrioritize = false
+		return nil, 0, 0, entity.Song{}, entity.ErrVoteOnCurrentSong
+	}
 	if q.CurrentIndex < 0 || q.CurrentIndex >= len(q.Songs) {
 		return nil, 0, 0, entity.Song{}, roomqueue.ErrStalePrioritizeVote
 	}
@@ -181,7 +195,7 @@ func (a queueAdapter) PrioritizeVote(_ context.Context, slug, expectedSongID str
 		return nil, 0, 0, entity.Song{}, roomqueue.ErrStalePrioritizeVote
 	}
 	if expectedIndex == q.CurrentIndex {
-		return nil, 0, 0, entity.Song{}, roomqueue.ErrStalePrioritizeVote
+		return nil, 0, 0, entity.Song{}, entity.ErrVoteOnCurrentSong
 	}
 	count := 0
 	for idx := range q.Songs {
@@ -1009,5 +1023,149 @@ func TestRoomVoteSkip_EvictionOnEntry_LeavesPrioritizeSession(t *testing.T) {
 	// eviction loop only touches skip-prefixed keys.
 	if inter.ActivePrioritizeSession("alpha", "song3") == nil {
 		t.Errorf("skip eviction-on-entry must not reap a prioritize session")
+	}
+}
+
+// ---- R09h correction: prioritize expired-restart + conflict guard ----
+
+// TestRoomVotePrioritize_ExpiredMatchingSessionRestartsWithExpiredOutcome
+// pins the Issue #17 blocking fix: a ballot for a target whose prior
+// session has expired must evict + snapshot the exact expired session
+// (surfacing Resolution=="expired" so the handler broadcasts one
+// room_vote_resolved{"expired"} + one fresh room_vote_updated and
+// replies 200), then start and cast a fresh session. It must NOT
+// silently restart with a 204/no resolution.
+func TestRoomVotePrioritize_ExpiredMatchingSessionRestartsWithExpiredOutcome(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithThreeSongs(t, fq, "alpha", 1)
+	fq.members[1] = map[int]bool{42: true, 7: true}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 3}}, 30*time.Second)
+	t0, clock := nowClock()
+	inter.SetClock(clock)
+
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+		t.Fatalf("first cast: %v", err)
+	}
+	first := inter.ActivePrioritizeSession("alpha", "song3")
+	if first == nil {
+		t.Fatalf("expected first session")
+	}
+
+	// Advance past expiry; the next ballot for the same target evicts the
+	// expired session and restarts a fresh one.
+	inter.SetClock(func() time.Time { return t0.Add(31 * time.Second) })
+	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 7)
+	if err != nil {
+		t.Fatalf("second cast: %v", err)
+	}
+	if out.Resolution != "expired" {
+		t.Fatalf("expected expired resolution, got %q", out.Resolution)
+	}
+	if out.ExpiredSession != first || out.ExpiredID != first.ID {
+		t.Errorf("expected snapshot of the exact expired session, got id=%q sess=%p want=%p", out.ExpiredID, out.ExpiredSession, first)
+	}
+	if out.ExpiredQueue == nil {
+		t.Errorf("expected ExpiredQueue populated for the expired broadcast")
+	}
+	if out.Session == nil || out.Session == first {
+		t.Fatalf("expected a distinct fresh session, got %p", out.Session)
+	}
+	if out.Session.VoteCount() != 1 || !out.Session.HasVoted(7) {
+		t.Errorf("fresh session must carry only the new ballot, got %+v", out.Session)
+	}
+	if out.Session.HasVoted(42) {
+		t.Errorf("fresh session must not inherit the expired session's voter")
+	}
+	if out.Passed || out.PrioritizeQueue != nil {
+		t.Errorf("expired restart must not pass or carry a prioritize result")
+	}
+	live := inter.ActivePrioritizeSession("alpha", "song3")
+	if live != out.Session {
+		t.Errorf("map must hold the fresh session")
+	}
+	if fq.prioritizeCount != 0 {
+		t.Errorf("expired restart must not call queue PrioritizeVote, got %d", fq.prioritizeCount)
+	}
+}
+
+// TestRoomVotePrioritize_SameSongIDDifferentIndexRejectedWithoutBallotChange
+// pins the Issue #17 blocking fix: when a live session already exists
+// for a target song ID, a second ballot referencing the same song ID at
+// a DIFFERENT snapshot index (a distinct queue entry that happens to
+// share the video ID) is rejected as a stale conflict immediately,
+// WITHOUT recording the ballot on the existing session.
+func TestRoomVotePrioritize_SameSongIDDifferentIndexRejectedWithoutBallotChange(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithThreeSongs(t, fq, "alpha", 1)
+	fq.members[1] = map[int]bool{42: true, 7: true}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 3}}, 30*time.Second)
+
+	// First ballot: song3 at index 2 -> session SongIndex=2, one vote.
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+		t.Fatalf("first cast: %v", err)
+	}
+	before := inter.ActivePrioritizeSession("alpha", "song3")
+	if before == nil || before.VoteCount() != 1 {
+		t.Fatalf("expected 1-ballot session for song3, got %+v", before)
+	}
+
+	// The queue reorders so song3 now sits at index 1 (a different entry
+	// position). A ballot referencing index 1 targets the same song ID at
+	// a different snapshot index than the live session's SongIndex (2).
+	fq.mu.Lock()
+	fq.queues[1].Songs = []entity.Song{
+		{ID: "song1", Title: "S1", URL: "u", AddedBy: "Host", AddedByID: 42},
+		{ID: "song3", Title: "S3", URL: "u", AddedBy: "Host", AddedByID: 42},
+		{ID: "song2", Title: "S2", URL: "u", AddedBy: "Host", AddedByID: 42},
+	}
+	fq.mu.Unlock()
+
+	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 7)
+	if !errors.Is(err, ErrStalePrioritizeSession) {
+		t.Fatalf("expected ErrStalePrioritizeSession for same-id/different-index, got %v", err)
+	}
+	if out != nil {
+		t.Fatalf("expected nil outcome on conflict, got %+v", out)
+	}
+	// The existing ballot map must be untouched: still exactly one vote,
+	// still snapshot index 2, and user 7 never recorded.
+	after := inter.ActivePrioritizeSession("alpha", "song3")
+	if after == nil || after.VoteCount() != 1 || after.SongIndex != 2 {
+		t.Fatalf("existing session must be unchanged, got %+v", after)
+	}
+	if after.HasVoted(7) {
+		t.Errorf("conflicting ballot must not be recorded in the existing session")
+	}
+	if fq.prioritizeCount != 0 {
+		t.Errorf("conflict must reject before any PrioritizeVote call, got %d", fq.prioritizeCount)
+	}
+}
+
+// TestRoomVotePrioritize_BecameCurrentUnderVotePassesThroughCurrentSong
+// pins the Issue #17 important fix: when the queue owner rejects a
+// passing vote because the target became the currently-playing song, the
+// vote interactor passes the current-song sentinel through (HTTP 400)
+// rather than converting it into ErrStalePrioritizeSession (409).
+func TestRoomVotePrioritize_BecameCurrentUnderVotePassesThroughCurrentSong(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithThreeSongs(t, fq, "alpha", 1)
+	fq.members[1] = map[int]bool{42: true, 7: true}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+		t.Fatalf("first cast: %v", err)
+	}
+	// The target becomes current between the passing vote's load and the
+	// queue-owned resolution.
+	fq.mu.Lock()
+	fq.currentOnNextPrioritize = true
+	fq.mu.Unlock()
+
+	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 7)
+	if !errors.Is(err, entity.ErrVoteOnCurrentSong) {
+		t.Fatalf("expected entity.ErrVoteOnCurrentSong passed through, got %v (out=%+v)", err, out)
+	}
+	if errors.Is(err, ErrStalePrioritizeSession) {
+		t.Fatalf("became-current must NOT be converted to ErrStalePrioritizeSession")
 	}
 }

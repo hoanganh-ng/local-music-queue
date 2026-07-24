@@ -883,12 +883,14 @@ func (i *Interactor) SkipVote(ctx context.Context, slug, expectedSongID string) 
 // It re-resolves the active room, acquires the queue mutation mutex,
 // loads fresh state, and verifies that the stored snapshot index still
 // identifies the same non-current target song. It rejects
-// removed/moved/ambiguous/now-current targets as stale, returning
-// ErrStalePrioritizeVote WITHOUT mutating anything. On success it calls
-// the existing entity Queue.Prioritize, saves exactly once, and returns
-// the authoritative (queue, fromIndex, toIndex, song) tuple the
-// room_queue_song_prioritized broadcast needs. It does NOT broadcast
-// and does NOT touch priority balances.
+// removed/moved/ambiguous targets as stale, returning
+// ErrStalePrioritizeVote WITHOUT mutating anything. A target that
+// became the currently-playing song is a current-song rejection and
+// returns entity.ErrVoteOnCurrentSong (also WITHOUT mutating). On
+// success it calls the existing entity Queue.Prioritize, saves exactly
+// once, and returns the authoritative (queue, fromIndex, toIndex, song)
+// tuple the room_queue_song_prioritized broadcast needs. It does NOT
+// broadcast and does NOT touch priority balances.
 func (i *Interactor) PrioritizeVote(ctx context.Context, slug, expectedSongID string, expectedIndex int) (*entity.Queue, int, int, entity.Song, error) {
 	roomObj, err := i.resolveActiveRoom(ctx, slug)
 	if err != nil {
@@ -916,9 +918,14 @@ func (i *Interactor) PrioritizeVote(ctx context.Context, slug, expectedSongID st
 	if queue.Songs[expectedIndex].ID != expectedSongID {
 		return nil, 0, 0, entity.Song{}, ErrStalePrioritizeVote
 	}
-	// Stale #4: the target became the currently-playing song.
+	// Became-current: the target is now the currently-playing song.
+	// This is a current-song rejection (client bug / the song advanced
+	// into the current slot), NOT a moved/removed stale target, so it
+	// surfaces the current-song sentinel (mapped to HTTP 400) rather
+	// than ErrStalePrioritizeVote (409). Zero mutation, save, or
+	// broadcast on this branch.
 	if expectedIndex == queue.CurrentIndex {
-		return nil, 0, 0, entity.Song{}, ErrStalePrioritizeVote
+		return nil, 0, 0, entity.Song{}, entity.ErrVoteOnCurrentSong
 	}
 	// Stale #5: ambiguous — the same song ID now appears more than once,
 	// so the snapshot index no longer uniquely identifies the target.
