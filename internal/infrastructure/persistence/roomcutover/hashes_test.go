@@ -141,3 +141,72 @@ func TestHashesEqual(t *testing.T) {
 		t.Fatal("different value should not be equal")
 	}
 }
+
+// sumRows hashes a sequence of rows through a fresh rowHasher.
+func sumRows(rows ...[]string) string {
+	rh := newRowHasher()
+	for _, r := range rows {
+		rh.writeRow(r...)
+	}
+	return rh.sum()
+}
+
+// TestRowHasherLengthPrefixingPreventsAmbiguity proves the length-prefixed
+// encoding cannot be collided by user-controlled text containing the 0x1f /
+// 0x1e control characters a separator-based scheme would rely on, nor by
+// shifting bytes across field or row boundaries.
+func TestRowHasherLengthPrefixingPreventsAmbiguity(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+	}{
+		{
+			"embedded field separator",
+			sumRows([]string{"a\x1fb"}),
+			sumRows([]string{"a", "b"}),
+		},
+		{
+			"embedded record separator",
+			sumRows([]string{"a\x1eb"}),
+			sumRows([]string{"a"}, []string{"b"}),
+		},
+		{
+			"bytes shifted across a field boundary",
+			sumRows([]string{"ab", ""}),
+			sumRows([]string{"a", "b"}),
+		},
+		{
+			"rows merged",
+			sumRows([]string{"a", "b", "c", "d"}),
+			sumRows([]string{"a", "b"}, []string{"c", "d"}),
+		},
+	}
+	for _, tc := range cases {
+		if tc.a == tc.b {
+			t.Errorf("%s: distinct row sets hash identically (%s)", tc.name, tc.a)
+		}
+	}
+	// Sanity: identical row sets do hash identically.
+	if sumRows([]string{"a", "b"}, []string{"c"}) != sumRows([]string{"a", "b"}, []string{"c"}) {
+		t.Fatal("identical row sets must hash identically")
+	}
+}
+
+// TestHashFieldTimeNormalizesToUTC: the same instant rendered in different
+// zones hashes identically; different instants differ. The canonical
+// rendering is UTC RFC3339Nano, so it never depends on the driver's session
+// time zone.
+func TestHashFieldTimeNormalizesToUTC(t *testing.T) {
+	utc := time.Date(2026, 1, 2, 3, 4, 5, 678900000, time.UTC)
+	plus5 := utc.In(time.FixedZone("UTC+5", 5*3600))
+	if hashFieldTime(utc) != hashFieldTime(plus5) {
+		t.Fatalf("same instant in different zones rendered differently: %q vs %q",
+			hashFieldTime(utc), hashFieldTime(plus5))
+	}
+	if got, want := hashFieldTime(plus5), "2026-01-02T03:04:05.6789Z"; got != want {
+		t.Fatalf("canonical rendering = %q, want %q", got, want)
+	}
+	if hashFieldTime(utc) == hashFieldTime(utc.Add(time.Nanosecond)) {
+		t.Fatal("distinct instants must render differently")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -37,8 +38,10 @@ const requiredSchemaVersion uint = 9
 var BuildSHA string
 
 // Options configures a cutover run. RoomSlug and HostUserID identify the
-// target for every mode; RoomName is additionally required to create the room
-// in plan/up. The zero value is not usable.
+// target for plan/up; RoomName is additionally required to create the room
+// in plan/up. Verify ignores the identity fields entirely and derives the
+// cutover identity from the durable marker. The zero value is only usable
+// for Verify.
 type Options struct {
 	RoomSlug   string
 	RoomName   string
@@ -60,6 +63,12 @@ type Options struct {
 	// leave them nil.
 	FaultBeforeMarker func() error
 	FaultBeforeCommit func() error
+
+	// TamperAfterCommit is a test-only hook that runs after COMMIT and
+	// before the post-commit verification pass, so tests can mutate the
+	// committed state and assert that post-commit verification catches it.
+	// A returned error aborts the run. Production callers leave it nil.
+	TamperAfterCommit func() error
 }
 
 func (o Options) now() time.Time {
@@ -69,7 +78,7 @@ func (o Options) now() time.Time {
 	return time.Now().UTC()
 }
 
-// validateIdentity checks the fields every mode needs: a valid, non-reserved
+// validateIdentity checks the fields plan/up need: a valid, non-reserved
 // slug and a positive host user id.
 func (o Options) validateIdentity() error {
 	if !entity.IsValidSlug(o.RoomSlug) {
@@ -109,10 +118,21 @@ type markerRecord struct {
 	BuildSHA       string
 }
 
+// markerExpectation carries the caller-supplied identity a plan/up rerun
+// must additionally match against the marker and the resolved target room.
+// Verify passes nil: its identity is derived solely from the marker.
+type markerExpectation struct {
+	RoomSlug   string
+	RoomName   string // empty = not supplied, not checked
+	HostUserID int64
+}
+
 // Plan performs a read-only preview: it validates inputs, asserts schema
-// readiness and host existence, honors an existing matching marker (reporting
-// a no-op), and otherwise computes the source hashes and per-table counts. It
-// never writes.
+// readiness, host existence, and first-cutover readiness (target slug
+// absent, room_activities empty, no play-history id overflow), honors an
+// existing matching marker (reporting a fully verified no-op), and otherwise
+// computes the source hashes plus the expected target hashes/counts a
+// correct cutover would produce. It never writes.
 func Plan(ctx context.Context, db *sql.DB, opts Options) (*Report, error) {
 	report := newReport("plan", opts)
 	report.DryRun = true
@@ -129,39 +149,65 @@ func Plan(ctx context.Context, db *sql.DB, opts Options) (*Report, error) {
 	if done, err := applyExistingMarker(ctx, db, opts, report); err != nil {
 		return nil, err
 	} else if done {
+		report.Verified = true
 		report.AddNote("already cut over; up would be a no-op")
 		report.FinishedAt = opts.now()
 		return report, nil
 	}
 
-	src, err := computeSourceHashes(ctx, db)
-	if err != nil {
+	if err := checkFirstCutoverReadiness(ctx, db, opts.RoomSlug); err != nil {
 		return nil, err
 	}
-	report.SourceHashes = src
 
-	offset, err := currentPlayHistoryOffset(ctx, db)
-	if err != nil {
+	if err := fillExpectedEvidence(ctx, db, report); err != nil {
 		return nil, err
 	}
-	report.LegacyIDOffset = offset
-
-	tables, err := buildTableReports(ctx, db, 0)
-	if err != nil {
-		return nil, err
-	}
-	report.Tables = tables
 	report.AddNote("plan only: no data written")
+	report.AddNote("target hashes/counts are the expected values derived from the validated source projection")
 	report.FinishedAt = opts.now()
 	return report, nil
 }
 
+// fillExpectedEvidence populates a read-only (plan / dry-run) report with the
+// source hashes, the play-history offset, and the expected target evidence: a
+// lossless cutover copies the canonical logical projection verbatim, so the
+// expected target hashes equal the source hashes and the expected target
+// counts equal the source counts.
+func fillExpectedEvidence(ctx context.Context, q rowQueryer, report *Report) error {
+	src, err := computeSourceHashes(ctx, q)
+	if err != nil {
+		return err
+	}
+	report.SourceHashes = src
+	expected := make(map[string]string, len(src))
+	for k, v := range src {
+		expected[k] = v
+	}
+	report.TargetHashes = expected
+
+	offset, err := currentPlayHistoryOffset(ctx, q)
+	if err != nil {
+		return err
+	}
+	report.LegacyIDOffset = offset
+
+	tables, err := buildExpectedTableReports(ctx, q)
+	if err != nil {
+		return err
+	}
+	report.Tables = tables
+	return nil
+}
+
 // Up executes the cutover. A dry run behaves like Plan but reports Mode "up".
 // The write path holds the advisory lock on a pinned connection for the whole
-// single transaction, following the ADR 003 §8 order: create room, create sole
-// host membership, copy the four tables, insert the marker before commit,
-// verify within the transaction, then commit (or roll back) and release the
-// lock. A matching prior marker short-circuits to a verified no-op.
+// single transaction, following the ADR 003 §8 order: re-assert readiness,
+// create room, create sole host membership, copy the four tables, insert the
+// marker (timestamped immediately before insertion) before commit, verify
+// within the transaction, commit (or roll back), release the lock — and then
+// re-verify the committed state through the marker-derived verification
+// routine before claiming Verified. A matching prior marker short-circuits to
+// a fully verified no-op.
 func Up(ctx context.Context, db *sql.DB, opts Options) (*Report, error) {
 	report := newReport("up", opts)
 	report.DryRun = opts.DryRun
@@ -184,26 +230,19 @@ func Up(ctx context.Context, db *sql.DB, opts Options) (*Report, error) {
 		return report, nil
 	}
 
+	if err := checkFirstCutoverReadiness(ctx, db, opts.RoomSlug); err != nil {
+		return nil, err
+	}
+
 	buildSHA := resolveBuildSHA()
 	report.BuildSHA = buildSHA
 
 	if opts.DryRun {
-		src, err := computeSourceHashes(ctx, db)
-		if err != nil {
+		if err := fillExpectedEvidence(ctx, db, report); err != nil {
 			return nil, err
 		}
-		report.SourceHashes = src
-		offset, err := currentPlayHistoryOffset(ctx, db)
-		if err != nil {
-			return nil, err
-		}
-		report.LegacyIDOffset = offset
-		tables, err := buildTableReports(ctx, db, 0)
-		if err != nil {
-			return nil, err
-		}
-		report.Tables = tables
 		report.AddNote("dry run: no data written")
+		report.AddNote("target hashes/counts are the expected values derived from the validated source projection")
 		report.FinishedAt = opts.now()
 		return report, nil
 	}
@@ -242,21 +281,32 @@ func Up(ctx context.Context, db *sql.DB, opts Options) (*Report, error) {
 		}
 	}()
 
-	preCommitAt := opts.now()
+	// Re-assert first-cutover readiness inside the locked transaction: the
+	// preflight check above ran before the lock was held, so a concurrent
+	// writer could have taken the slug or written room_activities since.
+	if err := checkFirstCutoverReadiness(ctx, tx, opts.RoomSlug); err != nil {
+		return nil, err
+	}
+
+	createdAt := opts.now()
 	cutoverID := uuid.NewString()
 
-	roomID, err := insertRoom(ctx, tx, opts, preCommitAt)
+	roomID, err := insertRoom(ctx, tx, opts, createdAt)
 	if err != nil {
 		return nil, err
 	}
-	if err := insertHostMembership(ctx, tx, roomID, opts.HostUserID, preCommitAt); err != nil {
+	if err := insertHostMembership(ctx, tx, roomID, opts.HostUserID, createdAt); err != nil {
 		return nil, err
 	}
 
 	// Compute the offset inside the tx so it is consistent with the rows
-	// actually copied (any concurrent writer is excluded by the lock).
+	// actually copied (any concurrent writer is excluded by the lock), and
+	// reject bigint overflow before any play-history DML runs.
 	offset, err := currentPlayHistoryOffset(ctx, tx)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkPlayHistoryOverflow(ctx, tx, offset); err != nil {
 		return nil, err
 	}
 
@@ -295,6 +345,9 @@ func Up(ctx context.Context, db *sql.DB, opts Options) (*Report, error) {
 	report.SourceHashes = srcHashes
 	report.TargetHashes = tgtHashes
 
+	// The marker audit timestamp is captured immediately before the marker
+	// row is inserted, per the accepted audit contract.
+	preCommitAt := opts.now()
 	if err := insertMarker(ctx, tx, markerRecord{
 		RoomCutoverID:  cutoverID,
 		TargetRoomSlug: opts.RoomSlug,
@@ -325,6 +378,35 @@ func Up(ctx context.Context, db *sql.DB, opts Options) (*Report, error) {
 	}
 	committed = true
 
+	if opts.TamperAfterCommit != nil {
+		if err := opts.TamperAfterCommit(); err != nil {
+			return nil, fmt.Errorf("tamper after commit: %w", err)
+		}
+	}
+
+	// Post-commit verification: reread the durable marker from the committed
+	// database and run the full marker-derived verification routine (room
+	// resolution, slug/name/host identity, membership role, and recomputed
+	// hash equality against the recorded values). Verified is only claimed
+	// after this pass succeeds.
+	m, err := readMarker(ctx, db)
+	if err != nil {
+		return nil, fmt.Errorf("post-commit verification: %w", err)
+	}
+	if m == nil {
+		return nil, errors.New("post-commit verification: cutover committed but no marker row is present")
+	}
+	srcCommitted, tgtCommitted, err := verifyMarker(ctx, db, m, &markerExpectation{
+		RoomSlug:   opts.RoomSlug,
+		RoomName:   opts.RoomName,
+		HostUserID: opts.HostUserID,
+	})
+	report.SourceHashes = srcCommitted
+	report.TargetHashes = tgtCommitted
+	if err != nil {
+		return nil, fmt.Errorf("cutover committed but post-commit verification failed: %w", err)
+	}
+
 	report.RoomCutoverID = cutoverID
 	report.TargetRoomID = roomID
 	report.LegacyIDOffset = offset
@@ -336,19 +418,18 @@ func Up(ctx context.Context, db *sql.DB, opts Options) (*Report, error) {
 	}
 	report.Tables = tables
 	report.AddNote("cutover committed")
+	report.AddNote("post-commit verification passed")
 	report.FinishedAt = opts.now()
 	return report, nil
 }
 
-// Verify re-reads the durable marker and recomputes the source and target
-// hashes, asserting they still match what was recorded. It requires a marker
-// to be present and never writes.
+// Verify re-reads the durable marker and runs the full marker-derived
+// verification routine against the committed state. All identity is derived
+// solely from the marker — the caller supplies no room slug, name, or host
+// id. It requires a marker to be present and never writes.
 func Verify(ctx context.Context, db *sql.DB, opts Options) (*Report, error) {
 	report := newReport("verify", opts)
 	report.DryRun = true
-	if err := opts.validateIdentity(); err != nil {
-		return nil, err
-	}
 	if err := checkSchemaReady(db); err != nil {
 		return nil, err
 	}
@@ -362,18 +443,20 @@ func Verify(ctx context.Context, db *sql.DB, opts Options) (*Report, error) {
 	}
 
 	report.RoomCutoverID = m.RoomCutoverID
+	report.TargetRoomSlug = m.TargetRoomSlug
 	report.TargetRoomID = m.TargetRoomID
+	report.HostUserID = m.HostUserID
 	report.LegacyIDOffset = m.LegacyIDOffset
 	report.BuildSHA = m.BuildSHA
 	report.AlreadyCutOver = true
 
-	matched, src, dst, err := matchMarker(ctx, db, opts, m)
+	src, dst, err := verifyMarker(ctx, db, m, nil)
 	report.SourceHashes = src
 	report.TargetHashes = dst
 	if err != nil {
 		return nil, err
 	}
-	report.Verified = matched
+	report.Verified = true
 
 	tables, err := buildTableReports(ctx, db, m.TargetRoomID)
 	if err != nil {
@@ -397,10 +480,11 @@ func newReport(mode string, opts Options) *Report {
 }
 
 // applyExistingMarker checks for a durable marker. When one exists it must
-// match the requested identity and the freshly recomputed hashes; on an exact
-// match it fills the report identity/hash fields and returns done=true. A
-// mismatch (different identity or hash drift) returns an error. No marker
-// returns done=false with no error.
+// pass the full marker-derived verification routine — including the
+// caller-supplied slug/name/host expectation and the freshly recomputed
+// hashes — before the run short-circuits to a no-op (done=true). Any
+// identity, membership, or hash drift returns an error. No marker returns
+// done=false with no error.
 func applyExistingMarker(ctx context.Context, db *sql.DB, opts Options, report *Report) (bool, error) {
 	m, err := readMarker(ctx, db)
 	if err != nil {
@@ -409,48 +493,191 @@ func applyExistingMarker(ctx context.Context, db *sql.DB, opts Options, report *
 	if m == nil {
 		return false, nil
 	}
-	matched, src, dst, err := matchMarker(ctx, db, opts, m)
+	src, dst, err := verifyMarker(ctx, db, m, &markerExpectation{
+		RoomSlug:   opts.RoomSlug,
+		RoomName:   opts.RoomName,
+		HostUserID: opts.HostUserID,
+	})
 	if err != nil {
 		return false, err
-	}
-	if !matched {
-		return false, nil
 	}
 	report.AlreadyCutOver = true
 	report.RoomCutoverID = m.RoomCutoverID
 	report.TargetRoomID = m.TargetRoomID
 	report.LegacyIDOffset = m.LegacyIDOffset
+	report.BuildSHA = m.BuildSHA
 	report.SourceHashes = src
 	report.TargetHashes = dst
 	return true, nil
 }
 
-// matchMarker asserts the requested identity matches the marker, then
-// recomputes source and target hashes and compares them to the recorded
-// values. An identity mismatch or any hash drift returns a descriptive error;
-// an exact match returns matched=true with the recomputed hashes.
-func matchMarker(ctx context.Context, q rowQueryer, opts Options, m *markerRecord) (matched bool, src, dst map[string]string, err error) {
-	if m.TargetRoomSlug != opts.RoomSlug {
-		return false, nil, nil, fmt.Errorf("cutover marker records room slug %q but %q was requested", m.TargetRoomSlug, opts.RoomSlug)
+// verifyMarker is the single marker-derived verification routine shared by
+// Verify, the plan/up no-op path, and Up's post-commit pass. It validates:
+//
+//  1. the marker row's shape (uuid, slug, ids, hash maps, timestamp, sha);
+//  2. that the marker's target_room_id resolves to a room whose current slug
+//     still matches the marker;
+//  3. the caller-supplied expectation, when present (plan/up reruns): slug,
+//     host id, and — when supplied — the current room name;
+//  4. that the marker's host user still holds the room's sole host
+//     membership;
+//  5. freshly recomputed source and target hashes against the recorded
+//     marker hashes;
+//  6. that source and target row counts still agree per table.
+//
+// It returns the recomputed hashes for reporting even on failure.
+func verifyMarker(ctx context.Context, q rowQueryer, m *markerRecord, expect *markerExpectation) (src, dst map[string]string, err error) {
+	if err := validateMarkerShape(m); err != nil {
+		return nil, nil, err
 	}
-	if m.HostUserID != opts.HostUserID {
-		return false, nil, nil, fmt.Errorf("cutover marker records host user id %d but %d was requested", m.HostUserID, opts.HostUserID)
+
+	// Resolve the target room from the marker's audit id.
+	var roomSlug, roomName string
+	rowErr := q.QueryRowContext(ctx,
+		`SELECT slug, name FROM rooms WHERE id = $1`, m.TargetRoomID,
+	).Scan(&roomSlug, &roomName)
+	if rowErr == sql.ErrNoRows {
+		return nil, nil, fmt.Errorf("cutover marker target room id %d does not resolve to a room", m.TargetRoomID)
 	}
+	if rowErr != nil {
+		return nil, nil, fmt.Errorf("resolve marker target room: %w", rowErr)
+	}
+	if roomSlug != m.TargetRoomSlug {
+		return nil, nil, fmt.Errorf("cutover marker records room slug %q but room id %d now has slug %q", m.TargetRoomSlug, m.TargetRoomID, roomSlug)
+	}
+
+	if expect != nil {
+		if m.TargetRoomSlug != expect.RoomSlug {
+			return nil, nil, fmt.Errorf("cutover marker records room slug %q but %q was requested", m.TargetRoomSlug, expect.RoomSlug)
+		}
+		if m.HostUserID != expect.HostUserID {
+			return nil, nil, fmt.Errorf("cutover marker records host user id %d but %d was requested", m.HostUserID, expect.HostUserID)
+		}
+		if expect.RoomName != "" && roomName != expect.RoomName {
+			return nil, nil, fmt.Errorf("target room name is now %q but %q was requested (room name drift)", roomName, expect.RoomName)
+		}
+	}
+
+	// The recorded host must still hold the room's sole host membership.
+	var isHost bool
+	if err := q.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM room_members
+			WHERE room_id = $1 AND user_id = $2 AND role = 'host'
+		)`, m.TargetRoomID, m.HostUserID).Scan(&isHost); err != nil {
+		return nil, nil, fmt.Errorf("look up marker host membership: %w", err)
+	}
+	if !isHost {
+		return nil, nil, fmt.Errorf("cutover marker host user id %d no longer holds the host membership of room %d", m.HostUserID, m.TargetRoomID)
+	}
+
 	src, err = computeSourceHashes(ctx, q)
 	if err != nil {
-		return false, nil, nil, err
+		return nil, nil, err
 	}
 	dst, err = computeTargetHashes(ctx, q, m.TargetRoomID, m.LegacyIDOffset)
 	if err != nil {
-		return false, nil, nil, err
+		return src, nil, err
 	}
 	if !hashesEqual(src, m.SourceHashes) {
-		return false, src, dst, errors.New("legacy source data changed since the recorded cutover (source hash drift)")
+		return src, dst, errors.New("legacy source data changed since the recorded cutover (source hash drift)")
 	}
 	if !hashesEqual(dst, m.TargetHashes) {
-		return false, src, dst, errors.New("target room data changed since the recorded cutover (target hash drift)")
+		return src, dst, errors.New("target room data changed since the recorded cutover (target hash drift)")
 	}
-	return true, src, dst, nil
+
+	tables, err := buildTableReports(ctx, q, m.TargetRoomID)
+	if err != nil {
+		return src, dst, err
+	}
+	for _, t := range tables {
+		if t.SourceCount != t.TargetCount {
+			return src, dst, fmt.Errorf("table %s count mismatch: source=%d target=%d", t.Table, t.SourceCount, t.TargetCount)
+		}
+	}
+	return src, dst, nil
+}
+
+// validateMarkerShape asserts the durable marker row itself is well-formed
+// before any of its fields drive verification.
+func validateMarkerShape(m *markerRecord) error {
+	if _, err := uuid.Parse(m.RoomCutoverID); err != nil {
+		return fmt.Errorf("cutover marker has invalid room_cutover_id %q: %w", m.RoomCutoverID, err)
+	}
+	if !entity.IsValidSlug(m.TargetRoomSlug) {
+		return fmt.Errorf("cutover marker has invalid target room slug %q", m.TargetRoomSlug)
+	}
+	if m.TargetRoomID <= 0 {
+		return fmt.Errorf("cutover marker has non-positive target room id %d", m.TargetRoomID)
+	}
+	if m.HostUserID <= 0 {
+		return fmt.Errorf("cutover marker has non-positive host user id %d", m.HostUserID)
+	}
+	if m.LegacyIDOffset < 0 {
+		return fmt.Errorf("cutover marker has negative legacy id offset %d", m.LegacyIDOffset)
+	}
+	if m.PreCommitAt.IsZero() {
+		return errors.New("cutover marker has a zero cutover_pre_commit_at")
+	}
+	if isPlaceholderBuildSHA(m.BuildSHA) {
+		return fmt.Errorf("cutover marker records placeholder build sha %q", m.BuildSHA)
+	}
+	for _, hashes := range []map[string]string{m.SourceHashes, m.TargetHashes} {
+		if len(hashes) != len(hashOrder) {
+			return fmt.Errorf("cutover marker hash map has %d entries, want %d", len(hashes), len(hashOrder))
+		}
+		for _, k := range hashOrder {
+			if len(hashes[k]) != 64 {
+				return fmt.Errorf("cutover marker hash %q is malformed", k)
+			}
+		}
+	}
+	return nil
+}
+
+// checkFirstCutoverReadiness asserts the preconditions a first cutover (no
+// marker yet) requires: the target slug must be unclaimed, the entire
+// room_activities table must be empty (the copy preserves legacy activity
+// ids verbatim, so any preexisting row could collide or interleave), and the
+// play-history id shift must not overflow BIGINT. It is run by plan,
+// dry-run, the up preflight, and again inside the locked transaction.
+func checkFirstCutoverReadiness(ctx context.Context, q rowQueryer, slug string) error {
+	var slugTaken bool
+	if err := q.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM rooms WHERE slug = $1)`, slug,
+	).Scan(&slugTaken); err != nil {
+		return fmt.Errorf("check target slug: %w", err)
+	}
+	if slugTaken {
+		return fmt.Errorf("target room slug %q already exists; choose an unused slug", slug)
+	}
+
+	activityRows, err := countRows(ctx, q, `SELECT COUNT(*) FROM room_activities`)
+	if err != nil {
+		return fmt.Errorf("check room_activities emptiness: %w", err)
+	}
+	if activityRows != 0 {
+		return fmt.Errorf("room_activities already contains %d row(s); the first cutover requires an empty table so legacy activity ids are preserved without collision", activityRows)
+	}
+
+	offset, err := currentPlayHistoryOffset(ctx, q)
+	if err != nil {
+		return err
+	}
+	return checkPlayHistoryOverflow(ctx, q, offset)
+}
+
+// checkPlayHistoryOverflow rejects the cutover before any DML when shifting
+// the highest legacy play_history id by offset would exceed BIGINT range.
+func checkPlayHistoryOverflow(ctx context.Context, q rowQueryer, offset int64) error {
+	var maxID sql.NullInt64
+	if err := q.QueryRowContext(ctx, `SELECT MAX(id) FROM play_history`).Scan(&maxID); err != nil {
+		return fmt.Errorf("read max play_history id: %w", err)
+	}
+	if maxID.Valid && offset > math.MaxInt64-maxID.Int64 {
+		return fmt.Errorf("play_history id %d plus legacy id offset %d would overflow BIGINT", maxID.Int64, offset)
+	}
+	return nil
 }
 
 // checkSchemaReady asserts the DB is reachable, non-dirty, and at exactly

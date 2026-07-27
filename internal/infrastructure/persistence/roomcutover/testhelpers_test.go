@@ -182,3 +182,49 @@ func baseOptions(hostID int64) Options {
 		Now:        fixedClock(),
 	}
 }
+
+// verifyOptions returns the marker-only options Verify accepts: no room
+// identity at all, just a deterministic clock.
+func verifyOptions() Options {
+	return Options{Now: fixedClock()}
+}
+
+// seedForeignRoomActivity creates an unrelated room and writes one
+// room_activities row for it, violating the first-cutover emptiness
+// precondition. Returns the foreign room id.
+func seedForeignRoomActivity(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	var roomID int64
+	if err := db.QueryRowContext(context.Background(), `
+		INSERT INTO rooms (slug, name) VALUES ('activity-room', 'Activity') RETURNING id
+	`).Scan(&roomID); err != nil {
+		t.Fatalf("seed foreign activity room: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO room_activities (room_id, "timestamp", type, "user", description)
+		VALUES ($1, now(), 'song_added', 'mallory', 'premature row')
+	`, roomID); err != nil {
+		t.Fatalf("seed foreign room_activity: %v", err)
+	}
+	return roomID
+}
+
+// readSequenceState captures (last_value, is_called) of a table's id
+// sequence so tests can assert plan/dry-run leave sequences untouched.
+func readSequenceState(t *testing.T, db *sql.DB, table string) (int64, bool) {
+	t.Helper()
+	var seq string
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT pg_get_serial_sequence($1, 'id')`, table,
+	).Scan(&seq); err != nil {
+		t.Fatalf("resolve sequence for %s: %v", table, err)
+	}
+	var last int64
+	var called bool
+	if err := db.QueryRowContext(context.Background(),
+		"SELECT last_value, is_called FROM "+seq,
+	).Scan(&last, &called); err != nil {
+		t.Fatalf("read sequence %s: %v", seq, err)
+	}
+	return last, called
+}

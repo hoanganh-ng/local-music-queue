@@ -5,6 +5,7 @@ bin
 tmp
 .env
 /server
+/room-cutover
 letsencrypt*
 frontend-certs
 certs

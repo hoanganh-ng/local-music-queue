@@ -201,10 +201,18 @@ func TestCLIUsageAndFlagErrors(t *testing.T) {
 		{"no subcommand", nil, 2},
 		{"unknown subcommand", []string{"frobnicate"}, 2},
 		{"missing slug", []string{"plan", "--host-user-id", "1", "--room-name", "N"}, 2},
-		{"missing name for up", []string{"up", "--room-slug", "s", "--host-user-id", "1"}, 2},
-		{"nonpositive host", []string{"plan", "--room-slug", "s", "--room-name", "N", "--host-user-id", "0"}, 2},
-		{"unexpected positional", []string{"plan", "--room-slug", "s", "--room-name", "N", "--host-user-id", "1", "extra"}, 2},
+		{"missing name for up", []string{"up", "--room-slug", "some-room", "--host-user-id", "1"}, 2},
+		{"nonpositive host", []string{"plan", "--room-slug", "some-room", "--room-name", "N", "--host-user-id", "0"}, 2},
+		{"unexpected positional", []string{"plan", "--room-slug", "some-room", "--room-name", "N", "--host-user-id", "1", "extra"}, 2},
 		{"unknown flag", []string{"plan", "--nope"}, 2},
+		{"invalid slug", []string{"plan", "--room-slug", "API", "--room-name", "N", "--host-user-id", "1"}, 2},
+		{"reserved slug", []string{"plan", "--room-slug", "api", "--room-name", "N", "--host-user-id", "1"}, 2},
+		{"missing DSN", []string{"plan", "--room-slug", "some-room", "--room-name", "N", "--host-user-id", "1"}, 2},
+		{"verify rejects room-slug", []string{"verify", "--room-slug", "some-room"}, 2},
+		{"verify rejects room-name", []string{"verify", "--room-name", "N"}, 2},
+		{"verify rejects host-user-id", []string{"verify", "--host-user-id", "1"}, 2},
+		{"verify rejects dry-run", []string{"verify", "--dry-run"}, 2},
+		{"plan rejects dry-run", []string{"plan", "--dry-run", "--room-slug", "some-room", "--room-name", "N", "--host-user-id", "1"}, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -282,18 +290,20 @@ func TestCLIPlanUpVerifyRoundTrip(t *testing.T) {
 		t.Fatalf("idempotent up exit=%d\n%s", code, out)
 	}
 
-	// verify (room-name optional): exit 0.
-	out, code = runCLI(t, nil, "verify",
-		"--room-slug", slug, "--host-user-id", host, "--postgres", dsn)
+	// verify accepts only --postgres / --report-file; all identity is
+	// derived from the durable marker.
+	out, code = runCLI(t, nil, "verify", "--postgres", dsn)
 	if code != 0 {
 		t.Fatalf("verify exit=%d\n%s", code, out)
+	}
+	if !strings.Contains(out, slug) {
+		t.Fatalf("verify output should carry the marker-derived slug %q:\n%s", slug, out)
 	}
 }
 
 func TestCLIVerifyWithoutMarkerFails(t *testing.T) {
-	dsn, hostID := scopedCLIDSN(t)
-	out, code := runCLI(t, nil, "verify",
-		"--room-slug", "cli-legacy", "--host-user-id", fmt.Sprintf("%d", hostID), "--postgres", dsn)
+	dsn, _ := scopedCLIDSN(t)
+	out, code := runCLI(t, nil, "verify", "--postgres", dsn)
 	if code != 1 {
 		t.Fatalf("verify without marker exit=%d, want 1\n%s", code, out)
 	}
@@ -315,5 +325,18 @@ func TestCLIReportFileWritten(t *testing.T) {
 	}
 	if info.Size() == 0 {
 		t.Fatal("report file is empty")
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("report file mode = %04o, want 0600", perm)
+	}
+}
+
+// TestAccidentalBinaryAbsent guards against re-committing a compiled
+// room-cutover binary at the repository root. The working tree must not
+// contain one (the tracked copy's deletion is handled by the Product Owner's
+// commit; /room-cutover is also gitignored).
+func TestAccidentalBinaryAbsent(t *testing.T) {
+	if _, err := os.Stat(filepath.Join("..", "..", "room-cutover")); !os.IsNotExist(err) {
+		t.Fatalf("compiled room-cutover binary present at repository root (stat err=%v)", err)
 	}
 }

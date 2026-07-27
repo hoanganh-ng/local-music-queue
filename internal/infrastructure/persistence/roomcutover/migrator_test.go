@@ -196,23 +196,35 @@ func TestVerifyHappyPath(t *testing.T) {
 	db := newCutoverTestDB(t)
 	ctx := context.Background()
 	hostID := seedTypicalLegacyState(t, db)
-	if _, err := Up(ctx, db, baseOptions(hostID)); err != nil {
+	up, err := Up(ctx, db, baseOptions(hostID))
+	if err != nil {
 		t.Fatalf("Up: %v", err)
 	}
-	report, err := Verify(ctx, db, baseOptions(hostID))
+	// Verify is marker-only: no room slug, name, or host id supplied.
+	report, err := Verify(ctx, db, verifyOptions())
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 	if !report.Verified {
 		t.Fatal("expected Verified")
 	}
+	// The identity in the report is derived solely from the marker.
+	if report.TargetRoomSlug != "legacy-room" {
+		t.Fatalf("marker-derived slug=%q, want legacy-room", report.TargetRoomSlug)
+	}
+	if report.TargetRoomID != up.TargetRoomID {
+		t.Fatalf("marker-derived room id=%d, want %d", report.TargetRoomID, up.TargetRoomID)
+	}
+	if report.HostUserID != hostID {
+		t.Fatalf("marker-derived host id=%d, want %d", report.HostUserID, hostID)
+	}
 }
 
 func TestVerifyRequiresMarker(t *testing.T) {
 	db := newCutoverTestDB(t)
 	ctx := context.Background()
-	hostID := seedTypicalLegacyState(t, db)
-	_, err := Verify(ctx, db, baseOptions(hostID))
+	seedTypicalLegacyState(t, db)
+	_, err := Verify(ctx, db, verifyOptions())
 	if err == nil || !strings.Contains(err.Error(), "no cutover marker") {
 		t.Fatalf("expected missing marker error, got %v", err)
 	}
@@ -229,7 +241,7 @@ func TestVerifyDetectsSourceDrift(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `UPDATE activities SET description = 'tampered' WHERE id = (SELECT MIN(id) FROM activities)`); err != nil {
 		t.Fatalf("mutate source: %v", err)
 	}
-	_, err := Verify(ctx, db, baseOptions(hostID))
+	_, err := Verify(ctx, db, verifyOptions())
 	if err == nil || !strings.Contains(err.Error(), "source hash drift") {
 		t.Fatalf("expected source drift error, got %v", err)
 	}
@@ -247,7 +259,7 @@ func TestVerifyDetectsTargetDrift(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `UPDATE room_activities SET description = 'tampered' WHERE room_id = $1 AND id = (SELECT MIN(id) FROM room_activities WHERE room_id = $1)`, report.TargetRoomID); err != nil {
 		t.Fatalf("mutate target: %v", err)
 	}
-	_, err = Verify(ctx, db, baseOptions(hostID))
+	_, err = Verify(ctx, db, verifyOptions())
 	if err == nil || !strings.Contains(err.Error(), "target hash drift") {
 		t.Fatalf("expected target drift error, got %v", err)
 	}
@@ -445,5 +457,314 @@ func TestRequiredSchemaVersionMatchesEmbedded(t *testing.T) {
 	}
 	if version != requiredSchemaVersion {
 		t.Fatalf("fresh test DB at version %d but requiredSchemaVersion=%d", version, requiredSchemaVersion)
+	}
+}
+
+// --- corrective-pass regressions ------------------------------------------
+
+// TestUpPostCommitVerificationDetectsTamper proves Up runs the full
+// marker-derived verification against the COMMITTED state and refuses to
+// claim success when that state no longer matches the marker.
+func TestUpPostCommitVerificationDetectsTamper(t *testing.T) {
+	db := newCutoverTestDB(t)
+	ctx := context.Background()
+	hostID := seedTypicalLegacyState(t, db)
+
+	opts := baseOptions(hostID)
+	opts.TamperAfterCommit = func() error {
+		// Mutate a committed target row between COMMIT and the post-commit
+		// verification pass. Return nil so the run proceeds to verification.
+		_, err := db.ExecContext(ctx, `
+			UPDATE room_activities SET description = 'tampered-after-commit'
+			WHERE id = (SELECT MIN(id) FROM room_activities)`)
+		return err
+	}
+	_, err := Up(ctx, db, opts)
+	if err == nil || !strings.Contains(err.Error(), "post-commit verification failed") {
+		t.Fatalf("expected post-commit verification failure, got %v", err)
+	}
+	// The transaction did commit: the marker is durable, so the failure is
+	// attributable to the post-commit pass, not a rollback.
+	if got := countInt(t, db, `SELECT COUNT(*) FROM room_cutover_marker`); got != 1 {
+		t.Fatalf("marker rows=%d, want 1 (commit happened)", got)
+	}
+}
+
+// TestUpRerunDetectsRoomNameDrift: a no-op rerun supplies the room name, so
+// a renamed target room must fail the rerun — while marker-only Verify
+// (which carries no name expectation) still passes on the intact data.
+func TestUpRerunDetectsRoomNameDrift(t *testing.T) {
+	db := newCutoverTestDB(t)
+	ctx := context.Background()
+	hostID := seedTypicalLegacyState(t, db)
+	if _, err := Up(ctx, db, baseOptions(hostID)); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE rooms SET name = 'Renamed Room' WHERE slug = 'legacy-room'`); err != nil {
+		t.Fatalf("rename room: %v", err)
+	}
+	if _, err := Up(ctx, db, baseOptions(hostID)); err == nil || !strings.Contains(err.Error(), "room name drift") {
+		t.Fatalf("expected room name drift error, got %v", err)
+	}
+	if _, err := Plan(ctx, db, baseOptions(hostID)); err == nil || !strings.Contains(err.Error(), "room name drift") {
+		t.Fatalf("expected room name drift error from plan, got %v", err)
+	}
+	if _, err := Verify(ctx, db, verifyOptions()); err != nil {
+		t.Fatalf("marker-only Verify should not check the name: %v", err)
+	}
+}
+
+// TestVerifyDetectsMissingRoom: the marker's audit room id must resolve.
+func TestVerifyDetectsMissingRoom(t *testing.T) {
+	db := newCutoverTestDB(t)
+	ctx := context.Background()
+	hostID := seedTypicalLegacyState(t, db)
+	report, err := Up(ctx, db, baseOptions(hostID))
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM rooms WHERE id = $1`, report.TargetRoomID); err != nil {
+		t.Fatalf("delete room: %v", err)
+	}
+	_, err = Verify(ctx, db, verifyOptions())
+	if err == nil || !strings.Contains(err.Error(), "does not resolve to a room") {
+		t.Fatalf("expected unresolved room error, got %v", err)
+	}
+}
+
+// TestVerifyDetectsRoomSlugRename: the resolved room's current slug must
+// still match the marker's recorded slug.
+func TestVerifyDetectsRoomSlugRename(t *testing.T) {
+	db := newCutoverTestDB(t)
+	ctx := context.Background()
+	hostID := seedTypicalLegacyState(t, db)
+	report, err := Up(ctx, db, baseOptions(hostID))
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE rooms SET slug = 'hijacked-room' WHERE id = $1`, report.TargetRoomID); err != nil {
+		t.Fatalf("rename slug: %v", err)
+	}
+	_, err = Verify(ctx, db, verifyOptions())
+	if err == nil || !strings.Contains(err.Error(), "now has slug") {
+		t.Fatalf("expected slug rename error, got %v", err)
+	}
+}
+
+// TestVerifyDetectsHostMembershipDrift: the marker's host must still hold
+// the room's host membership — a demoted or deleted membership fails.
+func TestVerifyDetectsHostMembershipDrift(t *testing.T) {
+	t.Run("demoted", func(t *testing.T) {
+		db := newCutoverTestDB(t)
+		ctx := context.Background()
+		hostID := seedTypicalLegacyState(t, db)
+		report, err := Up(ctx, db, baseOptions(hostID))
+		if err != nil {
+			t.Fatalf("Up: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE room_members SET role = 'admin' WHERE room_id = $1 AND user_id = $2`, report.TargetRoomID, hostID); err != nil {
+			t.Fatalf("demote host: %v", err)
+		}
+		_, err = Verify(ctx, db, verifyOptions())
+		if err == nil || !strings.Contains(err.Error(), "no longer holds the host membership") {
+			t.Fatalf("expected host membership error, got %v", err)
+		}
+	})
+	t.Run("deleted", func(t *testing.T) {
+		db := newCutoverTestDB(t)
+		ctx := context.Background()
+		hostID := seedTypicalLegacyState(t, db)
+		report, err := Up(ctx, db, baseOptions(hostID))
+		if err != nil {
+			t.Fatalf("Up: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `DELETE FROM room_members WHERE room_id = $1 AND user_id = $2`, report.TargetRoomID, hostID); err != nil {
+			t.Fatalf("delete membership: %v", err)
+		}
+		_, err = Verify(ctx, db, verifyOptions())
+		if err == nil || !strings.Contains(err.Error(), "no longer holds the host membership") {
+			t.Fatalf("expected host membership error, got %v", err)
+		}
+	})
+}
+
+// TestVerifyDetectsPlayedAtDrift proves played_at participates in both the
+// source and target play-history hash projections.
+func TestVerifyDetectsPlayedAtDrift(t *testing.T) {
+	t.Run("target", func(t *testing.T) {
+		db := newCutoverTestDB(t)
+		ctx := context.Background()
+		hostID := seedTypicalLegacyState(t, db)
+		report, err := Up(ctx, db, baseOptions(hostID))
+		if err != nil {
+			t.Fatalf("Up: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE room_play_history SET played_at = played_at + INTERVAL '1 hour' WHERE room_id = $1`, report.TargetRoomID); err != nil {
+			t.Fatalf("shift target played_at: %v", err)
+		}
+		_, err = Verify(ctx, db, verifyOptions())
+		if err == nil || !strings.Contains(err.Error(), "target hash drift") {
+			t.Fatalf("expected target hash drift, got %v", err)
+		}
+	})
+	t.Run("source", func(t *testing.T) {
+		db := newCutoverTestDB(t)
+		ctx := context.Background()
+		hostID := seedTypicalLegacyState(t, db)
+		if _, err := Up(ctx, db, baseOptions(hostID)); err != nil {
+			t.Fatalf("Up: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE play_history SET played_at = played_at + INTERVAL '1 hour' WHERE id = (SELECT MIN(id) FROM play_history)`); err != nil {
+			t.Fatalf("shift source played_at: %v", err)
+		}
+		_, err := Verify(ctx, db, verifyOptions())
+		if err == nil || !strings.Contains(err.Error(), "source hash drift") {
+			t.Fatalf("expected source hash drift, got %v", err)
+		}
+	})
+}
+
+// TestFirstCutoverRejectsPreexistingRoomActivities: legacy activity ids are
+// preserved verbatim, so plan, dry-run, and up must all refuse while ANY
+// room_activities row exists anywhere.
+func TestFirstCutoverRejectsPreexistingRoomActivities(t *testing.T) {
+	db := newCutoverTestDB(t)
+	ctx := context.Background()
+	hostID := seedTypicalLegacyState(t, db)
+	seedForeignRoomActivity(t, db)
+
+	if _, err := Plan(ctx, db, baseOptions(hostID)); err == nil || !strings.Contains(err.Error(), "room_activities already contains") {
+		t.Fatalf("plan: expected room_activities readiness error, got %v", err)
+	}
+	dry := baseOptions(hostID)
+	dry.DryRun = true
+	if _, err := Up(ctx, db, dry); err == nil || !strings.Contains(err.Error(), "room_activities already contains") {
+		t.Fatalf("dry-run: expected room_activities readiness error, got %v", err)
+	}
+	if _, err := Up(ctx, db, baseOptions(hostID)); err == nil || !strings.Contains(err.Error(), "room_activities already contains") {
+		t.Fatalf("up: expected room_activities readiness error, got %v", err)
+	}
+	if got := countInt(t, db, `SELECT COUNT(*) FROM room_cutover_marker`); got != 0 {
+		t.Fatalf("marker rows=%d, want 0", got)
+	}
+	if got := countInt(t, db, `SELECT COUNT(*) FROM rooms WHERE slug = 'legacy-room'`); got != 0 {
+		t.Fatalf("target room created despite readiness failure")
+	}
+}
+
+// TestPlanRejectsTakenSlug: plan must surface a slug conflict instead of
+// reporting readiness.
+func TestPlanRejectsTakenSlug(t *testing.T) {
+	db := newCutoverTestDB(t)
+	ctx := context.Background()
+	hostID := seedTypicalLegacyState(t, db)
+	if _, err := db.ExecContext(ctx, `INSERT INTO rooms (slug, name) VALUES ('legacy-room', 'Taken')`); err != nil {
+		t.Fatalf("pre-insert room: %v", err)
+	}
+	_, err := Plan(ctx, db, baseOptions(hostID))
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("expected slug conflict error, got %v", err)
+	}
+}
+
+// TestPlanReportsExpectedTargetEvidence: plan (and dry-run) must report the
+// expected target hashes and per-table counts a correct cutover would
+// produce, derived read-only from the source.
+func TestPlanReportsExpectedTargetEvidence(t *testing.T) {
+	db := newCutoverTestDB(t)
+	ctx := context.Background()
+	hostID := seedTypicalLegacyState(t, db)
+	offset := seedForeignRoomPlayHistory(t, db, 3)
+
+	report, err := Plan(ctx, db, baseOptions(hostID))
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(report.TargetHashes) != 4 {
+		t.Fatalf("expected 4 expected-target hashes, got %d", len(report.TargetHashes))
+	}
+	if !hashesEqual(report.SourceHashes, report.TargetHashes) {
+		t.Fatalf("expected target hashes to equal source hashes:\n src=%v\n dst=%v", report.SourceHashes, report.TargetHashes)
+	}
+	if report.LegacyIDOffset != offset {
+		t.Fatalf("plan offset=%d, want %d", report.LegacyIDOffset, offset)
+	}
+	if len(report.Tables) != 4 {
+		t.Fatalf("expected 4 table reports, got %d", len(report.Tables))
+	}
+	for _, tr := range report.Tables {
+		if tr.SourceCount == 0 && tr.Table != hashKeyQueueState {
+			t.Fatalf("table %s has zero source count in a seeded fixture", tr.Table)
+		}
+		if tr.TargetCount != tr.SourceCount {
+			t.Fatalf("table %s expected target count %d != source count %d", tr.Table, tr.TargetCount, tr.SourceCount)
+		}
+	}
+
+	// And the real cutover must then produce exactly this evidence.
+	up, err := Up(ctx, db, baseOptions(hostID))
+	if err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if !hashesEqual(up.TargetHashes, report.TargetHashes) {
+		t.Fatalf("actual target hashes diverge from plan's expected hashes")
+	}
+}
+
+// TestPlanAndDryRunLeaveSequencesUntouched: read-only modes must not
+// consume or resync the BIGSERIAL sequences of the target tables.
+func TestPlanAndDryRunLeaveSequencesUntouched(t *testing.T) {
+	db := newCutoverTestDB(t)
+	ctx := context.Background()
+	hostID := seedTypicalLegacyState(t, db)
+
+	actLast, actCalled := readSequenceState(t, db, "room_activities")
+	phLast, phCalled := readSequenceState(t, db, "room_play_history")
+
+	if _, err := Plan(ctx, db, baseOptions(hostID)); err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	dry := baseOptions(hostID)
+	dry.DryRun = true
+	if _, err := Up(ctx, db, dry); err != nil {
+		t.Fatalf("dry-run Up: %v", err)
+	}
+
+	if last, called := readSequenceState(t, db, "room_activities"); last != actLast || called != actCalled {
+		t.Fatalf("room_activities sequence changed: (%d,%v) -> (%d,%v)", actLast, actCalled, last, called)
+	}
+	if last, called := readSequenceState(t, db, "room_play_history"); last != phLast || called != phCalled {
+		t.Fatalf("room_play_history sequence changed: (%d,%v) -> (%d,%v)", phLast, phCalled, last, called)
+	}
+}
+
+// TestRejectsPlayHistoryOverflow: when MAX(play_history.id) + offset would
+// exceed BIGINT, plan and up must refuse before any DML.
+func TestRejectsPlayHistoryOverflow(t *testing.T) {
+	db := newCutoverTestDB(t)
+	ctx := context.Background()
+	hostID := seedTypicalLegacyState(t, db)
+	// Highest legacy id leaves headroom of only 7; an offset of 8 overflows.
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO play_history (id, video_id, title, played_at)
+		VALUES (9223372036854775800, 'huge', 'Huge', now())
+	`); err != nil {
+		t.Fatalf("seed huge play_history id: %v", err)
+	}
+	if off := seedForeignRoomPlayHistory(t, db, 8); off < 8 {
+		t.Fatalf("expected offset >= 8, got %d", off)
+	}
+
+	if _, err := Plan(ctx, db, baseOptions(hostID)); err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("plan: expected overflow error, got %v", err)
+	}
+	if _, err := Up(ctx, db, baseOptions(hostID)); err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("up: expected overflow error, got %v", err)
+	}
+	if got := countInt(t, db, `SELECT COUNT(*) FROM rooms WHERE slug = 'legacy-room'`); got != 0 {
+		t.Fatalf("overflow run must not write: %d rooms", got)
+	}
+	if got := countInt(t, db, `SELECT COUNT(*) FROM room_cutover_marker`); got != 0 {
+		t.Fatalf("overflow run must not write a marker: %d", got)
 	}
 }

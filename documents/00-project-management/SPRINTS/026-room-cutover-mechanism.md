@@ -3,10 +3,14 @@
 **Status:** R14b is the **sole active sprint on `dev`** (activated
 2026-07-24; tracked as Issue #23; activation recorded on room epic
 Issue #17; implementation-sequence update recorded on the accepted R14a
-Issue #20). R14b is implemented in the working tree and is **pending
-review and Product Owner acceptance** — no commit, push, merge, or
-production migration action has been performed, and no Product Owner
-acceptance is claimed. R14b is the third sprint in the fixed cutover
+Issue #20). The R14b implementation was committed on `dev` at
+`6b135c0e12ebbee63c713bbdff2a360b83f8e2a0`; an Architect review
+(recorded on Issue #23) returned **needs fixes**, and the corrective
+pass is applied **in the working tree on top of that baseline** —
+uncommitted and **pending re-review and Product Owner acceptance**.
+The Builder has performed no push, merge, production migration action,
+or sprint-status advancement, and no Product Owner acceptance is
+claimed. R14b is the third sprint in the fixed cutover
 order `R05b → R09h → R14b → R09i → R14d → R14c → R14e`; its blocking
 prerequisites R05b and R09h are closed and accepted. `R09i`, `R14d`,
 `R14c`, and `R14e` remain planned and NOT active.
@@ -87,18 +91,40 @@ changes.
   re-marshaled canonical bytes are hashed — so a byte-different TEXT
   source and JSONB target compare equal. `activities`,
   `auto_queue_config`, and `play_history` are hashed by streaming their
-  ordered rows with `0x1f` field / `0x1e` record separators. The hash
-  map keys are `queue_state`, `activities`, `auto_queue_config`,
-  `play_history` → 64-char lowercase SHA-256 hex.
+  ordered rows as **typed, length-prefixed logical records** (uvarint
+  field count, then uvarint byte length + canonical rendering per
+  field), so no field or record boundary is ambiguous and no in-band
+  byte value can collide with data. Timestamps — including
+  `play_history.played_at`, which participates in BOTH the source and
+  target projections — are normalized to **UTC RFC3339Nano** before
+  hashing. The hash map keys are `queue_state`, `activities`,
+  `auto_queue_config`, `play_history` → 64-char lowercase SHA-256 hex.
 - `migrator.go` — `Plan` (read-only), `Up` (apply), `Verify`
-  (re-assert). `Up` acquires `pg_try_advisory_lock(987654321)` on a
+  (re-assert). Identity is checked by a **single marker-derived
+  verification routine** shared by all three paths: it validates the
+  marker shape, resolves the marker's `target_room_id` to a live room,
+  checks the actual room slug (and, on plan/up reruns, the supplied
+  room name), confirms the recorded user still holds the `host`
+  membership role, and recomputes source + target hashes and per-table
+  counts against the marker. `Verify` takes NO caller-supplied
+  identity — everything is derived from the durable marker.
+  **First-cutover readiness** requires the target slug to be absent AND
+  the entire `room_activities` table to be empty (checked in plan /
+  dry-run / up preflight AND re-checked inside the locked transaction),
+  plus a Go-side BIGINT overflow precheck for
+  `MAX(play_history.id) + legacy_id_offset`. `Up` acquires
+  `pg_try_advisory_lock(987654321)` on a
   pinned `*sql.Conn` (the SAME key R03 uses, so cutover / migration /
   a second cutover mutually exclude), releases via **deferred
   `pg_advisory_unlock(987654321)` on that same pinned connection** with
   connection close as the fallback, and performs the entire cutover in
   ONE transaction (order: insert room → insert host membership → copy
-  state → resync sequences → insert marker before `COMMIT` → pre-commit
-  hash equality assertion → `COMMIT`). A mid-flight fault rolls the
+  state → resync sequences → in-transaction hash computation → capture
+  `cutover_pre_commit_at` immediately before inserting the marker →
+  pre-commit hash equality assertion → `COMMIT`). **After `COMMIT`,
+  `Up` rereads the marker and re-runs the same verification routine
+  against the committed state; the report claims `Verified` only after
+  this post-commit proof passes.** A mid-flight fault rolls the
   whole transaction back and releases the lock. `Up` requires a
   non-placeholder build SHA before writing the marker.
 - `report.go` — the PII-free integrity report (`WriteText` / `WriteJSON`
@@ -124,13 +150,27 @@ Copy rules:
 - Subcommands `plan` / `up` / `verify`. There is **NO** `abort`, `force`,
   `reset`, or `allow-hash-drift` subcommand: any drift fails explicitly
   and the operator investigates.
-- Flags: `--room-slug` (required), `--room-name` (required for
-  `plan`/`up`, optional for `verify`), `--host-user-id` (positive
-  integer, required), `--dry-run` (`up` only), `--postgres` (DSN
-  override; else `$DATABASE_URL`, else `$MIGRATE_DATABASE_URL`),
-  `--report-file`.
+- Each subcommand parses its **own flag set** and registers ONLY the
+  flags it accepts: `plan` — `--room-slug` / `--room-name` /
+  `--host-user-id` / `--postgres` (DSN override; else `$DATABASE_URL`,
+  else `$MIGRATE_DATABASE_URL`) / `--report-file`; `up` — plan's flags
+  plus `--dry-run`; `verify` — `--postgres` / `--report-file` ONLY
+  (identity is derived from the durable marker). An unregistered flag
+  (e.g. `--dry-run` on `plan`, or `--room-slug` on `verify`) is a usage
+  error.
 - Exit codes: `0` success (including an already-cut-over no-op), `1`
-  runtime / consistency / verification failure, `2` usage / flag error.
+  runtime / consistency / verification failure, `2` usage / flag /
+  semantic error — including an invalid or reserved `--room-slug` and a
+  missing DSN (no `--postgres`, `$DATABASE_URL`, or
+  `$MIGRATE_DATABASE_URL`), both rejected before any connection
+  attempt.
+- `plan` and `up --dry-run` are fully read-only (sequences included)
+  and report **expected-target evidence** — expected target hashes
+  equal to the source hashes and expected per-table target counts —
+  and `plan` rejects an already-taken target slug before reporting
+  readiness.
+- Report files (`--report-file`) are written with explicit mode `0600`
+  (not left to the process umask).
 - Idempotency: re-running `up` with the same identity against an
   already-cut-over target re-hashes source + target, confirms they still
   match the marker, and prints `already cut over; no-op` (exit 0). Any
@@ -177,18 +217,32 @@ PostgreSQL instance (skipped, not failed, when PG is unreachable):
 - **Repository** (`persistence`, DB-backed): `RoomActivityRepository`
   round-trip, newest-first ordering, id tie-break, limit bounds,
   non-positive limit handling, and room scoping.
+- **Corrective-pass regressions** (DB-backed unless noted):
+  post-commit tamper detection after `COMMIT` (commit stands, exit is
+  a verification failure); marker-only `Verify`; room-name drift on
+  plan/up reruns; marker room deleted or slug-renamed; host membership
+  demoted or deleted; `played_at` drift on source and on target;
+  length-prefix ambiguity and UTC timestamp normalization (pure unit);
+  preexisting `room_activities` rows rejected by plan / dry-run / up;
+  `plan` slug-conflict rejection; plan + dry-run sequence invariance;
+  BIGINT id+offset overflow rejection with nothing written; expanded
+  CLI exit-2 matrix (invalid slug, reserved slug, missing DSN,
+  identity flags on `verify`, `--dry-run` outside `up`); report-file
+  `0600` permissions; accidental root `room-cutover` binary absence.
 
 ## Verification
 
-- `go test ./internal/infrastructure/persistence/roomcutover/...`
-  (24/24 pass against live PostgreSQL)
-- `go test ./cmd/room-cutover/...` (all pass against live PostgreSQL)
-- `go test ./internal/infrastructure/persistence/ -run RoomActivity`
-  (6/6 pass against live PostgreSQL)
-- `go vet ./internal/infrastructure/persistence/roomcutover/... ./cmd/room-cutover/...`
-  (clean)
-- Full `go test ./...` / `go vet ./...` and `git diff --check` are run
-  in the sprint's final verification pass.
+Corrective-pass verification (2026-07-27, against a disposable
+PostgreSQL 16 test container via `LMQ_TEST_DATABASE_URL`; DB-backed
+tests run, not skipped):
+
+- `go test ./internal/infrastructure/persistence/roomcutover/... ./cmd/room-cutover/... -count=1 -p 1`
+  — all 44 tests pass, 0 skips (`ok` both packages).
+- `go test -race ./internal/infrastructure/persistence/roomcutover/... ./cmd/room-cutover/... -count=1 -p 1`
+  — pass (`ok` both packages).
+- `go test ./internal/... ./cmd/... -p 1 -count=1` — all packages `ok`.
+- `go vet ./internal/... ./cmd/...` — clean.
+- `git diff --check` — clean.
 
 ## Implementation summary (R14b)
 
@@ -203,6 +257,10 @@ Delivered files:
   `migrator.go`, `report.go`, plus `hashes_test.go`,
   `testhelpers_test.go`, and `migrator_test.go`.
 - `cmd/room-cutover/` — `main.go`, `flags.go`, `main_test.go`.
+
+The compiled root-level `room-cutover` binary that was accidentally
+included in the baseline commit has been removed from the working tree
+and `/room-cutover` added to `.gitignore` so it cannot be re-staged.
 
 Preserved untouched: R03's `cmd/migrate-data` + `migratedata` package +
 `migration_marker`, historical migrations `0001`..`0008`, the global

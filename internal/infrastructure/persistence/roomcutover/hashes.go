@@ -4,9 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
+	"strconv"
+	"time"
 
 	"local-music-queue/internal/domain/entity"
 )
@@ -21,13 +25,48 @@ const (
 	hashKeyPlayHistory     = "play_history"
 )
 
-// fieldSep and recordSep separate projected columns and rows in the hashed
-// byte stream. They mirror the R03 migrator's canonical stream so the hashing
-// is order- and content-sensitive but insensitive to SQL text formatting.
-const (
-	fieldSep  = 0x1f // ASCII unit separator between fields
-	recordSep = 0x1e // ASCII record separator between rows
-)
+// rowHasher folds typed logical rows into one SHA-256 using an unambiguous
+// length-prefixed encoding: each row is a uvarint field count followed by,
+// per field, a uvarint byte length and the field bytes. Because every field
+// is length-prefixed, user-controlled text containing arbitrary bytes
+// (including control characters) can never make two different row sets
+// produce the same stream — unlike a separator-based scheme.
+type rowHasher struct {
+	h hash.Hash
+}
+
+func newRowHasher() *rowHasher {
+	return &rowHasher{h: sha256.New()}
+}
+
+// writeRow appends one logical row to the hash stream.
+func (r *rowHasher) writeRow(fields ...string) {
+	var buf [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(buf[:], uint64(len(fields)))
+	r.h.Write(buf[:n])
+	for _, f := range fields {
+		n = binary.PutUvarint(buf[:], uint64(len(f)))
+		r.h.Write(buf[:n])
+		r.h.Write([]byte(f))
+	}
+}
+
+// sum returns the lowercase hex SHA-256 of everything written so far.
+func (r *rowHasher) sum() string {
+	return hex.EncodeToString(r.h.Sum(nil))
+}
+
+// hashField renderings: every column participates in the hash as a canonical
+// string derived from its logical Go value, never from PostgreSQL's session-
+// dependent text rendering.
+
+func hashFieldInt(v int64) string { return strconv.FormatInt(v, 10) }
+
+func hashFieldBool(v bool) string { return strconv.FormatBool(v) }
+
+// hashFieldTime normalizes any timestamp to UTC RFC3339Nano so the hash
+// depends on the instant, not on the zone or rendering the driver returned.
+func hashFieldTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
 // rowQueryer is the read surface shared by *sql.DB, *sql.Tx and *sql.Conn so
 // the hash and count helpers run unchanged against either a pre-transaction
@@ -56,20 +95,20 @@ func computeSourceHashes(ctx context.Context, q rowQueryer) (map[string]string, 
 		return nil, fmt.Errorf("hash source queue_state: %w", err)
 	}
 
-	if out[hashKeyActivities], err = hashRows(ctx, q, `
+	if out[hashKeyActivities], err = hashActivityRows(ctx, q, `
 		SELECT id, "timestamp", type, "user", description
 		FROM activities
 		ORDER BY id`); err != nil {
 		return nil, fmt.Errorf("hash source activities: %w", err)
 	}
 
-	if out[hashKeyAutoQueueConfig], err = hashRows(ctx, q, `
+	if out[hashKeyAutoQueueConfig], err = hashAutoQueueConfigRow(ctx, q, `
 		SELECT enabled, strategy FROM auto_queue_config WHERE id = 1`); err != nil {
 		return nil, fmt.Errorf("hash source auto_queue_config: %w", err)
 	}
 
-	if out[hashKeyPlayHistory], err = hashRows(ctx, q, `
-		SELECT id, video_id, title
+	if out[hashKeyPlayHistory], err = hashPlayHistoryRows(ctx, q, 0, `
+		SELECT id, video_id, title, played_at
 		FROM play_history
 		ORDER BY id`); err != nil {
 		return nil, fmt.Errorf("hash source play_history: %w", err)
@@ -100,7 +139,7 @@ func computeTargetHashes(ctx context.Context, q rowQueryer, roomID, offset int64
 		return nil, fmt.Errorf("hash target room_queue_state: %w", err)
 	}
 
-	if out[hashKeyActivities], err = hashRows(ctx, q, `
+	if out[hashKeyActivities], err = hashActivityRows(ctx, q, `
 		SELECT id, "timestamp", type, "user", description
 		FROM room_activities
 		WHERE room_id = $1
@@ -108,59 +147,101 @@ func computeTargetHashes(ctx context.Context, q rowQueryer, roomID, offset int64
 		return nil, fmt.Errorf("hash target room_activities: %w", err)
 	}
 
-	if out[hashKeyAutoQueueConfig], err = hashRows(ctx, q, `
+	if out[hashKeyAutoQueueConfig], err = hashAutoQueueConfigRow(ctx, q, `
 		SELECT enabled, strategy FROM room_auto_queue_config WHERE room_id = $1`, roomID); err != nil {
 		return nil, fmt.Errorf("hash target room_auto_queue_config: %w", err)
 	}
 
-	if out[hashKeyPlayHistory], err = hashRows(ctx, q, `
-		SELECT id - $2::bigint, video_id, title
+	if out[hashKeyPlayHistory], err = hashPlayHistoryRows(ctx, q, offset, `
+		SELECT id, video_id, title, played_at
 		FROM room_play_history
 		WHERE room_id = $1
-		ORDER BY id`, roomID, offset); err != nil {
+		ORDER BY id`, roomID); err != nil {
 		return nil, fmt.Errorf("hash target room_play_history: %w", err)
 	}
 	return out, nil
 }
 
-// hashRows streams the projected rows and folds each into a SHA-256 using the
-// field/record separators. All projected columns are read as sql.RawBytes so
-// the exact stored bytes participate in the hash regardless of Go type. Both
-// source and target are the same PostgreSQL session, so timestamptz/boolean
-// text encodings are identical across the pair.
-func hashRows(ctx context.Context, q rowQueryer, query string, args ...any) (string, error) {
+// hashActivityRows hashes an ordered activity projection
+// (id, timestamp, type, user, description) as typed logical records.
+func hashActivityRows(ctx context.Context, q rowQueryer, query string, args ...any) (string, error) {
 	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return "", err
 	}
 	defer rows.Close()
 
-	cols, err := rows.Columns()
-	if err != nil {
-		return "", err
-	}
-	h := sha256.New()
+	rh := newRowHasher()
 	for rows.Next() {
-		raw := make([]sql.RawBytes, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range raw {
-			ptrs[i] = &raw[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
+		var (
+			id              int64
+			ts              time.Time
+			typ, user, desc string
+		)
+		if err := rows.Scan(&id, &ts, &typ, &user, &desc); err != nil {
 			return "", err
 		}
-		for i, b := range raw {
-			if i > 0 {
-				h.Write([]byte{fieldSep})
-			}
-			h.Write([]byte(b))
-		}
-		h.Write([]byte{recordSep})
+		rh.writeRow(hashFieldInt(id), hashFieldTime(ts), typ, user, desc)
 	}
 	if err := rows.Err(); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return rh.sum(), nil
+}
+
+// hashAutoQueueConfigRow hashes the single-row (enabled, strategy) config
+// projection as a typed logical record.
+func hashAutoQueueConfigRow(ctx context.Context, q rowQueryer, query string, args ...any) (string, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	rh := newRowHasher()
+	for rows.Next() {
+		var (
+			enabled  bool
+			strategy string
+		)
+		if err := rows.Scan(&enabled, &strategy); err != nil {
+			return "", err
+		}
+		rh.writeRow(hashFieldBool(enabled), strategy)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return rh.sum(), nil
+}
+
+// hashPlayHistoryRows hashes an ordered play-history projection
+// (id, video_id, title, played_at) as typed logical records. idOffset is
+// subtracted from every scanned id so a target projection re-derives the
+// legacy id space (0 for the source).
+func hashPlayHistoryRows(ctx context.Context, q rowQueryer, idOffset int64, query string, args ...any) (string, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	rh := newRowHasher()
+	for rows.Next() {
+		var (
+			id             int64
+			videoID, title string
+			playedAt       time.Time
+		)
+		if err := rows.Scan(&id, &videoID, &title, &playedAt); err != nil {
+			return "", err
+		}
+		rh.writeRow(hashFieldInt(id-idOffset), videoID, title, hashFieldTime(playedAt))
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return rh.sum(), nil
 }
 
 // hashQueueJSON canonicalizes raw queue JSON and returns the lowercase hex
@@ -280,6 +361,31 @@ func buildTableReports(ctx context.Context, q rowQueryer, roomID int64) ([]Table
 			return nil, fmt.Errorf("count target %s: %w", s.table, err)
 		}
 		reports = append(reports, TableReport{Table: s.table, SourceCount: src, TargetCount: dst})
+	}
+	return reports, nil
+}
+
+// buildExpectedTableReports produces the plan/dry-run per-table evidence:
+// the target counts a correct cutover would produce, derived entirely from
+// the source (a lossless copy yields target count == source count). It never
+// touches the target tables.
+func buildExpectedTableReports(ctx context.Context, q rowQueryer) ([]TableReport, error) {
+	specs := []struct {
+		table  string
+		srcSQL string
+	}{
+		{hashKeyQueueState, `SELECT COUNT(*) FROM queue_state WHERE id = 1`},
+		{hashKeyActivities, `SELECT COUNT(*) FROM activities`},
+		{hashKeyAutoQueueConfig, `SELECT COUNT(*) FROM auto_queue_config WHERE id = 1`},
+		{hashKeyPlayHistory, `SELECT COUNT(*) FROM play_history`},
+	}
+	reports := make([]TableReport, 0, len(specs))
+	for _, s := range specs {
+		src, err := countRows(ctx, q, s.srcSQL)
+		if err != nil {
+			return nil, fmt.Errorf("count source %s: %w", s.table, err)
+		}
+		reports = append(reports, TableReport{Table: s.table, SourceCount: src, TargetCount: src})
 	}
 	return reports, nil
 }

@@ -160,12 +160,14 @@ func (r *Report) WriteJSON(w io.Writer) error {
 }
 
 // WriteToFile writes the report as JSON to path. Existing files are
-// truncated. An empty path is a no-op.
+// truncated. The file is created with mode 0600 explicitly (not left to the
+// process umask): the report carries integrity hashes and identity fields
+// operators may not want group/world readable. An empty path is a no-op.
 func (r *Report) WriteToFile(path string) error {
 	if path == "" {
 		return nil
 	}
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("create report file: %w", err)
 	}

@@ -4,24 +4,30 @@
 // auto-queue/play-history state into one newly created room, records a durable
 // idempotency marker, and verifies integrity via canonical SHA-256 hashes.
 //
-// Subcommands:
+// Subcommands (each has its OWN flag set; unregistered flags exit 2):
 //
-//	plan   --room-slug <s> --room-name <n> --host-user-id <id> [flags]
-//	         Read-only preview: validate inputs, assert readiness, compute
-//	         source hashes and per-table counts. Never writes.
-//	up     --room-slug <s> --room-name <n> --host-user-id <id> [--dry-run] [flags]
-//	         Execute the cutover inside one locked transaction. Idempotent:
-//	         re-running with the same identity on an already-cut-over target
-//	         prints "already cut over; no-op" and exits 0.
-//	verify --room-slug <s> --host-user-id <id> [flags]
-//	         Re-read the marker and re-hash source + target, asserting they
-//	         still match. Never writes.
+//	plan   --room-slug <s> --room-name <n> --host-user-id <id> [--postgres <dsn>] [--report-file <p>]
+//	         Read-only preview: validate inputs, assert first-cutover
+//	         readiness (slug free, room_activities empty, no id overflow),
+//	         compute source hashes and the expected target hashes/counts.
+//	         Never writes.
+//	up     plan's flags plus [--dry-run]
+//	         Execute the cutover inside one locked transaction, then
+//	         re-verify the committed state from the marker before claiming
+//	         success. Idempotent: re-running with the same identity on an
+//	         already-cut-over target re-verifies everything and prints
+//	         "already cut over; no-op" (exit 0).
+//	verify [--postgres <dsn>] [--report-file <p>]
+//	         Re-read the marker and re-verify the committed cutover. All
+//	         identity (room, slug, host) is derived from the marker; the
+//	         subcommand accepts no identity flags. Never writes.
 //
 // Conventions (shared with cmd/migrate-schema and cmd/migrate-data):
 //
 //   - Exit code 0 = success (including an already-cut-over no-op)
 //   - Exit code 1 = runtime / consistency / verification failure
-//   - Exit code 2 = usage / flag error
+//   - Exit code 2 = usage / flag / semantic-flag error (including an
+//     invalid or reserved slug and a missing DSN)
 //   - Every DSN printed to stdout/stderr is run through config.RedactDSN so
 //     credentials never appear in operator logs.
 //
@@ -66,8 +72,7 @@ func main() {
 // the matching roomcutover entry point, and renders the report. Usage/flag
 // problems exit 2 directly; runtime failures are returned for the exit-1 path.
 func run(mode string, args []string) error {
-	fs := newFlagSet(mode)
-	flags := bindFlags(fs)
+	fs, flags := newFlagSet(mode)
 	if err := fs.Parse(args); err != nil {
 		// flag.ContinueOnError already printed the error.
 		os.Exit(2)
@@ -77,10 +82,13 @@ func run(mode string, args []string) error {
 		os.Exit(2)
 	}
 
-	requireName := mode != "verify"
-	opts := flags.validate(requireName)
+	opts := flags.validate(mode)
 
 	dsn := resolveDSN(flags.postgres)
+	if dsn == "" {
+		fmt.Fprintln(os.Stderr, "error: no PostgreSQL DSN; pass --postgres or set DATABASE_URL / MIGRATE_DATABASE_URL")
+		os.Exit(2)
+	}
 	opts.RedactedDSN = config.RedactDSN(dsn)
 
 	db, err := openDB(dsn)
