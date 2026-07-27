@@ -326,7 +326,7 @@ func newTestInteractor(repo *mockRoomAQRepo, fetcher domain.RelatedSongFetcher, 
 		snap.current = q
 	}
 
-	inter := NewInteractor(roomRepo, repo, fetcher)
+	inter := NewInteractor(roomRepo, repo, fetcher, nil)
 	inter.SetQueueSnapshotLoader(snap.snapshot)
 	inter.SetAddRoomAutoQueueSongFunc(testAddFn(snap, &[]addCall{}))
 	// Default seed: actor 1 is the room host so the use case's
@@ -720,7 +720,7 @@ func TestCheckAndTrigger_ExcludedAfterInsert(t *testing.T) {
 	_ = roomRepo
 	// Build a new interactor reusing the same repo + snap but a
 	// different fetcher so we can observe the second exclude list.
-	inter2 := NewInteractor(newMockRoomRepo(), repo, fetcher2)
+	inter2 := NewInteractor(newMockRoomRepo(), repo, fetcher2, nil)
 	inter2.SetQueueSnapshotLoader(snap.snapshot)
 	inter2.SetAddRoomAutoQueueSongFunc(testAddFn(snap, &[]addCall{}))
 

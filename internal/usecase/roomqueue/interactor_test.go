@@ -79,7 +79,7 @@ func pgRoomQueueWithDB(t *testing.T) (*Interactor, *sql.DB, *persistence.Postgre
 	}
 	roomRepo := persistence.NewPostgresRoomRepository(db)
 	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
-	inter := NewInteractor(roomRepo, queueRepo, nil)
+	inter := NewInteractor(roomRepo, queueRepo, nil, nil)
 	return inter, db, queueRepo, cleanup
 }
 
@@ -276,7 +276,7 @@ func TestRoomQueue_RemoveSong_GuestCannotRemoveOthers(t *testing.T) {
 	}
 	// Guest 200 tries to remove the host's current song (index 0).
 	// Ownership check fires first → ErrNotSongOwner.
-	_, err := inter.RemoveSong(ctx, "rq-rm", 200, entity.RoomRoleGuest, 0)
+	_, err := inter.RemoveSong(ctx, "rq-rm", 200, "", entity.RoomRoleGuest, 0)
 	if !errors.Is(err, ErrNotSongOwner) {
 		t.Fatalf("expected ErrNotSongOwner, got %v", err)
 	}
@@ -293,7 +293,7 @@ func TestRoomQueue_ClearQueue_ForbiddenForGuest(t *testing.T) {
 	if err := inter.roomRepo.AddMember(ctx, mustRoomID(t, inter, "rq-clear"), 200, entity.RoomRoleGuest, testTime()); err != nil {
 		t.Fatalf("seed guest: %v", err)
 	}
-	_, err := inter.ClearQueue(ctx, "rq-clear", 200, entity.RoomRoleGuest)
+	_, err := inter.ClearQueue(ctx, "rq-clear", 200, "", entity.RoomRoleGuest)
 	if !errors.Is(err, room.ErrForbidden) {
 		t.Fatalf("expected ErrForbidden, got %v", err)
 	}
@@ -644,7 +644,7 @@ func TestRoomQueue_TriggerFiresAfterSuccessfulMutation_OnCurrentIsLast(t *testin
 		// we still end with current==last (last==last after remove).
 		// Skip the SkipPlayback branch in that case.
 	} else {
-		if _, _, _, _, err := inter.SkipPlayback(ctx, "rq-f-trig-last", 42); err != nil {
+		if _, _, _, _, err := inter.SkipPlayback(ctx, "rq-f-trig-last", 42, ""); err != nil {
 			t.Fatalf("seed-skip: %v", err)
 		}
 	}
@@ -660,7 +660,7 @@ func TestRoomQueue_TriggerFiresAfterSuccessfulMutation_OnCurrentIsLast(t *testin
 
 	// Drive ClearQueue (host/admin path) — clear leaves current at
 	// the kept song, still current==last.
-	if _, err := inter.ClearQueue(ctx, "rq-f-trig-last", 42, entity.RoomRoleHost); err != nil {
+	if _, err := inter.ClearQueue(ctx, "rq-f-trig-last", 42, "", entity.RoomRoleHost); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 
@@ -784,7 +784,7 @@ func TestRoomQueue_PrioritizeSong_HostMovesUpcomingToCurrentPlusOne(t *testing.T
 	inter, roomID := seedPrioritizeQueue(t, "rq-prio-ok")
 	ctx := context.Background()
 
-	queue, fromIndex, toIndex, song, err := inter.PrioritizeSong(ctx, "rq-prio-ok", 42, entity.RoomRoleHost, 2)
+	queue, fromIndex, toIndex, song, err := inter.PrioritizeSong(ctx, "rq-prio-ok", 42, "", entity.RoomRoleHost, 2)
 	if err != nil {
 		t.Fatalf("prioritize: %v", err)
 	}
@@ -819,7 +819,7 @@ func TestRoomQueue_PrioritizeSong_InvalidIndexReturnsErrInvalidIndex(t *testing.
 	ctx := context.Background()
 
 	for _, idx := range []int{-1, 3, 99} {
-		_, _, _, _, err := inter.PrioritizeSong(ctx, "rq-prio-bad-idx", 42, entity.RoomRoleHost, idx)
+		_, _, _, _, err := inter.PrioritizeSong(ctx, "rq-prio-bad-idx", 42, "", entity.RoomRoleHost, idx)
 		if !errors.Is(err, ErrInvalidIndex) {
 			t.Errorf("idx=%d: expected ErrInvalidIndex, got %v", idx, err)
 		}
@@ -830,7 +830,7 @@ func TestRoomQueue_PrioritizeSong_CurrentSongReturnsErrCannotPrioritizeCurrent(t
 	inter, _ := seedPrioritizeQueue(t, "rq-prio-current")
 	ctx := context.Background()
 
-	_, _, _, _, err := inter.PrioritizeSong(ctx, "rq-prio-current", 42, entity.RoomRoleHost, 0)
+	_, _, _, _, err := inter.PrioritizeSong(ctx, "rq-prio-current", 42, "", entity.RoomRoleHost, 0)
 	if !errors.Is(err, ErrCannotPrioritizeCurrent) {
 		t.Fatalf("expected ErrCannotPrioritizeCurrent, got %v", err)
 	}
@@ -843,7 +843,7 @@ func TestRoomQueue_PrioritizeSong_GuestForbidden(t *testing.T) {
 	if err := inter.roomRepo.AddMember(ctx, mustRoomID(t, inter, "rq-prio-guest"), 200, entity.RoomRoleGuest, testTime()); err != nil {
 		t.Fatalf("add guest: %v", err)
 	}
-	_, _, _, _, err := inter.PrioritizeSong(ctx, "rq-prio-guest", 200, entity.RoomRoleGuest, 1)
+	_, _, _, _, err := inter.PrioritizeSong(ctx, "rq-prio-guest", 200, "", entity.RoomRoleGuest, 1)
 	if !errors.Is(err, room.ErrForbidden) {
 		t.Fatalf("expected ErrForbidden for guest, got %v", err)
 	}
@@ -853,7 +853,7 @@ func TestRoomQueue_PrioritizeSong_NonMemberForbidden(t *testing.T) {
 	inter, _ := seedPrioritizeQueue(t, "rq-prio-nm")
 	ctx := context.Background()
 
-	_, _, _, _, err := inter.PrioritizeSong(ctx, "rq-prio-nm", 999, entity.RoomRoleHost, 1)
+	_, _, _, _, err := inter.PrioritizeSong(ctx, "rq-prio-nm", 999, "", entity.RoomRoleHost, 1)
 	if !errors.Is(err, room.ErrForbidden) {
 		t.Fatalf("expected ErrForbidden for non-member, got %v", err)
 	}
@@ -866,7 +866,7 @@ func TestRoomQueue_PrioritizeSong_ArchivedRoomReturnsErrArchived(t *testing.T) {
 	if err := inter.roomRepo.ArchiveRoom(ctx, roomID, testTime()); err != nil {
 		t.Fatalf("archive: %v", err)
 	}
-	_, _, _, _, err := inter.PrioritizeSong(ctx, "rq-prio-archived", 42, entity.RoomRoleHost, 1)
+	_, _, _, _, err := inter.PrioritizeSong(ctx, "rq-prio-archived", 42, "", entity.RoomRoleHost, 1)
 	if !errors.Is(err, room.ErrArchived) {
 		t.Fatalf("expected ErrArchived, got %v", err)
 	}
@@ -880,7 +880,7 @@ func TestRoomQueue_PrioritizeSong_NoBroadcastOnError(t *testing.T) {
 	inter.SetBroadcaster(bc)
 
 	// Trigger an error (current song) — broadcaster must NOT fire.
-	_, _, _, _, _ = inter.PrioritizeSong(ctx, "rq-prio-nobc", 42, entity.RoomRoleHost, 0)
+	_, _, _, _, _ = inter.PrioritizeSong(ctx, "rq-prio-nobc", 42, "", entity.RoomRoleHost, 0)
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 	if bc.prioN != 0 {
@@ -898,7 +898,7 @@ func TestRoomQueue_PrioritizeSong_ReturnedSongIsPrioritizedTrue(t *testing.T) {
 	inter, _ := seedPrioritizeQueue(t, "rq-prio-bc-song")
 	ctx := context.Background()
 
-	_, _, _, song, err := inter.PrioritizeSong(ctx, "rq-prio-bc-song", 42, entity.RoomRoleHost, 2)
+	_, _, _, song, err := inter.PrioritizeSong(ctx, "rq-prio-bc-song", 42, "", entity.RoomRoleHost, 2)
 	if err != nil {
 		t.Fatalf("prioritize: %v", err)
 	}
@@ -964,7 +964,7 @@ func TestRoomPlayback_SetPlaybackStatus_HappyPath(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	q, err := inter.SetPlaybackStatus(ctx, "rq-pb-status", 42, entity.StatusPaused)
+	q, err := inter.SetPlaybackStatus(ctx, "rq-pb-status", 42, "", entity.StatusPaused)
 	if err != nil {
 		t.Fatalf("set status: %v", err)
 	}
@@ -987,7 +987,7 @@ func TestRoomPlayback_SetPlaybackStatus_InvalidStatusReturnsErrInvalidStatus(t *
 	ctx := context.Background()
 
 	for _, status := range []entity.PlaybackStatus{entity.StatusIdle, ""} {
-		_, err := inter.SetPlaybackStatus(ctx, "rq-pb-bad-status", 42, status)
+		_, err := inter.SetPlaybackStatus(ctx, "rq-pb-bad-status", 42, "", status)
 		if !errors.Is(err, ErrInvalidStatus) {
 			t.Errorf("status=%q: expected ErrInvalidStatus, got %v", status, err)
 		}
@@ -1004,7 +1004,7 @@ func TestRoomPlayback_SetPlaybackStatus_NoCurrentSongReturnsErrNoCurrentSong(t *
 	}
 	inter.SetLeaseAuthorizer(allowAllLeaseAuthorizer{})
 
-	_, err := inter.SetPlaybackStatus(ctx, "rq-pb-empty", 42, entity.StatusPlaying)
+	_, err := inter.SetPlaybackStatus(ctx, "rq-pb-empty", 42, "", entity.StatusPlaying)
 	if !errors.Is(err, ErrNoCurrentSong) {
 		t.Fatalf("expected ErrNoCurrentSong, got %v", err)
 	}
@@ -1029,7 +1029,7 @@ func TestRoomPlayback_SetPlaybackStatus_LeaseMissingReturnsErrPlaybackLeaseLost(
 	leaseInter := room.NewPlayerLeaseInteractor(leaseRepo, inter.roomRepo, db, room.DefaultLeaseDuration, room.DefaultLeaseGrace)
 	inter.SetLeaseAuthorizer(leaseInter)
 
-	_, err := inter.SetPlaybackStatus(ctx, "rq-pb-nolease", 42, entity.StatusPaused)
+	_, err := inter.SetPlaybackStatus(ctx, "rq-pb-nolease", 42, "", entity.StatusPaused)
 	if !errors.Is(err, ErrPlaybackLeaseLost) {
 		t.Fatalf("expected ErrPlaybackLeaseLost, got %v", err)
 	}
@@ -1068,7 +1068,7 @@ func TestRoomPlayback_SetPlaybackStatus_NonHolderReturnsErrPlaybackForbidden(t *
 	inter.SetLeaseAuthorizer(leaseInter)
 
 	// 42 is the room host but NOT the lease holder; the call must be rejected.
-	_, err := inter.SetPlaybackStatus(ctx, "rq-pb-nonholder", 42, entity.StatusPaused)
+	_, err := inter.SetPlaybackStatus(ctx, "rq-pb-nonholder", 42, "", entity.StatusPaused)
 	if !errors.Is(err, ErrPlaybackForbidden) {
 		t.Fatalf("expected ErrPlaybackForbidden, got %v", err)
 	}
@@ -1083,7 +1083,7 @@ func TestRoomPlayback_SetPlaybackStatus_LeaseGoneReturnsErrPlaybackLeaseGone(t *
 	future := testTime().Add(room.DefaultLeaseDuration + room.DefaultLeaseGrace + time.Second)
 	leaseInter.SetClock(func() time.Time { return future })
 
-	_, err := inter.SetPlaybackStatus(ctx, "rq-pb-gone", 42, entity.StatusPaused)
+	_, err := inter.SetPlaybackStatus(ctx, "rq-pb-gone", 42, "", entity.StatusPaused)
 	if !errors.Is(err, ErrPlaybackLeaseGone) {
 		t.Fatalf("expected ErrPlaybackLeaseGone, got %v", err)
 	}
@@ -1098,7 +1098,7 @@ func TestRoomPlayback_SetPlaybackStatus_ArchivedRoomReturnsErrArchived(t *testin
 		t.Fatalf("archive: %v", err)
 	}
 
-	_, err := inter.SetPlaybackStatus(ctx, "rq-pb-archived", 42, entity.StatusPaused)
+	_, err := inter.SetPlaybackStatus(ctx, "rq-pb-archived", 42, "", entity.StatusPaused)
 	if !errors.Is(err, room.ErrArchived) {
 		t.Fatalf("expected room.ErrArchived, got %v", err)
 	}
@@ -1141,7 +1141,7 @@ func TestRoomPlayback_SkipPlayback_HappyPath(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	q, prev, next, song, err := inter.SkipPlayback(ctx, "rq-pb-skip", 42)
+	q, prev, next, song, err := inter.SkipPlayback(ctx, "rq-pb-skip", 42, "")
 	if err != nil {
 		t.Fatalf("skip: %v", err)
 	}
@@ -1177,7 +1177,7 @@ func TestRoomPlayback_SkipPlayback_NoNextSongReturnsErrNoNextSong(t *testing.T) 
 	}
 	inter.SetLeaseAuthorizer(allowAllLeaseAuthorizer{})
 
-	_, _, _, _, err := inter.SkipPlayback(ctx, "rq-pb-skipnone", 42)
+	_, _, _, _, err := inter.SkipPlayback(ctx, "rq-pb-skipnone", 42, "")
 	if !errors.Is(err, ErrNoNextSong) {
 		t.Fatalf("expected ErrNoNextSong, got %v", err)
 	}
@@ -1294,7 +1294,7 @@ func TestRoomQueue_SkipVote_StaleExpectedSongReturnsErrStaleSkipVoteNoMutation(t
 	// the persisted current song becomes "vote-next" instead of
 	// "vote-cur".
 	inter.SetLeaseAuthorizer(allowAllLeaseAuthorizer{})
-	if _, _, _, _, err := inter.SkipPlayback(ctx, "rq-vote-stale", 42); err != nil {
+	if _, _, _, _, err := inter.SkipPlayback(ctx, "rq-vote-stale", 42, ""); err != nil {
 		t.Fatalf("advance via SkipPlayback: %v", err)
 	}
 
@@ -1488,11 +1488,11 @@ func TestRoomPlayback_PrevPlayback_HappyPath(t *testing.T) {
 
 	// Fixture already seeded CurrentIndex=0; advance to index 1 so
 	// "previous" has a target. Use the lease-only SkipPlayback path.
-	if _, _, _, _, err := inter.SkipPlayback(ctx, "rq-d-prev-ok", 42); err != nil {
+	if _, _, _, _, err := inter.SkipPlayback(ctx, "rq-d-prev-ok", 42, ""); err != nil {
 		t.Fatalf("seed-advance: %v", err)
 	}
 
-	q, prevIdx, newIdx, song, err := inter.PrevPlayback(ctx, "rq-d-prev-ok", 42)
+	q, prevIdx, newIdx, song, err := inter.PrevPlayback(ctx, "rq-d-prev-ok", 42, "")
 	if err != nil {
 		t.Fatalf("prev: %v", err)
 	}
@@ -1536,7 +1536,7 @@ func TestRoomPlayback_PrevPlayback_AlreadyOnFirstReturnsErrNoPreviousSong(t *tes
 		t.Fatalf("reseed: %v", err)
 	}
 
-	_, _, _, _, err := inter.PrevPlayback(ctx, "rq-d-prev-first", 42)
+	_, _, _, _, err := inter.PrevPlayback(ctx, "rq-d-prev-first", 42, "")
 	if !errors.Is(err, ErrNoPreviousSong) {
 		t.Fatalf("expected ErrNoPreviousSong, got %v", err)
 	}
@@ -1561,7 +1561,7 @@ func TestRoomPlayback_PrevPlayback_EmptyQueueReturnsErrNoCurrentSong(t *testing.
 	}
 	inter.SetLeaseAuthorizer(allowAllLeaseAuthorizer{})
 
-	_, _, _, _, err := inter.PrevPlayback(ctx, "rq-d-prev-empty", 42)
+	_, _, _, _, err := inter.PrevPlayback(ctx, "rq-d-prev-empty", 42, "")
 	if !errors.Is(err, ErrNoCurrentSong) {
 		t.Fatalf("expected ErrNoCurrentSong, got %v", err)
 	}
@@ -1600,7 +1600,7 @@ func TestRoomPlayback_PrevPlayback_NonHolderReturnsErrPlaybackForbidden(t *testi
 	}
 	inter.SetLeaseAuthorizer(leaseInter)
 
-	_, _, _, _, err := inter.PrevPlayback(ctx, "rq-d-prev-nh", 42)
+	_, _, _, _, err := inter.PrevPlayback(ctx, "rq-d-prev-nh", 42, "")
 	if !errors.Is(err, ErrPlaybackForbidden) {
 		t.Fatalf("expected ErrPlaybackForbidden, got %v", err)
 	}
@@ -1631,7 +1631,7 @@ func TestRoomPlayback_PrevPlayback_MissingLeaseReturnsErrPlaybackLeaseLost(t *te
 	leaseInter := room.NewPlayerLeaseInteractor(leaseRepo, inter.roomRepo, db, room.DefaultLeaseDuration, room.DefaultLeaseGrace)
 	inter.SetLeaseAuthorizer(leaseInter)
 
-	_, _, _, _, err := inter.PrevPlayback(ctx, "rq-d-prev-nl", 42)
+	_, _, _, _, err := inter.PrevPlayback(ctx, "rq-d-prev-nl", 42, "")
 	if !errors.Is(err, ErrPlaybackLeaseLost) {
 		t.Fatalf("expected ErrPlaybackLeaseLost, got %v", err)
 	}

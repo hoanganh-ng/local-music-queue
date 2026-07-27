@@ -174,8 +174,9 @@ func voteRoomFixture(t *testing.T, slug string, memberIDs []int) (*RoomVoteHandl
 	}
 	inter := rqh.inter
 	rvh := NewRoomVoteHandlers(
-		roomvote.NewInteractor(inter, fixedResolver{count: len(memberIDs)}, 30*time.Second),
+		roomvote.NewInteractor(inter, fixedResolver{count: len(memberIDs)}, 30*time.Second, nil),
 		inter,
+		nil,
 	)
 	return rvh, db, inter, cleanup
 }
@@ -531,7 +532,7 @@ func TestRoomVote_QueueAdvanceBetweenCastsDoesNotPass(t *testing.T) {
 
 	// Force-advance the queue via the lease-only SkipPlayback path.
 	inter.SetLeaseAuthorizer(allowAllLeaseAuthorizer{})
-	if _, _, _, _, err := inter.SkipPlayback(context.Background(), "rv-adv", 200); err != nil {
+	if _, _, _, _, err := inter.SkipPlayback(context.Background(), "rv-adv", 200, ""); err != nil {
 		t.Fatalf("force advance: %v", err)
 	}
 
@@ -608,8 +609,9 @@ func votePrioritizeFixture(t *testing.T, slug string, memberIDs []int) (*RoomVot
 	}
 	inter := rqh.inter
 	rvh := NewRoomVoteHandlers(
-		roomvote.NewInteractor(inter, fixedResolver{count: len(memberIDs)}, 30*time.Second),
+		roomvote.NewInteractor(inter, fixedResolver{count: len(memberIDs)}, 30*time.Second, nil),
 		inter,
+		nil,
 	)
 	return rvh, db, inter, cleanup
 }

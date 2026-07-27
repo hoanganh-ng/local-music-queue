@@ -140,6 +140,23 @@ func (h *RoomQueueHandlers) HandleAddRoomSong(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, song)
 }
 
+// activityDisplayName resolves the raw authenticated display name for
+// R09i activity attribution. Unlike resolveActorDisplayName it applies
+// NO email/placeholder fallback — a blank name is forwarded as-is so
+// the use-case actorName helper applies the canonical "user #<id>"
+// fallback. Lookup failures degrade to "" and NEVER block the primary
+// mutation (activity attribution is best-effort by contract).
+func (h *RoomQueueHandlers) activityDisplayName(ctx context.Context, actorUserID int) string {
+	if h.auth == nil {
+		return ""
+	}
+	user, err := h.auth.GetUserByID(ctx, actorUserID)
+	if err != nil || user == nil {
+		return ""
+	}
+	return user.DisplayName
+}
+
 // resolveActorDisplayName loads the actor's display name through the
 // auth interactor. Falls back to a generic placeholder if the user row
 // is missing a display name; the actorUserID itself is the
@@ -180,7 +197,7 @@ func (h *RoomQueueHandlers) HandleRemoveRoomSong(w http.ResponseWriter, r *http.
 		writeRoomQueueError(w, err)
 		return
 	}
-	queue, err := h.inter.RemoveSong(r.Context(), slug, actorUserID, role, req.Index)
+	queue, err := h.inter.RemoveSong(r.Context(), slug, actorUserID, h.activityDisplayName(r.Context(), actorUserID), role, req.Index)
 	if err != nil {
 		writeRoomQueueError(w, err)
 		return
@@ -203,7 +220,7 @@ func (h *RoomQueueHandlers) HandleClearRoomQueue(w http.ResponseWriter, r *http.
 		writeRoomQueueError(w, err)
 		return
 	}
-	queue, err := h.inter.ClearQueue(r.Context(), slug, actorUserID, role)
+	queue, err := h.inter.ClearQueue(r.Context(), slug, actorUserID, h.activityDisplayName(r.Context(), actorUserID), role)
 	if err != nil {
 		writeRoomQueueError(w, err)
 		return
@@ -259,7 +276,7 @@ func (h *RoomQueueHandlers) HandlePrioritizeRoomSong(w http.ResponseWriter, r *h
 		writeRoomQueueError(w, err)
 		return
 	}
-	queue, fromIndex, toIndex, song, err := h.inter.PrioritizeSong(r.Context(), slug, actorUserID, role, *req.SongIndex)
+	queue, fromIndex, toIndex, song, err := h.inter.PrioritizeSong(r.Context(), slug, actorUserID, h.activityDisplayName(r.Context(), actorUserID), role, *req.SongIndex)
 	if err != nil {
 		writeRoomQueueError(w, err)
 		return
@@ -308,7 +325,7 @@ func (h *RoomQueueHandlers) HandleSetRoomPlaybackStatus(w http.ResponseWriter, r
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	queue, err := h.inter.SetPlaybackStatus(r.Context(), slug, actorUserID, status)
+	queue, err := h.inter.SetPlaybackStatus(r.Context(), slug, actorUserID, h.activityDisplayName(r.Context(), actorUserID), status)
 	if err != nil {
 		writeRoomQueueError(w, err)
 		return
@@ -362,7 +379,7 @@ func (h *RoomQueueHandlers) HandleSkipRoomPlayback(w http.ResponseWriter, r *htt
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	queue, prevIndex, newIndex, song, err := h.inter.SkipPlayback(r.Context(), slug, actorUserID)
+	queue, prevIndex, newIndex, song, err := h.inter.SkipPlayback(r.Context(), slug, actorUserID, h.activityDisplayName(r.Context(), actorUserID))
 	if err != nil {
 		writeRoomQueueError(w, err)
 		return
@@ -451,7 +468,7 @@ func (h *RoomQueueHandlers) HandleChangeRoomPlaybackPrevious(w http.ResponseWrit
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	queue, prevIndex, newIndex, song, err := h.inter.PrevPlayback(r.Context(), slug, actorUserID)
+	queue, prevIndex, newIndex, song, err := h.inter.PrevPlayback(r.Context(), slug, actorUserID, h.activityDisplayName(r.Context(), actorUserID))
 	if err != nil {
 		writeRoomQueueError(w, err)
 		return

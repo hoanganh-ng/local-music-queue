@@ -37,7 +37,7 @@ func pgRoomAutoQueueHandlers(t *testing.T) (*RoomAutoQueueHandlers, *sql.DB, *pe
 		"", nil, nil, nil, nil,
 	)
 	roomAQRepo := persistence.NewPostgresRoomAutoQueueRepository(db)
-	inter := roomautoqueue.NewInteractor(roomRepo, roomAQRepo, &stubFetcher{})
+	inter := roomautoqueue.NewInteractor(roomRepo, roomAQRepo, &stubFetcher{}, nil)
 	// Wire the snapshot loader so CheckAndTrigger can read queue.
 	inter.SetQueueSnapshotLoader(func(ctx context.Context, roomID int64) (*entity.Queue, error) {
 		q, err := queueRepo.Load(ctx, roomID)
@@ -50,7 +50,7 @@ func pgRoomAutoQueueHandlers(t *testing.T) (*RoomAutoQueueHandlers, *sql.DB, *pe
 		return q, nil
 	})
 	// Wire the AddRoomAutoQueueSong seam adapter.
-	roomQueueInter := roomqueue.NewInteractor(roomRepo, queueRepo, nil)
+	roomQueueInter := roomqueue.NewInteractor(roomRepo, queueRepo, nil, nil)
 	inter.SetAddRoomAutoQueueSongFunc(func(ctx context.Context, slug string, song *entity.Song, expectedSourceSongID string) (*roomautoqueue.AddRoomAutoQueueSongResult, error) {
 		q, ci, cs, st, el, err := roomQueueInter.AddRoomAutoQueueSong(ctx, slug, song, expectedSourceSongID)
 		if err != nil {

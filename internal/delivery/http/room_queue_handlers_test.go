@@ -51,7 +51,7 @@ func newRoomQueueHandlers(t *testing.T) (*RoomQueueHandlers, *sql.DB, func()) {
 		persistence.NewPostgresUserRepository(db),
 		"", nil, nil, nil, nil,
 	)
-	rqh := NewRoomQueueHandlers(roomqueue.NewInteractor(roomRepo, queueRepo, nil), authI)
+	rqh := NewRoomQueueHandlers(roomqueue.NewInteractor(roomRepo, queueRepo, nil, nil), authI)
 	cleanup := func() {
 		// schema drop + db close registered by newRoomHandlers' t.Cleanup
 	}
