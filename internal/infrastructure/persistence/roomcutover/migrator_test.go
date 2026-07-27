@@ -2,6 +2,7 @@ package roomcutover
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"strings"
@@ -736,6 +737,97 @@ func TestPlanAndDryRunLeaveSequencesUntouched(t *testing.T) {
 	if last, called := readSequenceState(t, db, "room_play_history"); last != phLast || called != phCalled {
 		t.Fatalf("room_play_history sequence changed: (%d,%v) -> (%d,%v)", phLast, phCalled, last, called)
 	}
+}
+
+// TestUpPreCommitVerificationRollsBack proves Up runs the full marker-derived
+// verification routine INSIDE the transaction, after the marker is inserted
+// and before COMMIT: in-transaction drift fails the run and rolls back the
+// room, membership, copied rows, and marker — and releases the lock.
+func TestUpPreCommitVerificationRollsBack(t *testing.T) {
+	db := newCutoverTestDB(t)
+	ctx := context.Background()
+	hostID := seedTypicalLegacyState(t, db)
+
+	opts := baseOptions(hostID)
+	opts.TamperInTxBeforeVerify = func(ctx context.Context, tx *sql.Tx) error {
+		// Corrupt a copied target row inside the same transaction, after the
+		// hashes were recorded in the marker but before the pre-commit pass.
+		_, err := tx.ExecContext(ctx, `
+			UPDATE room_activities SET description = 'tampered-in-tx'
+			WHERE id = (SELECT MIN(id) FROM room_activities)`)
+		return err
+	}
+	_, err := Up(ctx, db, opts)
+	if err == nil || !strings.Contains(err.Error(), "pre-commit verification failed") {
+		t.Fatalf("expected pre-commit verification failure, got %v", err)
+	}
+	// The verification failure happened BEFORE commit: everything rolled back.
+	if got := countInt(t, db, `SELECT COUNT(*) FROM rooms WHERE slug = 'legacy-room'`); got != 0 {
+		t.Fatalf("pre-commit failure left a room behind: %d", got)
+	}
+	if got := countInt(t, db, `SELECT COUNT(*) FROM room_cutover_marker`); got != 0 {
+		t.Fatalf("pre-commit failure left a marker behind: %d", got)
+	}
+	if got := countInt(t, db, `SELECT COUNT(*) FROM room_activities`); got != 0 {
+		t.Fatalf("pre-commit failure left copied activities behind: %d", got)
+	}
+	// Lock released: a clean retry succeeds.
+	report, err := Up(ctx, db, baseOptions(hostID))
+	if err != nil {
+		t.Fatalf("retry after pre-commit failure: %v", err)
+	}
+	if !report.Verified {
+		t.Fatal("retry should verify")
+	}
+}
+
+// TestFirstCutoverRequiresSingletonSourceRows: readiness must reject a
+// missing queue_state (id=1) or auto_queue_config (id=1) source row in
+// plan, dry-run, AND up — before any expected evidence is reported —
+// instead of letting plan/dry-run hash the absent row as a valid empty set.
+func TestFirstCutoverRequiresSingletonSourceRows(t *testing.T) {
+	t.Run("missing auto_queue_config", func(t *testing.T) {
+		db := newCutoverTestDB(t)
+		ctx := context.Background()
+		hostID := seedTypicalLegacyState(t, db)
+		if _, err := db.ExecContext(ctx, `DELETE FROM auto_queue_config WHERE id = 1`); err != nil {
+			t.Fatalf("delete auto_queue_config: %v", err)
+		}
+		if _, err := Plan(ctx, db, baseOptions(hostID)); err == nil || !strings.Contains(err.Error(), "auto_queue_config singleton") {
+			t.Fatalf("plan: expected auto_queue_config readiness error, got %v", err)
+		}
+		dry := baseOptions(hostID)
+		dry.DryRun = true
+		if _, err := Up(ctx, db, dry); err == nil || !strings.Contains(err.Error(), "auto_queue_config singleton") {
+			t.Fatalf("dry-run: expected auto_queue_config readiness error, got %v", err)
+		}
+		if _, err := Up(ctx, db, baseOptions(hostID)); err == nil || !strings.Contains(err.Error(), "auto_queue_config singleton") {
+			t.Fatalf("up: expected auto_queue_config readiness error, got %v", err)
+		}
+		if got := countInt(t, db, `SELECT COUNT(*) FROM rooms WHERE slug = 'legacy-room'`); got != 0 {
+			t.Fatalf("readiness failure must not write: %d rooms", got)
+		}
+		if got := countInt(t, db, `SELECT COUNT(*) FROM room_cutover_marker`); got != 0 {
+			t.Fatalf("readiness failure must not write a marker: %d", got)
+		}
+	})
+	t.Run("missing queue_state", func(t *testing.T) {
+		db := newCutoverTestDB(t)
+		ctx := context.Background()
+		hostID := seedTypicalLegacyState(t, db)
+		if _, err := db.ExecContext(ctx, `DELETE FROM queue_state WHERE id = 1`); err != nil {
+			t.Fatalf("delete queue_state: %v", err)
+		}
+		if _, err := Plan(ctx, db, baseOptions(hostID)); err == nil || !strings.Contains(err.Error(), "queue_state row (id=1) not found") {
+			t.Fatalf("plan: expected queue_state readiness error, got %v", err)
+		}
+		if _, err := Up(ctx, db, baseOptions(hostID)); err == nil || !strings.Contains(err.Error(), "queue_state row (id=1) not found") {
+			t.Fatalf("up: expected queue_state readiness error, got %v", err)
+		}
+		if got := countInt(t, db, `SELECT COUNT(*) FROM rooms WHERE slug = 'legacy-room'`); got != 0 {
+			t.Fatalf("readiness failure must not write: %d rooms", got)
+		}
+	})
 }
 
 // TestRejectsPlayHistoryOverflow: when MAX(play_history.id) + offset would

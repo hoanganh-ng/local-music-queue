@@ -160,9 +160,12 @@ func (r *Report) WriteJSON(w io.Writer) error {
 }
 
 // WriteToFile writes the report as JSON to path. Existing files are
-// truncated. The file is created with mode 0600 explicitly (not left to the
+// truncated. The file mode is forced to 0600 explicitly (not left to the
 // process umask): the report carries integrity hashes and identity fields
-// operators may not want group/world readable. An empty path is a no-op.
+// operators may not want group/world readable. O_CREATE's mode argument
+// applies only when the file is newly created — truncating a preexisting
+// file keeps its old permissions — so the mode is additionally enforced via
+// Chmod on the opened handle. An empty path is a no-op.
 func (r *Report) WriteToFile(path string) error {
 	if path == "" {
 		return nil
@@ -172,5 +175,8 @@ func (r *Report) WriteToFile(path string) error {
 		return fmt.Errorf("create report file: %w", err)
 	}
 	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		return fmt.Errorf("set report file permissions: %w", err)
+	}
 	return r.WriteJSON(f)
 }

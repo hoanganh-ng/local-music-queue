@@ -5,10 +5,16 @@
 Issue #17; implementation-sequence update recorded on the accepted R14a
 Issue #20). The R14b implementation was committed on `dev` at
 `6b135c0e12ebbee63c713bbdff2a360b83f8e2a0`; an Architect review
-(recorded on Issue #23) returned **needs fixes**, and the corrective
-pass is applied **in the working tree on top of that baseline** —
-uncommitted and **pending re-review and Product Owner acceptance**.
-The Builder has performed no push, merge, production migration action,
+(recorded on Issue #23) returned **needs fixes**. The first corrective
+pass is **committed on `dev` at
+`c8a73f1f20e81759828c0a9390fbb0d891e3513d` and pushed to the `github`
+remote** (`github/dev`). A re-review (recorded on Issue #23) found a
+narrow set of remaining issues, and the **final corrective pass**
+(in-transaction pre-commit full marker verification, singleton-source
+readiness, report-file permission forcing, tracker accuracy) is applied
+**in the working tree on top of that committed head** — uncommitted and
+**pending re-review and Product Owner acceptance**.
+The Builder has performed no commit, push, merge, production migration action,
 or sprint-status advancement, and no Product Owner acceptance is
 claimed. R14b is the third sprint in the fixed cutover
 order `R05b → R09h → R14b → R09i → R14d → R14c → R14e`; its blocking
@@ -108,11 +114,14 @@ changes.
   membership role, and recomputes source + target hashes and per-table
   counts against the marker. `Verify` takes NO caller-supplied
   identity — everything is derived from the durable marker.
-  **First-cutover readiness** requires the target slug to be absent AND
-  the entire `room_activities` table to be empty (checked in plan /
-  dry-run / up preflight AND re-checked inside the locked transaction),
-  plus a Go-side BIGINT overflow precheck for
-  `MAX(play_history.id) + legacy_id_offset`. `Up` acquires
+  **First-cutover readiness** requires the target slug to be absent,
+  the entire `room_activities` table to be empty, AND the legacy
+  singleton source rows to be present — exactly one `queue_state` row
+  (id = 1) and exactly one `auto_queue_config` row (id = 1) — so a
+  missing singleton fails plan / dry-run / up up front instead of
+  mid-cutover (checked in plan / dry-run / up preflight AND re-checked
+  inside the locked transaction), plus a Go-side BIGINT overflow
+  precheck for `MAX(play_history.id) + legacy_id_offset`. `Up` acquires
   `pg_try_advisory_lock(987654321)` on a
   pinned `*sql.Conn` (the SAME key R03 uses, so cutover / migration /
   a second cutover mutually exclude), releases via **deferred
@@ -121,7 +130,13 @@ changes.
   ONE transaction (order: insert room → insert host membership → copy
   state → resync sequences → in-transaction hash computation → capture
   `cutover_pre_commit_at` immediately before inserting the marker →
-  pre-commit hash equality assertion → `COMMIT`). **After `COMMIT`,
+  **full pre-commit verification inside the same transaction** —
+  source/target hash equality PLUS a reread of the just-inserted marker
+  run through the same shared marker-derived verification routine
+  (marker shape, resolved room/slug/name, host membership, recomputed
+  hashes, per-table counts) — → `COMMIT`; a pre-commit verification
+  failure therefore still rolls back the room, membership, copied rows,
+  and marker). **After `COMMIT`,
   `Up` rereads the marker and re-runs the same verification routine
   against the committed state; the report claims `Verified` only after
   this post-commit proof passes.** A mid-flight fault rolls the
@@ -170,7 +185,10 @@ Copy rules:
   and `plan` rejects an already-taken target slug before reporting
   readiness.
 - Report files (`--report-file`) are written with explicit mode `0600`
-  (not left to the process umask).
+  (not left to the process umask), and a PREEXISTING report file is
+  forced back to `0600` via `Chmod` — `O_CREATE`'s mode argument applies
+  only to newly created files, so truncating an existing `0644` report
+  must not leave it world-readable.
 - Idempotency: re-running `up` with the same identity against an
   already-cut-over target re-hashes source + target, confirms they still
   match the marker, and prints `already cut over; no-op` (exit 0). Any
@@ -229,18 +247,30 @@ PostgreSQL instance (skipped, not failed, when PG is unreachable):
   CLI exit-2 matrix (invalid slug, reserved slug, missing DSN,
   identity flags on `verify`, `--dry-run` outside `up`); report-file
   `0600` permissions; accidental root `room-cutover` binary absence.
+- **Final-corrective-pass regressions** (DB-backed unless noted):
+  in-transaction tamper between marker insertion and the pre-commit
+  verification pass is detected BEFORE `COMMIT` and rolls back
+  everything (no room, no marker, no `room_activities` rows; the
+  advisory lock is released and a clean retry succeeds); a missing
+  `auto_queue_config` singleton and a missing `queue_state` row are each
+  rejected by plan / dry-run / up with nothing written; a preexisting
+  `0644` report file is forced to `0600` (pure-unit `report_test.go`
+  regressions for both the create and preexisting-file paths, plus the
+  CLI end-to-end `--report-file` test now seeding a `0644` file).
 
 ## Verification
 
-Corrective-pass verification (2026-07-27, against a disposable
+Final-corrective-pass verification (2026-07-27, against a disposable
 PostgreSQL 16 test container via `LMQ_TEST_DATABASE_URL`; DB-backed
 tests run, not skipped):
 
 - `go test ./internal/infrastructure/persistence/roomcutover/... ./cmd/room-cutover/... -count=1 -p 1`
-  — all 44 tests pass, 0 skips (`ok` both packages).
+  — all 47 top-level tests (83 including subtests) pass, 0 skips, 0
+  failures (`ok` both packages).
 - `go test -race ./internal/infrastructure/persistence/roomcutover/... ./cmd/room-cutover/... -count=1 -p 1`
   — pass (`ok` both packages).
-- `go test ./internal/... ./cmd/... -p 1 -count=1` — all packages `ok`.
+- `go test ./internal/... ./cmd/... -p 1 -count=1` — all 24 test-bearing
+  packages `ok`, zero failures.
 - `go vet ./internal/... ./cmd/...` — clean.
 - `git diff --check` — clean.
 
@@ -255,7 +285,7 @@ Delivered files:
   + tests.
 - `internal/infrastructure/persistence/roomcutover/` — `hashes.go`,
   `migrator.go`, `report.go`, plus `hashes_test.go`,
-  `testhelpers_test.go`, and `migrator_test.go`.
+  `testhelpers_test.go`, `migrator_test.go`, and `report_test.go`.
 - `cmd/room-cutover/` — `main.go`, `flags.go`, `main_test.go`.
 
 The compiled root-level `room-cutover` binary that was accidentally

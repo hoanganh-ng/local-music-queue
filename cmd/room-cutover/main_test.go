@@ -312,6 +312,14 @@ func TestCLIVerifyWithoutMarkerFails(t *testing.T) {
 func TestCLIReportFileWritten(t *testing.T) {
 	dsn, hostID := scopedCLIDSN(t)
 	reportPath := filepath.Join(t.TempDir(), "report.json")
+	// Pre-create the report file as 0644: the CLI must force the mode of a
+	// PREEXISTING report back to 0600, not just create new files as 0600.
+	if err := os.WriteFile(reportPath, []byte("stale"), 0o644); err != nil {
+		t.Fatalf("seed preexisting report: %v", err)
+	}
+	if err := os.Chmod(reportPath, 0o644); err != nil {
+		t.Fatalf("chmod seeded report: %v", err)
+	}
 	out, code := runCLI(t, nil, "plan",
 		"--room-slug", "cli-legacy", "--room-name", "CLI Legacy",
 		"--host-user-id", fmt.Sprintf("%d", hostID), "--postgres", dsn,

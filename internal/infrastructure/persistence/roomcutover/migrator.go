@@ -69,6 +69,14 @@ type Options struct {
 	// committed state and assert that post-commit verification catches it.
 	// A returned error aborts the run. Production callers leave it nil.
 	TamperAfterCommit func() error
+
+	// TamperInTxBeforeVerify is a test-only hook that runs inside the
+	// cutover transaction after the marker is inserted and before the
+	// pre-commit verification pass, so tests can corrupt in-transaction
+	// state and assert that pre-commit verification fails and rolls the
+	// whole transaction back. A returned error aborts the run. Production
+	// callers leave it nil.
+	TamperInTxBeforeVerify func(ctx context.Context, tx *sql.Tx) error
 }
 
 func (o Options) now() time.Time {
@@ -203,11 +211,12 @@ func fillExpectedEvidence(ctx context.Context, q rowQueryer, report *Report) err
 // The write path holds the advisory lock on a pinned connection for the whole
 // single transaction, following the ADR 003 §8 order: re-assert readiness,
 // create room, create sole host membership, copy the four tables, insert the
-// marker (timestamped immediately before insertion) before commit, verify
-// within the transaction, commit (or roll back), release the lock — and then
-// re-verify the committed state through the marker-derived verification
-// routine before claiming Verified. A matching prior marker short-circuits to
-// a fully verified no-op.
+// marker (timestamped immediately before insertion) before commit, reread the
+// inserted marker and run the full marker-derived verification routine within
+// the transaction (so any failure still rolls back the room, membership,
+// copied rows, and marker), commit (or roll back), release the lock — and
+// then re-verify the committed state through the same routine before claiming
+// Verified. A matching prior marker short-circuits to a fully verified no-op.
 func Up(ctx context.Context, db *sql.DB, opts Options) (*Report, error) {
 	report := newReport("up", opts)
 	report.DryRun = opts.DryRun
@@ -362,9 +371,37 @@ func Up(ctx context.Context, db *sql.DB, opts Options) (*Report, error) {
 		return nil, err
 	}
 
-	// Pre-commit verification within the same tx: any drift rolls back.
+	if opts.TamperInTxBeforeVerify != nil {
+		if err := opts.TamperInTxBeforeVerify(ctx, tx); err != nil {
+			return nil, fmt.Errorf("tamper in tx before verify: %w", err)
+		}
+	}
+
+	// Pre-commit verification within the same tx: the copy must be lossless
+	// (verifyMarker only proves each side matches the marker's recorded
+	// value, so source/target equality is asserted separately) …
 	if !hashesEqual(srcHashes, tgtHashes) {
 		return nil, errors.New("pre-commit verification failed: source and target hashes differ")
+	}
+	// … and the just-inserted marker, reread from the transaction, must pass
+	// the full shared marker-derived verification routine (marker shape and
+	// serialization, resolved room identity, caller expectation, host
+	// membership, recomputed hashes, row-count parity) BEFORE commit, so a
+	// verification failure still rolls back the room, membership, copied
+	// rows, and marker.
+	preM, err := readMarker(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("pre-commit verification: %w", err)
+	}
+	if preM == nil {
+		return nil, errors.New("pre-commit verification failed: inserted marker row is not visible inside the transaction")
+	}
+	if _, _, err := verifyMarker(ctx, tx, preM, &markerExpectation{
+		RoomSlug:   opts.RoomSlug,
+		RoomName:   opts.RoomName,
+		HostUserID: opts.HostUserID,
+	}); err != nil {
+		return nil, fmt.Errorf("pre-commit verification failed: %w", err)
 	}
 
 	if opts.FaultBeforeCommit != nil {
@@ -636,11 +673,15 @@ func validateMarkerShape(m *markerRecord) error {
 }
 
 // checkFirstCutoverReadiness asserts the preconditions a first cutover (no
-// marker yet) requires: the target slug must be unclaimed, the entire
-// room_activities table must be empty (the copy preserves legacy activity
-// ids verbatim, so any preexisting row could collide or interleave), and the
-// play-history id shift must not overflow BIGINT. It is run by plan,
-// dry-run, the up preflight, and again inside the locked transaction.
+// marker yet) requires: the target slug must be unclaimed, the two singleton
+// source rows (`queue_state` id=1 and `auto_queue_config` id=1) must exist
+// (a zero-row source would otherwise only surface after plan/dry-run already
+// reported expected evidence, because an empty row set hashes to a valid
+// empty hash), the entire room_activities table must be empty (the copy
+// preserves legacy activity ids verbatim, so any preexisting row could
+// collide or interleave), and the play-history id shift must not overflow
+// BIGINT. It is run by plan, dry-run, the up preflight, and again inside the
+// locked transaction.
 func checkFirstCutoverReadiness(ctx context.Context, q rowQueryer, slug string) error {
 	var slugTaken bool
 	if err := q.QueryRowContext(ctx,
@@ -650,6 +691,22 @@ func checkFirstCutoverReadiness(ctx context.Context, q rowQueryer, slug string) 
 	}
 	if slugTaken {
 		return fmt.Errorf("target room slug %q already exists; choose an unused slug", slug)
+	}
+
+	queueRows, err := countRows(ctx, q, `SELECT COUNT(*) FROM queue_state WHERE id = 1`)
+	if err != nil {
+		return fmt.Errorf("check queue_state singleton: %w", err)
+	}
+	if queueRows != 1 {
+		return errors.New("legacy queue_state row (id=1) not found; nothing to cut over")
+	}
+
+	autoQueueRows, err := countRows(ctx, q, `SELECT COUNT(*) FROM auto_queue_config WHERE id = 1`)
+	if err != nil {
+		return fmt.Errorf("check auto_queue_config singleton: %w", err)
+	}
+	if autoQueueRows != 1 {
+		return errors.New("legacy auto_queue_config singleton row (id=1) not found; the source database is not cutover-ready")
 	}
 
 	activityRows, err := countRows(ctx, q, `SELECT COUNT(*) FROM room_activities`)
