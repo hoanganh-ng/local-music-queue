@@ -1,25 +1,31 @@
 # R14b – Room-cutover schema and offline migration mechanism
 
-**Status:** R14b is the **sole active sprint on `dev`** (activated
-2026-07-24; tracked as Issue #23; activation recorded on room epic
-Issue #17; implementation-sequence update recorded on the accepted R14a
-Issue #20). The R14b implementation was committed on `dev` at
+**Status:** **Implemented, reviewed, closed, and accepted by the Product
+Owner on 2026-07-27** at the final reviewed commit
+`13fb628d7c26738adbc2d1f364577ef89515e63f` (activated 2026-07-24;
+tracked as Issue #23; activation recorded on room epic Issue #17;
+implementation-sequence update recorded on the accepted R14a Issue #20).
+Implementation history (all dated, closed history): the initial
+implementation was committed on `dev` at
 `6b135c0e12ebbee63c713bbdff2a360b83f8e2a0`; an Architect review
-(recorded on Issue #23) returned **needs fixes**. The first corrective
-pass is **committed on `dev` at
+(recorded on Issue #23) returned needs-fixes findings; the first
+corrective pass was committed on `dev` at
 `c8a73f1f20e81759828c0a9390fbb0d891e3513d` and pushed to the `github`
-remote** (`github/dev`). A re-review (recorded on Issue #23) found a
-narrow set of remaining issues, and the **final corrective pass**
+remote (`github/dev`); a re-review (recorded on Issue #23) found a
+narrow set of remaining issues; the **final corrective pass**
 (in-transaction pre-commit full marker verification, singleton-source
-readiness, report-file permission forcing, tracker accuracy) is applied
-**in the working tree on top of that committed head** — uncommitted and
-**pending re-review and Product Owner acceptance**.
-The Builder has performed no commit, push, merge, production migration action,
-or sprint-status advancement, and no Product Owner acceptance is
-claimed. R14b is the third sprint in the fixed cutover
+readiness, report-file permission forcing, tracker accuracy) was
+committed and is contained in the final reviewed commit
+`13fb628d7c26738adbc2d1f364577ef89515e63f`, at which **all Architect
+findings on Issue #23 are resolved** and PostgreSQL-backed verification
+evidence was reported (2026-07-27; see § Verification below).
+R14b is the third sprint in the fixed cutover
 order `R05b → R09h → R14b → R09i → R14d → R14c → R14e`; its blocking
-prerequisites R05b and R09h are closed and accepted. `R09i`, `R14d`,
-`R14c`, and `R14e` remain planned and NOT active.
+prerequisites R05b and R09h are closed and accepted, and with R14b's
+acceptance the R14b prerequisite in that sequence is satisfied. No
+sprint is currently active on `dev`; `R09i`, `R14d`, `R14c`, and `R14e`
+remain planned and NOT active. See § R14b closure record at the end of
+this document.
 
 **Sprint name:** Room-cutover schema and offline migration mechanism
 
@@ -289,8 +295,8 @@ Delivered files:
 - `cmd/room-cutover/` — `main.go`, `flags.go`, `main_test.go`.
 
 The compiled root-level `room-cutover` binary that was accidentally
-included in the baseline commit has been removed from the working tree
-and `/room-cutover` added to `.gitignore` so it cannot be re-staged.
+included in the baseline commit has been removed and `/room-cutover`
+added to `.gitignore` so it cannot be re-staged.
 
 Preserved untouched: R03's `cmd/migrate-data` + `migratedata` package +
 `migration_marker`, historical migrations `0001`..`0008`, the global
@@ -299,3 +305,33 @@ playback, queue, auto-queue, chat, leases, priority balances, auth /
 sessions, Docker / Nginx / deployment, and the entire frontend. The new
 repository is intentionally NOT composed into `cmd/server` (R09i owns
 that wiring). Schema version after R14b is 9.
+
+## R14b closure record (2026-07-27)
+
+R14b is **closed and accepted by the Product Owner on 2026-07-27** at
+the final reviewed commit `13fb628d7c26738adbc2d1f364577ef89515e63f`
+(Issue #23).
+
+- **All Architect findings resolved.** Every finding raised across the
+  Architect review and re-review on Issue #23 is resolved at the final
+  reviewed commit; the final corrective pass is committed and contained
+  in that commit.
+- **Verification evidence reported.** PostgreSQL-backed verification
+  evidence was reported (2026-07-27, disposable PostgreSQL 16 test
+  container via `LMQ_TEST_DATABASE_URL`; see § Verification above —
+  DB-backed tests run, not skipped; `go test`, `go test -race`, and
+  `go vet` all clean).
+- **Mechanism only.** R14b delivered the schema (migration
+  `0009_room_cutover_support`, v8 → v9) and the offline migration
+  mechanism ONLY. **No production or shared-data cutover was run**:
+  `room-cutover up` was never executed against a production, staging,
+  or shared database. The `cmd/room-cutover` CLI remains an offline
+  mechanism; production execution remains R14c scope.
+- **No behavior changes outside scope.** No REST, WebSocket, frontend,
+  server-composition (`cmd/server`), Docker, or later-sprint behavior
+  changed. The `--room-cutover-authoritative` flag was NOT introduced
+  (R14c scope).
+- **Sequence state after closure.** The R14b prerequisite in the fixed
+  cutover order `R05b → R09h → R14b → R09i → R14d → R14c → R14e` is
+  satisfied. No sprint is active after this closure; `R09i`, `R14d`,
+  `R14c`, and `R14e` remain planned and NOT active.
