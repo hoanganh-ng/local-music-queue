@@ -109,7 +109,7 @@ func TestRoomQueue_AddSong_PersistsAndAdvances(t *testing.T) {
 		t.Fatalf("create room: %v", err)
 	}
 	song := &entity.Song{ID: "vid-1", Title: "T1", URL: "https://example/1"}
-	q, returned, err := inter.AddSong(ctx, "rq-add", 42, "Host U42", "", &entity.SearchResult{ID: song.ID, Title: song.Title, URL: song.URL})
+	q, returned, err := inter.AddSong(ctx, "rq-add", 42, "Host U42", "Host U42", "", &entity.SearchResult{ID: song.ID, Title: song.Title, URL: song.URL})
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestRoomQueue_AddSong_RejectsDuplicateUpcoming(t *testing.T) {
 	if err := inter.queueRepo.Save(ctx, roomID, seed); err != nil {
 		t.Fatalf("seed queue: %v", err)
 	}
-	_, _, err := inter.AddSong(ctx, "rq-dup", 42, "Host U42", "", &entity.SearchResult{ID: "dup-1", Title: "Dup", URL: "u"})
+	_, _, err := inter.AddSong(ctx, "rq-dup", 42, "Host U42", "Host U42", "", &entity.SearchResult{ID: "dup-1", Title: "Dup", URL: "u"})
 	if !errors.Is(err, entity.ErrSongAlreadyInQueue) {
 		t.Fatalf("expected ErrSongAlreadyInQueue for upcoming duplicate, got %v", err)
 	}
@@ -166,16 +166,16 @@ func TestRoomQueue_AddSong_AllowsDuplicateOfCurrentSong(t *testing.T) {
 		t.Fatalf("create room: %v", err)
 	}
 	// Add two songs; the first becomes the current track, the second is upcoming.
-	if _, _, err := inter.AddSong(ctx, "rq-dup-current", 42, "Host U42", "", &entity.SearchResult{ID: "cur-1", Title: "Cur1", URL: "https://example/cur1"}); err != nil {
+	if _, _, err := inter.AddSong(ctx, "rq-dup-current", 42, "Host U42", "Host U42", "", &entity.SearchResult{ID: "cur-1", Title: "Cur1", URL: "https://example/cur1"}); err != nil {
 		t.Fatalf("first add: %v", err)
 	}
-	if _, _, err := inter.AddSong(ctx, "rq-dup-current", 42, "Host U42", "", &entity.SearchResult{ID: "cur-2", Title: "Cur2", URL: "https://example/cur2"}); err != nil {
+	if _, _, err := inter.AddSong(ctx, "rq-dup-current", 42, "Host U42", "Host U42", "", &entity.SearchResult{ID: "cur-2", Title: "Cur2", URL: "https://example/cur2"}); err != nil {
 		t.Fatalf("second add: %v", err)
 	}
 	// A third song whose ID matches the current track must be allowed: the
 	// global entity.Queue.ContainsSong invariant only checks upcoming songs,
 	// so the current song may be requeued by another add.
-	q, _, err := inter.AddSong(ctx, "rq-dup-current", 42, "Host U42", "", &entity.SearchResult{ID: "cur-1", Title: "Cur1", URL: "https://example/cur1"})
+	q, _, err := inter.AddSong(ctx, "rq-dup-current", 42, "Host U42", "Host U42", "", &entity.SearchResult{ID: "cur-1", Title: "Cur1", URL: "https://example/cur1"})
 	if err != nil {
 		t.Fatalf("expected current duplicate to be allowed, got %v", err)
 	}
@@ -213,7 +213,7 @@ func TestRoomQueue_AddSong_AllowsDuplicateOfPlayedSong(t *testing.T) {
 	if err := inter.queueRepo.Save(ctx, roomID, seed); err != nil {
 		t.Fatalf("seed queue: %v", err)
 	}
-	q, _, err := inter.AddSong(ctx, "rq-dup-played", 42, "Host U42", "", &entity.SearchResult{ID: "played-1", Title: "Played1", URL: "u"})
+	q, _, err := inter.AddSong(ctx, "rq-dup-played", 42, "Host U42", "Host U42", "", &entity.SearchResult{ID: "played-1", Title: "Played1", URL: "u"})
 	if err != nil {
 		t.Fatalf("expected replay of already-played song to be allowed, got %v", err)
 	}
@@ -244,7 +244,7 @@ func TestRoomQueue_AddSong_URLOnlyStampsServerIdentity(t *testing.T) {
 		ID: "yt-vid", Title: "YT", Artist: "Channel", Duration: 100, Thumbnail: "t", URL: "https://youtube.com/watch?v=yt-vid",
 	}}
 	inter.SetYouTube(stub)
-	q, returned, err := inter.AddSong(ctx, "rq-url", 42, "Host U42", "https://youtube.com/watch?v=yt-vid", nil)
+	q, returned, err := inter.AddSong(ctx, "rq-url", 42, "Host U42", "Host U42", "https://youtube.com/watch?v=yt-vid", nil)
 	if err != nil {
 		t.Fatalf("url add: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestRoomQueue_RemoveSong_GuestCannotRemoveOthers(t *testing.T) {
 		t.Fatalf("add guest: %v", err)
 	}
 	// Host adds a song.
-	if _, _, err := inter.AddSong(ctx, "rq-rm", 42, "Host U42", "", &entity.SearchResult{ID: "h-1", Title: "H1", URL: "https://example/h1"}); err != nil {
+	if _, _, err := inter.AddSong(ctx, "rq-rm", 42, "Host U42", "Host U42", "", &entity.SearchResult{ID: "h-1", Title: "H1", URL: "https://example/h1"}); err != nil {
 		t.Fatalf("add host: %v", err)
 	}
 	// Guest 200 tries to remove the host's current song (index 0).
@@ -329,19 +329,19 @@ func TestRoomQueue_Broadcaster_SetterAcceptsStub(t *testing.T) {
 
 // recordingBroadcaster is a no-op roomqueue.Broadcaster for tests.
 type recordingBroadcaster struct {
-	mu      sync.Mutex
-	syncN   int
-	addN    int
-	removeN int
-	clearN  int
-	prioN   int
-	statusN int
-	elapsedN int
-	advancedN int
-	voteUpdatedN  int
-	voteResolvedN int
-	volumeN       int
-	autoQueueAddedN        int
+	mu                      sync.Mutex
+	syncN                   int
+	addN                    int
+	removeN                 int
+	clearN                  int
+	prioN                   int
+	statusN                 int
+	elapsedN                int
+	advancedN               int
+	voteUpdatedN            int
+	voteResolvedN           int
+	volumeN                 int
+	autoQueueAddedN         int
 	autoQueueConfigChangedN int
 }
 
@@ -400,7 +400,8 @@ func (r *recordingBroadcaster) BroadcastRoomPlaybackVolumeChanged(_ string, _ st
 	defer r.mu.Unlock()
 	r.volumeN++
 }
-func (r *recordingBroadcaster) BroadcastRoomPlaybackSongPrevious(_ string, _, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {}
+func (r *recordingBroadcaster) BroadcastRoomPlaybackSongPrevious(_ string, _, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {
+}
 func (r *recordingBroadcaster) BroadcastRoomAutoQueueAdded(_ string, _ entity.Song, _ string, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -569,7 +570,7 @@ func TestRoomQueue_AddRoomAutoQueueSong_DuplicateStale(t *testing.T) {
 	inter, queueRepo, roomID := seedQueueLastSong(t, "rq-f-aq-dup")
 	// Insert candidate as a normal future song first.
 	ctx := context.Background()
-	if _, _, err := inter.AddSong(ctx, "rq-f-aq-dup", 42, "Host U42", "",
+	if _, _, err := inter.AddSong(ctx, "rq-f-aq-dup", 42, "Host U42", "Host U42", "",
 		&entity.SearchResult{ID: "dup", Title: "Dup", URL: "u"}); err != nil {
 		t.Fatalf("seed add: %v", err)
 	}
@@ -954,7 +955,9 @@ func playbackFixture(t *testing.T, slug string, holderID int) (*Interactor, *roo
 // (no-current-song / no-next-song) without claiming a real lease.
 type allowAllLeaseAuthorizer struct{}
 
-func (allowAllLeaseAuthorizer) RequireActiveLeaseHolder(_ context.Context, _ string, _ int) error { return nil }
+func (allowAllLeaseAuthorizer) RequireActiveLeaseHolder(_ context.Context, _ string, _ int) error {
+	return nil
+}
 
 // TestRoomPlayback_SetPlaybackStatus_HappyPath
 // pins the success path: holder transitions playing→paused, returned

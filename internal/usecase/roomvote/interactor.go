@@ -114,8 +114,9 @@ func NewInteractor(queueInter QueueSkipping, resolver Resolver, expiry time.Dura
 }
 
 // ActivityWriterSeam returns the wired activity writer, or nil when
-// unset. Exposed so composition tests can verify the injected
-// implementation.
+// unset. Read-only; its sole consumer is the cmd/server composition
+// regression test, which verifies normal wiring selects the explicit
+// no-op writer (pre-R14c) rather than the PostgreSQL repository.
 func (i *Interactor) ActivityWriterSeam() ActivityWriter { return i.activityWriter }
 
 // actorName resolves the activity actor label: the authenticated

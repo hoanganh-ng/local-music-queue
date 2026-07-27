@@ -62,7 +62,7 @@ func (b *voteTestBroadcaster) BroadcastRoomQueueSync(_ string, _ *entity.Queue) 
 func (b *voteTestBroadcaster) BroadcastRoomQueueSongAdded(_ string, _ entity.Song, _ int, _ *entity.Queue) {
 }
 func (b *voteTestBroadcaster) BroadcastRoomQueueSongRemoved(_ string, _ int, _ *entity.Queue) {}
-func (b *voteTestBroadcaster) BroadcastRoomQueueCleared(_ string, _ *entity.Queue)        {}
+func (b *voteTestBroadcaster) BroadcastRoomQueueCleared(_ string, _ *entity.Queue)            {}
 func (b *voteTestBroadcaster) BroadcastRoomQueueSongPrioritized(slug string, from, to int, song entity.Song, state *entity.Queue) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -108,9 +108,11 @@ func (b *voteTestBroadcaster) BroadcastRoomPlaybackVolumeChanged(_, _ string) {}
 // after R09d added the prev method to the interface. The vote
 // handlers never invoke this; the R09d handler is the only caller in
 // the room-queue delivery layer.
-func (b *voteTestBroadcaster) BroadcastRoomPlaybackSongPrevious(_ string, _, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {}
-func (b *voteTestBroadcaster) BroadcastRoomAutoQueueAdded(_ string, _ entity.Song, _ string, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue)    {}
-func (b *voteTestBroadcaster) BroadcastRoomAutoQueueConfigChanged(_ string, _ bool, _ string)       {}
+func (b *voteTestBroadcaster) BroadcastRoomPlaybackSongPrevious(_ string, _, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {
+}
+func (b *voteTestBroadcaster) BroadcastRoomAutoQueueAdded(_ string, _ entity.Song, _ string, _ int, _ *entity.Song, _ entity.PlaybackStatus, _ int, _ *entity.Queue) {
+}
+func (b *voteTestBroadcaster) BroadcastRoomAutoQueueConfigChanged(_ string, _ bool, _ string) {}
 
 // fixedResolver is a deterministic roomvote.Resolver that always
 // returns the supplied unique-user count. Tests use it to pin the
@@ -466,11 +468,11 @@ func TestRoomVote_NoCurrentSong_Returns400(t *testing.T) {
 //   - roomvote.ErrStaleSession  → 409 (queue advanced under the vote).
 //   - entity.ErrVoteSessionExpired → 410 (rare race; client can retry).
 //   - entity.ErrAlreadyVoted    → 409 (covered inline in the
-//                                  duplicate test, asserted here too).
+//     duplicate test, asserted here too).
 //   - room.ErrInvalidSlug       → 400.
 //   - entity.ErrNoCurrentSong   → 400 (empty queue / no current song;
-//                                  covered inline in the no-current-song
-//                                  test, asserted here too).
+//     covered inline in the no-current-song
+//     test, asserted here too).
 //
 // The handler never broadcasts on error paths, so we wire a
 // voteTestBroadcaster to confirm no broadcasts leak.

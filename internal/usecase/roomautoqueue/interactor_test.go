@@ -80,7 +80,7 @@ func (noOpRoomRepo) GetRoomByID(_ context.Context, _ int64) (*entity.Room, error
 func (noOpRoomRepo) ListRooms(_ context.Context, _ entity.RoomStatus) ([]entity.Room, error) {
 	panic("unused")
 }
-func (noOpRoomRepo) ArchiveRoom(_ context.Context, _ int64, _ time.Time) error      { panic("unused") }
+func (noOpRoomRepo) ArchiveRoom(_ context.Context, _ int64, _ time.Time) error { panic("unused") }
 func (noOpRoomRepo) ArchiveRoomIfActive(_ context.Context, _ int64, _ time.Time) (bool, error) {
 	panic("unused")
 }
@@ -816,16 +816,16 @@ func TestCheckAndTrigger_Success_BroadcastsConfiguredBroadcaster(t *testing.T) {
 //     though the user has just toggled the room off.
 //
 // This test forces the bug-prone ordering deterministically:
-//   1. CheckAndTrigger pre-fetches (Enabled=true), enters the
-//      blocking fetcher, then is released into the post-fetch mu
-//      critical section.
-//   2. The post-fetch recheck reads Enabled=true and calls the add
-//      fn; the add fn blocks on a test-controlled gate WHILE STILL
-//      HOLDING mu.
-//   3. A concurrent SetEnabled(false) starts in another goroutine.
-//   4. The mock's SaveConfig is gated through channels so we can
-//      observe whether SetEnabled's SaveConfig entered while the
-//      add fn held mu.
+//  1. CheckAndTrigger pre-fetches (Enabled=true), enters the
+//     blocking fetcher, then is released into the post-fetch mu
+//     critical section.
+//  2. The post-fetch recheck reads Enabled=true and calls the add
+//     fn; the add fn blocks on a test-controlled gate WHILE STILL
+//     HOLDING mu.
+//  3. A concurrent SetEnabled(false) starts in another goroutine.
+//  4. The mock's SaveConfig is gated through channels so we can
+//     observe whether SetEnabled's SaveConfig entered while the
+//     add fn held mu.
 //
 // The locked-correct outcome: SaveConfig does NOT enter until mu
 // is released (after the add fn returns). Without the lock,

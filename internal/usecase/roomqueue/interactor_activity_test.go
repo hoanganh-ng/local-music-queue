@@ -75,7 +75,7 @@ func TestRoomQueueActivity_AddSongRecordsSongAdded(t *testing.T) {
 	w := &captureActivityWriter{}
 	inter.activityWriter = w
 
-	if _, _, err := inter.AddSong(ctx, "rqa-add", 42, "Alice", "", &entity.SearchResult{ID: "v1", Title: "T1", URL: "https://x/1"}); err != nil {
+	if _, _, err := inter.AddSong(ctx, "rqa-add", 42, "Alice", "Alice", "", &entity.SearchResult{ID: "v1", Title: "T1", URL: "https://x/1"}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	a, roomID := requireSingleActivity(t, w)
@@ -100,12 +100,20 @@ func TestRoomQueueActivity_BlankDisplayNameFallsBackToUserID(t *testing.T) {
 	w := &captureActivityWriter{}
 	inter.activityWriter = w
 
-	if _, _, err := inter.AddSong(ctx, "rqa-fallback", 42, "   ", "", &entity.SearchResult{ID: "v1", Title: "T1", URL: "https://x/1"}); err != nil {
+	// addedByName carries the legacy email fallback while the raw
+	// activity display name is blank: the actor must be the canonical
+	// "user #42", never the email-derived AddedBy string.
+	q, _, err := inter.AddSong(ctx, "rqa-fallback", 42, "fallback@example.com", "   ", "", &entity.SearchResult{ID: "v1", Title: "T1", URL: "https://x/1"})
+	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	a, _ := requireSingleActivity(t, w)
 	if a.User != "user #42" {
 		t.Errorf("expected actor fallback user #42, got %q", a.User)
+	}
+	// Song attribution keeps the legacy fallback contract untouched.
+	if got := q.Songs[len(q.Songs)-1].AddedBy; got != "fallback@example.com" {
+		t.Errorf("expected AddedBy to keep the legacy fallback, got %q", got)
 	}
 }
 
@@ -311,7 +319,7 @@ func TestRoomQueueActivity_WriteRunsAfterMutexReleased(t *testing.T) {
 	}
 	inter.activityWriter = w
 
-	if _, _, err := inter.AddSong(ctx, "rqa-lock", 42, "Alice", "", &entity.SearchResult{ID: "v1", Title: "T1", URL: "https://x/1"}); err != nil {
+	if _, _, err := inter.AddSong(ctx, "rqa-lock", 42, "Alice", "Alice", "", &entity.SearchResult{ID: "v1", Title: "T1", URL: "https://x/1"}); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	if lockedDuringWrite {

@@ -153,8 +153,9 @@ func NewInteractor(roomRepo repository.RoomRepository, queueRepo repository.Room
 }
 
 // ActivityWriterSeam returns the wired activity writer, or nil when
-// unset. Exposed so composition tests can verify the injected
-// implementation.
+// unset. Read-only; its sole consumer is the cmd/server composition
+// regression test, which verifies normal wiring selects the explicit
+// no-op writer (pre-R14c) rather than the PostgreSQL repository.
 func (i *Interactor) ActivityWriterSeam() ActivityWriter { return i.activityWriter }
 
 // actorName resolves the activity actor label: the authenticated
@@ -313,12 +314,17 @@ func (i *Interactor) GetState(ctx context.Context, slug string, actorUserID int)
 // the new queue, and returns the resulting queue plus the inserted
 // song. Any active member may add.
 //
-// actorUserID and actorDisplayName are server-resolved from the bearer
-// token by the delivery layer; request-body identity fields are ignored.
-// The interactor stamps the constructed Song's AddedBy / AddedByID so
-// the URL-only branch (no metadata body) also carries correct
-// attribution.
-func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, actorDisplayName string, url string, metadata *entity.SearchResult) (*entity.Queue, *entity.Song, error) {
+// actorUserID, addedByName and activityDisplayName are server-resolved
+// from the bearer token by the delivery layer; request-body identity
+// fields are ignored. addedByName keeps the established Song.AddedBy
+// attribution contract (display name → email → "user-<id>" fallback,
+// applied by delivery); the interactor stamps the constructed Song's
+// AddedBy / AddedByID so the URL-only branch (no metadata body) also
+// carries correct attribution. activityDisplayName is the RAW
+// authenticated display name for R09i activity attribution only — a
+// blank/whitespace value falls back to the canonical "user #<id>" via
+// actorName, never to the email or legacy placeholder.
+func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, addedByName string, activityDisplayName string, url string, metadata *entity.SearchResult) (*entity.Queue, *entity.Song, error) {
 	roomObj, err := i.resolveActiveRoom(ctx, slug)
 	if err != nil {
 		return nil, nil, err
@@ -352,7 +358,7 @@ func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, 
 	// Server-resolved attribution is authoritative. Overwrite any
 	// metadata-supplied AddedBy / AddedByID so a client cannot spoof a
 	// host's add via the request body.
-	song.AddedBy = actorDisplayName
+	song.AddedBy = addedByName
 	song.AddedByID = actorUserID
 
 	// R09i: the song_added activity is appended AFTER the mutex is
@@ -380,7 +386,7 @@ func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, 
 	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 		return nil, nil, fmt.Errorf("save room queue: %w", err)
 	}
-	a := entity.NewActivity(entity.ActivitySongAdded, actorName(actorDisplayName, actorUserID), fmt.Sprintf("added \"%s\"", song.Title))
+	a := entity.NewActivity(entity.ActivitySongAdded, actorName(activityDisplayName, actorUserID), fmt.Sprintf("added \"%s\"", song.Title))
 	act = &a
 	return queue, song, nil
 }

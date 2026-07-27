@@ -353,3 +353,99 @@ func TestRoomVoteActivity_WritesRunAfterMutexReleased(t *testing.T) {
 		t.Error("AddActivity ran while the roomvote mutex was held")
 	}
 }
+
+// blockingActivityWriter blocks inside AddActivity for the configured
+// room until release is closed. entered is signalled exactly once when
+// the blocked write begins. Writes for other rooms pass straight
+// through to the embedded capture writer.
+type blockingActivityWriter struct {
+	captureActivityWriter
+	blockRoomID int64
+	entered     chan struct{}
+	release     chan struct{}
+	once        sync.Once
+}
+
+func (w *blockingActivityWriter) AddActivity(ctx context.Context, roomID int64, act entity.Activity) error {
+	if roomID == w.blockRoomID {
+		w.once.Do(func() { close(w.entered) })
+		<-w.release
+	}
+	return w.captureActivityWriter.AddActivity(ctx, roomID, act)
+}
+
+// TestRoomVoteActivity_BlockedAppendDoesNotStallOtherRooms is the R09i
+// corrective concurrency regression: a deliberately blocked activity
+// append for room 1 must not prevent a vote in room 2 from progressing.
+// Deterministic sequencing: the room-1 cast provably sits inside its
+// blocked AddActivity (entered closed) while the room-2 cast must run
+// to completion. If the interactor held the single
+// roomvote mutex across the append — or serialized batches through a
+// detached goroutine — the room-2 cast would hang and the guard timeout
+// would fail the test. Writes within one batch stay sequential and
+// synchronous on the mutating goroutine.
+func TestRoomVoteActivity_BlockedAppendDoesNotStallOtherRooms(t *testing.T) {
+	fq := newFakeRoomQueue()
+	seedRoomWithTwoSongs(t, fq, "alpha", 1)
+	seedRoomWithTwoSongs(t, fq, "beta", 2)
+	fq.members[1] = map[int]bool{42: true}
+	fq.members[2] = map[int]bool{43: true}
+	w := &blockingActivityWriter{
+		blockRoomID: 1,
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 3, "beta": 3}}, 30*time.Second, w)
+
+	room1Done := make(chan error, 1)
+	go func() {
+		_, err := inter.CastSkipVote(context.Background(), "alpha", 42, "Alice")
+		room1Done <- err
+	}()
+
+	// Wait until the room-1 append is provably blocked inside the
+	// writer (after the interactor released its mutex).
+	select {
+	case <-w.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("room-1 activity append never started")
+	}
+
+	// With room 1 still blocked, a room-2 vote must complete. Run it
+	// on a helper goroutine purely so a regression fails via timeout
+	// instead of deadlocking the whole test binary.
+	room2Done := make(chan error, 1)
+	go func() {
+		_, err := inter.CastSkipVote(context.Background(), "beta", 43, "Bob")
+		room2Done <- err
+	}()
+	select {
+	case err := <-room2Done:
+		if err != nil {
+			t.Fatalf("room-2 cast: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("room-2 vote stalled behind room-1's blocked activity append")
+	}
+
+	// Unblock room 1 and confirm its cast finishes cleanly too.
+	close(w.release)
+	select {
+	case err := <-room1Done:
+		if err != nil {
+			t.Fatalf("room-1 cast: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("room-1 cast did not finish after release")
+	}
+
+	acts := w.snapshot()
+	if len(acts) != 2 {
+		t.Fatalf("expected 2 recorded activities, got %d: %+v", len(acts), acts)
+	}
+	// The room-2 write completed while room 1 was blocked, so it must
+	// have been recorded first.
+	if len(w.roomIDs) != 2 || w.roomIDs[0] != 2 || w.roomIDs[1] != 1 {
+		t.Errorf("expected room-2 write before the released room-1 write, got %v", w.roomIDs)
+	}
+}

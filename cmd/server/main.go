@@ -46,6 +46,20 @@ func envMode(isLocal bool) string {
 	return "production"
 }
 
+// activityProducerComposition captures the three activity-producing
+// interactors wired by setupApp so the same-package composition
+// regression test can confirm — through their narrow
+// ActivityWriterSeam accessors — that each one received the explicit
+// no-op writer. It is written once during setupApp and read only by
+// tests; it has no production behavior.
+type activityProducerComposition struct {
+	roomQueue     *usecaseRoomQueue.Interactor
+	roomVote      *usecaseRoomVote.Interactor
+	roomAutoQueue *usecaseRoomAutoQueue.Interactor
+}
+
+var composedActivityProducers activityProducerComposition
+
 func main() {
 	mux, cfg, policy, roomWSHub, roomVoteInteractor, cleanup, err := setupApp()
 	if err != nil {
@@ -340,6 +354,17 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	// the global vote package.
 	roomVoteInteractor := usecaseRoomVote.NewInteractor(roomQueueInteractor, roomWSHub, 30*time.Second, noopRoomActivityWriter)
 	roomVoteHandlers := delivery.NewRoomVoteHandlers(roomVoteInteractor, roomQueueInteractor, authInteractor)
+
+	// R09i composition seam: capture the three activity-producing
+	// interactors so the same-package composition regression test can
+	// verify (via their ActivityWriterSeam accessors) that normal
+	// setupApp wiring selects the explicit no-op writer and never the
+	// PostgreSQL repository. Test-read only; carries no runtime role.
+	composedActivityProducers = activityProducerComposition{
+		roomQueue:     roomQueueInteractor,
+		roomVote:      roomVoteInteractor,
+		roomAutoQueue: roomAutoQueueInteractor,
+	}
 
 	// Wire auto-queue broadcaster to WS hub
 	autoQueueInteractor.SetBroadcaster(hub.Broadcast)
