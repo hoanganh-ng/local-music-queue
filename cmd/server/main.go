@@ -46,20 +46,6 @@ func envMode(isLocal bool) string {
 	return "production"
 }
 
-// activityProducerComposition captures the three activity-producing
-// interactors wired by setupApp so the same-package composition
-// regression test can confirm — through their narrow
-// ActivityWriterSeam accessors — that each one received the explicit
-// no-op writer. It is written once during setupApp and read only by
-// tests; it has no production behavior.
-type activityProducerComposition struct {
-	roomQueue     *usecaseRoomQueue.Interactor
-	roomVote      *usecaseRoomVote.Interactor
-	roomAutoQueue *usecaseRoomAutoQueue.Interactor
-}
-
-var composedActivityProducers activityProducerComposition
-
 func main() {
 	mux, cfg, policy, roomWSHub, roomVoteInteractor, cleanup, err := setupApp()
 	if err != nil {
@@ -101,6 +87,23 @@ func main() {
 }
 
 func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, *usecaseRoomVote.Interactor, func(), error) {
+	return setupAppWithActivityObserver(nil)
+}
+
+// setupAppWithActivityObserver runs the real composition path. When a
+// non-nil observer is supplied (same-package composition tests only),
+// it is invoked once with the three activity-producing interactors of
+// exactly this invocation, after all three are wired. The observer is a
+// local parameter — no package-level state is written — so repeated
+// invocations cannot leak or observe each other's composition. main and
+// production callers go through setupApp, which passes nil.
+func setupAppWithActivityObserver(
+	observer func(
+		*usecaseRoomQueue.Interactor,
+		*usecaseRoomVote.Interactor,
+		*usecaseRoomAutoQueue.Interactor,
+	),
+) (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, *usecaseRoomVote.Interactor, func(), error) {
 	// 1. Load configuration
 	cfg := config.Load()
 	log.Printf("Starting Local Music Queue server on port %s", cfg.Port)
@@ -355,15 +358,14 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	roomVoteInteractor := usecaseRoomVote.NewInteractor(roomQueueInteractor, roomWSHub, 30*time.Second, noopRoomActivityWriter)
 	roomVoteHandlers := delivery.NewRoomVoteHandlers(roomVoteInteractor, roomQueueInteractor, authInteractor)
 
-	// R09i composition seam: capture the three activity-producing
-	// interactors so the same-package composition regression test can
-	// verify (via their ActivityWriterSeam accessors) that normal
-	// setupApp wiring selects the explicit no-op writer and never the
-	// PostgreSQL repository. Test-read only; carries no runtime role.
-	composedActivityProducers = activityProducerComposition{
-		roomQueue:     roomQueueInteractor,
-		roomVote:      roomVoteInteractor,
-		roomAutoQueue: roomAutoQueueInteractor,
+	// R09i composition seam: hand the three activity-producing
+	// interactors of this invocation to the test-supplied observer so
+	// the same-package composition regression test can verify (via
+	// their ActivityWriterSeam accessors) that normal wiring selects
+	// the explicit no-op writer and never the PostgreSQL repository.
+	// Nil in production; nothing is retained after the call.
+	if observer != nil {
+		observer(roomQueueInteractor, roomVoteInteractor, roomAutoQueueInteractor)
 	}
 
 	// Wire auto-queue broadcaster to WS hub
