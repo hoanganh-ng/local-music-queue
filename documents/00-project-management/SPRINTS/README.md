@@ -17,6 +17,7 @@ This directory contains documentation for active and past sprints.
 | 009    | SQLite-to-PostgreSQL Data Migration / R03            | Closed |
 | 010    | Room Domain, Invite, Membership, and Lifecycle / R04 | In progress — awaiting Architect review and Product Owner approval |
 | 020    | Allowed Origins and WebSocket Origin Policy / A01    | Closed (2026-06-26) — pending Product Owner acceptance             |
+| 027    | Room activity runtime parity / R09i                  | Closed and accepted (2026-07-28; PR #24; merge `c112000d`)         |
 
 ## File Naming
 
@@ -33,7 +34,7 @@ Sprints progress through defined lifecycle states:
 
 ## `active.md` Semantics
 
-The `active.md` file must always point to the single sprint that is currently in progress. It explicitly declares which sprint is authorized for work.
+The `active.md` file identifies the single sprint currently authorized for work. When no sprint has been activated, it must explicitly state that no sprint is active and must not imply authorization for the next planned sprint.
 
 ## Review/Approval Gates
 
