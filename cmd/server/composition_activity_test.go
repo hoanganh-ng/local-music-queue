@@ -1,13 +1,15 @@
 package main
 
-// R09i corrective regression: normal server composition must select the
-// explicit no-op room-activity repository for roomqueue, roomvote, and
-// roomautoqueue, and must NOT select PostgresRoomActivityRepository.
-// The check exercises the real composition path (not static source-text
-// inspection) through setupAppWithActivityObserver — a local observer
-// parameter, not package-level state — and reads the writer actually
-// held by each interactor through the narrow ActivityWriterSeam
-// accessors. Each invocation can observe only its own composition.
+// R09i/R14c composition regression: false-mode server composition must
+// select the explicit no-op room-activity repository for roomqueue,
+// roomvote, and roomautoqueue, and must NOT select
+// PostgresRoomActivityRepository (true-mode selection is pinned in
+// cutover_mode_test.go). The check exercises the real composition path
+// (not static source-text inspection) through
+// setupAppWithActivityObserver — a local observer parameter, not
+// package-level state — and reads the writer actually held by each
+// interactor through the narrow ActivityWriterSeam accessors. Each
+// invocation can observe only its own composition.
 
 import (
 	"os"
@@ -29,13 +31,15 @@ type activityComposition struct {
 }
 
 // runObservedSetup runs the real composition path once with a local
-// observer and returns the interactors observed by exactly that
-// invocation, plus the roomvote interactor setup returned.
-func runObservedSetup(t *testing.T) (activityComposition, *usecaseRoomVote.Interactor) {
+// observer and the given R14c mode, and returns the interactors
+// observed by exactly that invocation, plus the roomvote interactor
+// setup returned.
+func runObservedSetup(t *testing.T, opts setupOptions) (activityComposition, *usecaseRoomVote.Interactor) {
 	t.Helper()
 
 	var comp activityComposition
 	_, _, _, _, roomVoteInteractor, cleanup, err := setupAppWithActivityObserver(
+		opts,
 		func(rq *usecaseRoomQueue.Interactor, rv *usecaseRoomVote.Interactor, raq *usecaseRoomAutoQueue.Interactor) {
 			comp.roomQueue = rq
 			comp.roomVote = rv
@@ -65,7 +69,7 @@ func TestSetupApp_ComposesNoopRoomActivityWriter(t *testing.T) {
 	os.Setenv("DATABASE_URL", scopedDSN)
 	defer os.Unsetenv("DATABASE_URL")
 
-	comp, roomVoteInteractor := runObservedSetup(t)
+	comp, roomVoteInteractor := runObservedSetup(t, setupOptions{})
 	if comp.roomVote != roomVoteInteractor {
 		t.Error("observed roomvote interactor is not the one setup returned")
 	}
@@ -111,8 +115,8 @@ func TestSetupApp_ObserverSeesOnlyOwnInvocation(t *testing.T) {
 	os.Setenv("DATABASE_URL", scopedDSN)
 	defer os.Unsetenv("DATABASE_URL")
 
-	first, _ := runObservedSetup(t)
-	second, _ := runObservedSetup(t)
+	first, _ := runObservedSetup(t, setupOptions{})
+	second, _ := runObservedSetup(t, setupOptions{})
 
 	if first.roomQueue == second.roomQueue ||
 		first.roomVote == second.roomVote ||
@@ -140,7 +144,7 @@ func TestSetupApp_ObserverSeesOnlyOwnInvocation(t *testing.T) {
 
 	// A nil observer (the production setupApp path) must not disturb a
 	// previously captured composition.
-	_, _, _, _, _, cleanup, err := setupApp()
+	_, _, _, _, _, cleanup, err := setupApp(setupOptions{})
 	if err != nil {
 		t.Fatalf("setupApp: %v", err)
 	}

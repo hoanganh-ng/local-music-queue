@@ -5,6 +5,11 @@ ARG VITE_GOOGLE_CLIENT_ID
 ENV VITE_GOOGLE_CLIENT_ID=$VITE_GOOGLE_CLIENT_ID
 ARG VITE_API_BASE_URL
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+# R14c: build-time cutover mode. Supplied by docker-compose from the single
+# operator input ROOM_CUTOVER_AUTHORITATIVE so the bundle is always baked
+# with the same mode the backend runs with. Defaults to false (pre-cutover).
+ARG VITE_ROOM_CUTOVER_AUTHORITATIVE=false
+ENV VITE_ROOM_CUTOVER_AUTHORITATIVE=$VITE_ROOM_CUTOVER_AUTHORITATIVE
 
 WORKDIR /app
 

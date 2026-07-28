@@ -40,6 +40,11 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: music-queue-backend
+    # R14c: the single operator input ROOM_CUTOVER_AUTHORITATIVE (default
+    # false) drives BOTH this backend runtime flag and the frontend build
+    # argument below, so the pair can never be deployed half-cut-over from
+    # one .env. The command mirrors the image CMD plus the explicit flag.
+    command: ["/bin/sh", "-c", "crond && /app/setup-certs.sh && exec /app/server --room-cutover-authoritative=${ROOM_CUTOVER_AUTHORITATIVE:-false}"]
     ports:
       - "${BACKEND_PORT:-443}:443"  # HTTPS
     environment:
@@ -69,6 +74,9 @@ services:
       args:
         VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID}
         VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+        # R14c: baked from the SAME operator input as the backend runtime
+        # flag above — one .env value flips both halves of the pair.
+        VITE_ROOM_CUTOVER_AUTHORITATIVE: ${ROOM_CUTOVER_AUTHORITATIVE:-false}
 
     container_name: music-queue-frontend
     ports:

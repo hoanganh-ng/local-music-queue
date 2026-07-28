@@ -67,7 +67,7 @@ func TestSetupApp(t *testing.T) {
 		os.Unsetenv("DATABASE_URL")
 	}()
 
-	mux, cfg, _, _, _, cleanup, err := setupApp()
+	mux, cfg, _, _, _, cleanup, err := setupApp(setupOptions{})
 	if err != nil {
 		t.Fatalf("setupApp failed: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestSetupApp_RegistersRoomWSRoute(t *testing.T) {
 	os.Setenv("DATABASE_URL", scopedDSN)
 	defer os.Unsetenv("DATABASE_URL")
 
-	mux, _, _, _, _, cleanup, err := setupApp()
+	mux, _, _, _, _, cleanup, err := setupApp(setupOptions{})
 	if err != nil {
 		t.Fatalf("setupApp: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestSetupApp_RegistersRoomVotePrioritizeRoute(t *testing.T) {
 	os.Setenv("DATABASE_URL", scopedDSN)
 	defer os.Unsetenv("DATABASE_URL")
 
-	mux, _, _, _, _, cleanup, err := setupApp()
+	mux, _, _, _, _, cleanup, err := setupApp(setupOptions{})
 	if err != nil {
 		t.Fatalf("setupApp: %v", err)
 	}
