@@ -20,6 +20,14 @@ vi.mock('../../views/AuthView.vue', () => ({ default: { template: '<div />' } })
 vi.mock('../../views/RoomView.vue', () => ({ default: { template: '<div />' } }))
 vi.mock('../../views/RoomEntryView.vue', () => ({ default: { template: '<div />' } }))
 
+// R14d: this file pins the FALSE (pre-cutover / rollback) artifact
+// behavior regardless of the process-level env the suite runs under.
+// The true-artifact router behavior is covered by cutover-modes.spec.js.
+vi.mock('../../config/cutover', () => ({
+  roomCutoverAuthoritative: false,
+  authenticatedLandingRouteName: () => 'Dashboard',
+}))
+
 // Stub the lazy import so the dynamic imports in the router
 // resolve synchronously under jsdom.
 vi.mock('../../views/__tests__/stub-empty', () => ({ default: { template: '<div />' } }))

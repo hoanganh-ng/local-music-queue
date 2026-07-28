@@ -6,13 +6,31 @@
       </div>
       <div class="user-info">
         <span class="user-name">{{ currentUser?.display_name }}</span>
+        <!-- R14d: the dashboard control only exists in the false
+             (pre-cutover / rollback) artifact. The true artifact has
+             no Dashboard route, so the control is hidden. -->
         <button
+          v-if="!roomCutoverAuthoritative"
           type="button"
           class="dashboard-btn"
           data-testid="dashboard-btn"
           @click="handleBack"
         >
           Back to dashboard
+        </button>
+        <!-- R14d: visible sign-out for the true artifact, where
+             RoomEntry is the authenticated landing surface and the
+             Dashboard's Exit control is unreachable. Mirrors the
+             Dashboard logout: clear session, clear user, go to Auth.
+             Never logs or exposes the session token. -->
+        <button
+          v-if="roomCutoverAuthoritative"
+          type="button"
+          class="dashboard-btn"
+          data-testid="sign-out-btn"
+          @click="handleSignOut"
+        >
+          Sign out
         </button>
       </div>
     </header>
@@ -217,6 +235,8 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { globalStore } from '../store'
 import { api } from '../services/api'
+import { sessionHelper } from '../services/session'
+import { roomCutoverAuthoritative } from '../config/cutover'
 import { useToast } from '../composables/useToast'
 import ToastContainer from '../components/ui/ToastContainer.vue'
 
@@ -432,6 +452,14 @@ function mapRedeemError(e) {
 
 function handleBack() {
   router.push({ name: 'Dashboard' })
+}
+
+// R14d: true-artifact sign-out. Reuses the existing session clear
+// behavior; never logs or exposes the session token.
+function handleSignOut() {
+  sessionHelper.clearSession()
+  globalStore.clearUser()
+  router.push({ name: 'Auth' })
 }
 
 onMounted(async () => {

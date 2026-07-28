@@ -38,6 +38,7 @@ import { useRouter } from 'vue-router'
 import { globalStore } from '../store'
 import { api } from '../services/api'
 import { sessionHelper } from '../services/session'
+import { authenticatedLandingRouteName } from '../config/cutover'
 
 const router = useRouter()
 const error = ref('')
@@ -53,7 +54,10 @@ onMounted(() => {
       const { session_token, session_expires_at, ...user } = responseData
       sessionHelper.saveSession(session_token, session_expires_at)
       globalStore.setUser(user)
-      router.push({ name: 'Dashboard' })
+      // R14d: shared cutover-aware landing decision (false mode →
+      // Dashboard; true mode → RoomEntry). Same helper as the router
+      // guard so the conditional is not duplicated.
+      router.push({ name: authenticatedLandingRouteName() })
     } catch (err) {
       error.value = err.message || "Failed to authenticate"
     } finally {

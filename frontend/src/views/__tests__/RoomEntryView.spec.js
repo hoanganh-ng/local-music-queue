@@ -15,6 +15,17 @@ vi.mock('../../services/api', () => ({ api: apiMock }))
 const toastMock = vi.hoisted(() => ({ error: vi.fn(), success: vi.fn(), info: vi.fn() }))
 vi.mock('../../composables/useToast', () => ({ useToast: () => toastMock }))
 
+// R14d: pin this suite to the pre-cutover (false) artifact so it stays
+// deterministic no matter which VITE_ROOM_CUTOVER_AUTHORITATIVE value the
+// whole test run is baked with. The true-artifact RoomEntry behavior
+// (hidden dashboard control, sign-out flow) is covered by
+// __tests__/cutover-modes.spec.js.
+vi.mock('../../config/cutover', () => ({
+  parseRoomCutoverAuthoritative: (raw) => raw === 'true',
+  roomCutoverAuthoritative: false,
+  authenticatedLandingRouteName: () => 'Dashboard',
+}))
+
 const pushMock = vi.hoisted(() => vi.fn())
 vi.mock('vue-router', async (importOriginal) => {
   const actual = await importOriginal()

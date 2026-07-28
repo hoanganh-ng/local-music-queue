@@ -30,17 +30,41 @@ const md5 = (str) => {
   }, 0).toString()
 }
 
+// R14d: fresh-state factories for the legacy global slices. Both the
+// initial store shape and retireLegacyGlobalRuntimeState() route
+// through these so a reset never reuses a mutable array or object
+// that older references could still mutate.
+const freshQueueState = () => ({
+  status: 'stopped', // playing, paused, stopped
+  current_song: null,
+  queue: [],
+  history: []
+})
+
+const freshVoteSessions = () => ({})
+
+const freshAutoQueueConfig = () => ({ enabled: false, strategy: 'related' })
+
 export const globalStore = reactive({
   currentUser: initialUser,
-  queueState: {
-    status: 'stopped', // playing, paused, stopped
-    current_song: null,
-    queue: [],
-    history: []
-  },
-  voteSessions: {}, // key: session.id → session object
-  autoQueueConfig: { enabled: false, strategy: 'related' }, // auto-queue config state
+  queueState: freshQueueState(),
+  voteSessions: freshVoteSessions(), // key: session.id → session object
+  autoQueueConfig: freshAutoQueueConfig(), // auto-queue config state
   connectionStatus: 'disconnected',
+
+  // R14d: explicit retirement of the legacy global runtime slices for
+  // the true (post-cutover) artifact. Resets queueState, voteSessions,
+  // autoQueueConfig, and the global connectionStatus to their
+  // documented initial values via fresh factories. It MUST preserve
+  // currentUser, the exact roomQueues object (same identity, every
+  // room entry intact), session storage, and room-local WebSocket
+  // state. Bootstrap (main.js) is the only production caller.
+  retireLegacyGlobalRuntimeState() {
+    this.queueState = freshQueueState()
+    this.voteSessions = freshVoteSessions()
+    this.autoQueueConfig = freshAutoQueueConfig()
+    this.connectionStatus = 'disconnected'
+  },
 
   setConnectionStatus(status) {
     this.connectionStatus = status
