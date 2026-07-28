@@ -1,4 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+
+// R14d: pin this suite to the pre-cutover (false) artifact so connect()
+// keeps constructing real sockets no matter which
+// VITE_ROOM_CUTOVER_AUTHORITATIVE value the whole test run is baked with.
+// The true-artifact gate (connect() refuses to open /ws) is covered by
+// __tests__/cutover-modes.spec.js.
+vi.mock('../../config/cutover', () => ({
+  parseRoomCutoverAuthoritative: (raw) => raw === 'true',
+  roomCutoverAuthoritative: false,
+  authenticatedLandingRouteName: () => 'Dashboard',
+}))
+
 import { wsClient } from '../websocket'
 import { globalStore } from '../../store'
 import { sessionHelper } from '../session'

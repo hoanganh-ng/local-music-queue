@@ -11,9 +11,20 @@ vi.mock('../../services/api', () => ({
   }
 }))
 
+// R14d: pin this suite to the pre-cutover (false) artifact so it stays
+// deterministic no matter which VITE_ROOM_CUTOVER_AUTHORITATIVE value the
+// whole test run is baked with. The true-artifact login landing
+// (RoomEntry) is covered by __tests__/cutover-modes.spec.js.
+vi.mock('../../config/cutover', () => ({
+  parseRoomCutoverAuthoritative: (raw) => raw === 'true',
+  roomCutoverAuthoritative: false,
+  authenticatedLandingRouteName: () => 'Dashboard',
+}))
+
+const pushMock = vi.hoisted(() => vi.fn())
 vi.mock('vue-router', () => ({
   useRouter: () => ({
-    push: vi.fn(),
+    push: pushMock,
   })
 }))
 
@@ -63,5 +74,9 @@ describe('AuthView', () => {
     expect(storedUser.session_token).toBeUndefined()
     expect(storedUser.session_expires_at).toBeUndefined()
     expect(storedUser.id).toBe(42)
+
+    // R14d (false artifact): successful login navigates to the shared
+    // authenticated landing decision — the Dashboard.
+    expect(pushMock).toHaveBeenCalledWith({ name: 'Dashboard' })
   })
 })

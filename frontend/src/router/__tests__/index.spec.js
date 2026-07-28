@@ -1,4 +1,13 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+
+// R14d: this file pins the FALSE (pre-cutover / rollback) artifact
+// behavior regardless of the process-level env the suite runs under.
+// The true-artifact router behavior is covered by cutover-modes.spec.js.
+vi.mock('../../config/cutover', () => ({
+  roomCutoverAuthoritative: false,
+  authenticatedLandingRouteName: () => 'Dashboard',
+}))
+
 import router from '../index'
 import { globalStore } from '../../store'
 import { sessionHelper } from '../../services/session'

@@ -2,7 +2,7 @@
 
 **Last refreshed:** 2026-07-28  
 **Branch:** `dev`  
-**Current active sprint:** None
+**Current active sprint:** R14d — Frontend global-path retirement behind the cutover build gate ([`SPRINTS/028-frontend-global-path-retirement.md`](./SPRINTS/028-frontend-global-path-retirement.md))
 
 ## Current state
 
@@ -29,7 +29,7 @@ Completed and accepted prerequisites:
 - R14b — schema and offline room-cutover mechanism
 - R09i — room activity runtime parity
 
-R14d is the next planned sprint, but it has not been activated. R14d, R14c, and R14e remain inactive.
+R14d was activated on 2026-07-28 on branch `sprint/r14d-frontend-global-path-retirement`, cut from `dev` at the approved base commit `f9760693e174344dba4bccd92fde22c281b3a4e5`. R14d is frontend-only. R14c and R14e remain inactive, and production cutover has not been executed.
 
 R14c retains ownership of the coordinated production cutover, the runtime `--room-cutover-authoritative` guard, validation of schema version 9 plus the durable `room_cutover_marker`, and selecting the real PostgreSQL room-activity writer only after legacy activities have been copied and `room_activities_id_seq` has been resynchronized. The Go backend must not consume the SPA gate. R14d behavior remains gated by the Vite build-time `VITE_ROOM_CUTOVER_AUTHORITATIVE` switch and activates only through the coordinated R14c deployment. R14e retains ownership of schema version 10 and removal of legacy global tables.
 

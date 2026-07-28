@@ -1,5 +1,6 @@
 import { globalStore } from '../store'
 import { sessionHelper } from './session'
+import { roomCutoverAuthoritative } from '../config/cutover'
 
 // hasAuthoritativeFields returns true when the backend payload carries the
 // Sprint 004 authoritative post-mutation fields. Legacy backends omit them.
@@ -60,6 +61,10 @@ class WebSocketClient {
     this.isConnecting = false
     this.lastSeqNum = 0
     this.pendingFullSync = false
+    // R14d: marks a deliberate disconnect() so the socket's onclose
+    // callback never schedules a reconnect. connect() (false mode
+    // only) clears it, deliberately re-enabling normal reconnection.
+    this.intentionalClose = false
     this.callbacks = {
       songAdded: [],
       voteEvent: []
@@ -97,8 +102,16 @@ class WebSocketClient {
   }
 
   connect() {
+    // R14d: the true (post-cutover) artifact must never open the
+    // legacy global /ws. An accidental connect() call is a no-op:
+    // no WebSocket is constructed, no reconnect is scheduled, and
+    // the status stays disconnected.
+    if (roomCutoverAuthoritative) return
     if (this.ws || this.isConnecting) return
 
+    // A fresh false-mode connect deliberately re-enables normal
+    // reconnection after a prior intentional disconnect.
+    this.intentionalClose = false
     this.isConnecting = true
     globalStore.setConnectionStatus('connecting')
 
@@ -118,8 +131,14 @@ class WebSocketClient {
     // Do not log the raw URL — it may contain a session token.
     console.log('Connecting to WebSocket')
     this.ws = new WebSocket(wsUrl)
+    // R14d: capture the socket this set of callbacks belongs to. A
+    // stale callback (from a socket that disconnect() already
+    // detached, or that a newer connect() replaced) must never
+    // mutate client state or restart the reconnect loop.
+    const socket = this.ws
 
     this.ws.onopen = () => {
+      if (this.ws !== socket) return
       console.log('WebSocket connected')
       this.isConnecting = false
       this.pendingFullSync = false
@@ -132,6 +151,7 @@ class WebSocketClient {
     }
 
     this.ws.onmessage = (event) => {
+      if (this.ws !== socket) return
       try {
         const data = JSON.parse(event.data)
         this.handleMessage(data)
@@ -141,6 +161,13 @@ class WebSocketClient {
     }
 
     this.ws.onclose = () => {
+      // R14d: an intentional disconnect() (or any stale socket's
+      // late onclose) must never flip the status back to
+      // reconnecting or schedule a reconnect. disconnect() already
+      // detached the socket (this.ws = null) before close(), so the
+      // identity check covers both cases; the intentionalClose flag
+      // is the explicit belt-and-braces contract marker.
+      if (this.ws !== socket || this.intentionalClose) return
       console.log('WebSocket disconnected. Attempting to reconnect in 3 seconds...')
       this.ws = null
       this.isConnecting = false
@@ -150,6 +177,7 @@ class WebSocketClient {
     }
 
     this.ws.onerror = (error) => {
+      if (this.ws !== socket) return
       console.error('WebSocket error:', error)
       globalStore.setConnectionStatus('disconnected')
       this.ws.close()
@@ -314,6 +342,9 @@ class WebSocketClient {
   }
 
   scheduleReconnect() {
+    // R14d: never schedule a reconnect after an intentional close,
+    // and never in the true (post-cutover) artifact.
+    if (this.intentionalClose || roomCutoverAuthoritative) return
     if (!this.reconnectTimer) {
       this.reconnectTimer = setTimeout(() => {
         this.reconnectTimer = null
@@ -333,14 +364,21 @@ class WebSocketClient {
   }
 
   disconnect() {
-    if (this.ws) {
-      this.ws.close()
+    // R14d: mark the close as intentional BEFORE closing so the
+    // socket's onclose callback cannot schedule a reconnect, then
+    // cancel any pending reconnect timer. Status ends (and stays)
+    // disconnected. A later false-mode connect() deliberately
+    // re-enables normal reconnection by clearing the flag.
+    this.intentionalClose = true
+    const ws = this.ws
+    this.ws = null
+    if (ws) {
+      ws.close()
     }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
     }
-    this.ws = null
     this.isConnecting = false
     globalStore.setConnectionStatus('disconnected')
   }
