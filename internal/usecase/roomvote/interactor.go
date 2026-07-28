@@ -24,6 +24,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +68,14 @@ type Resolver interface {
 	UniqueConnectedUserIDs(roomSlug string) int
 }
 
+// ActivityWriter is the narrow R09i seam roomvote uses to append
+// room-scoped activities. cmd/server injects the explicit no-op
+// implementation pre-R14c; the shape matches
+// repository.RoomActivityRepository.AddActivity.
+type ActivityWriter interface {
+	AddActivity(ctx context.Context, roomID int64, activity entity.Activity) error
+}
+
 // Interactor owns the room-scoped vote use cases. Votes are stored
 // ONLY in memory; nothing here persists to Postgres.
 type Interactor struct {
@@ -75,6 +85,11 @@ type Interactor struct {
 	sessions   map[string]*entity.VoteSession // "skip:{slug}:{songID}"
 	expiry     time.Duration
 	now        func() time.Time
+	// activityWriter is the R09i room-activity seam. Ordered vote
+	// activity batches are appended best-effort AFTER the session
+	// mutex is released; a write failure NEVER fails the vote flow.
+	// nil is tolerated (no activities are produced).
+	activityWriter ActivityWriter
 }
 
 // NewInteractor constructs a vote interactor. resolver may be nil in
@@ -82,17 +97,50 @@ type Interactor struct {
 // case); expiry defaults to 30s when zero. queueInter is the slice of
 // the roomqueue interactor the vote use cases need; production wiring
 // passes the real *roomqueue.Interactor (which satisfies QueueSkipping
-// implicitly).
-func NewInteractor(queueInter QueueSkipping, resolver Resolver, expiry time.Duration) *Interactor {
+// implicitly). activityWriter may be nil (activity production
+// disabled).
+func NewInteractor(queueInter QueueSkipping, resolver Resolver, expiry time.Duration, activityWriter ActivityWriter) *Interactor {
 	if expiry == 0 {
 		expiry = 30 * time.Second
 	}
 	return &Interactor{
-		queueInter: queueInter,
-		resolver:   resolver,
-		sessions:   make(map[string]*entity.VoteSession),
-		expiry:     expiry,
-		now:        time.Now,
+		queueInter:     queueInter,
+		resolver:       resolver,
+		sessions:       make(map[string]*entity.VoteSession),
+		expiry:         expiry,
+		now:            time.Now,
+		activityWriter: activityWriter,
+	}
+}
+
+// ActivityWriterSeam returns the wired activity writer, or nil when
+// unset. Read-only; its sole consumer is the cmd/server composition
+// regression test, which verifies normal wiring selects the explicit
+// no-op writer (pre-R14c) rather than the PostgreSQL repository.
+func (i *Interactor) ActivityWriterSeam() ActivityWriter { return i.activityWriter }
+
+// actorName resolves the activity actor label: the authenticated
+// display name when present, otherwise the canonical "user #<id>"
+// fallback (R09i actor identity rule).
+func actorName(displayName string, userID int) string {
+	if strings.TrimSpace(displayName) == "" {
+		return fmt.Sprintf("user #%d", userID)
+	}
+	return displayName
+}
+
+// appendActivities writes one ordered activity batch sequentially,
+// best-effort. Callers MUST invoke it after releasing i.mu (the R09i
+// lock rule). A failed append is logged (room id/slug + type only)
+// and the remaining batch continues.
+func (i *Interactor) appendActivities(ctx context.Context, roomID int64, slug string, acts []entity.Activity) {
+	if i.activityWriter == nil || roomID == 0 {
+		return
+	}
+	for _, a := range acts {
+		if err := i.activityWriter.AddActivity(ctx, roomID, a); err != nil {
+			log.Printf("room activity: room %d (%s): append %s failed: %v", roomID, slug, a.Type, err)
+		}
 	}
 }
 
@@ -129,8 +177,8 @@ type Outcome struct {
 	// the evicted session before broadcasting RoomVoteUpdated for the
 	// new session. All three fields are zero-valued when no eviction
 	// happened.
-	ExpiredID     string
-	ExpiredQueue  *entity.Queue
+	ExpiredID      string
+	ExpiredQueue   *entity.Queue
 	ExpiredSession *entity.VoteSession
 }
 
@@ -196,21 +244,34 @@ type PrioritizeOutcome struct {
 // fans out RoomVoteResolved + room_playback_song_advanced.
 //
 // Errors:
-//   room.ErrInvalidSlug        → malformed slug
-//   room.ErrRoomNotFound       → no room for slug
-//   room.ErrArchived           → room archived
-//   room.ErrForbidden          → actor is not an active member
-//   entity.ErrNoCurrentSong    → queue has no current song
-//   entity.ErrAlreadyVoted     → this user already voted
-//   entity.ErrVoteSessionExpired → session existed but expired (race
-//                                 against the clock after eviction)
-//   ErrStaleSession            → vote passed but SkipVote refused
-//                                 because the queue advanced under us
+//
+//	room.ErrInvalidSlug        → malformed slug
+//	room.ErrRoomNotFound       → no room for slug
+//	room.ErrArchived           → room archived
+//	room.ErrForbidden          → actor is not an active member
+//	entity.ErrNoCurrentSong    → queue has no current song
+//	entity.ErrAlreadyVoted     → this user already voted
+//	entity.ErrVoteSessionExpired → session existed but expired (race
+//	                              against the clock after eviction)
+//	ErrStaleSession            → vote passed but SkipVote refused
+//	                              because the queue advanced under us
 //
 // Actor identity comes ONLY from the resolved session token (the
 // handler reads actorFromCtx). The actorUserID parameter is
 // authoritative; body-supplied identity is ignored.
-func (i *Interactor) CastSkipVote(ctx context.Context, slug string, actorUserID int) (*Outcome, error) {
+// actorDisplayName is the backend-resolved display name used only for
+// activity attribution; blank falls back to "user #<id>".
+func (i *Interactor) CastSkipVote(ctx context.Context, slug string, actorUserID int, actorDisplayName string) (*Outcome, error) {
+	// R09i: ordered activity batch (expired → cast → passed → action)
+	// written AFTER the session mutex is released. The defer is
+	// registered BEFORE the Lock so Go's LIFO defer ordering runs the
+	// unlock first, then the sequential batch write.
+	var pendingRoomID int64
+	var pending []entity.Activity
+	defer func() {
+		i.appendActivities(ctx, pendingRoomID, slug, pending)
+	}()
+
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
@@ -254,6 +315,7 @@ func (i *Interactor) CastSkipVote(ctx context.Context, slug string, actorUserID 
 		}
 		return nil, fmt.Errorf("get room: %w", err)
 	}
+	pendingRoomID = roomObj.ID
 
 	if !i.queueInter.IsMember(ctx, roomObj.ID, actorUserID) {
 		return nil, room.ErrForbidden
@@ -300,6 +362,18 @@ func (i *Interactor) CastSkipVote(ctx context.Context, slug string, actorUserID 
 	}
 	out.Session = session
 
+	// R09i: the ballot was accepted — record the eviction's vote_expired
+	// (if any) before this ballot's vote_cast. A rejected ballot above
+	// records nothing (including the eviction, which is coupled to the
+	// replacement ballot per the R09i ordering contract).
+	if out.Resolution == "expired" && out.ExpiredSession != nil {
+		pending = append(pending, entity.NewActivity(entity.ActivityVoteExpired, "System",
+			fmt.Sprintf("vote to %s \"%s\" expired", out.ExpiredSession.Type, out.ExpiredSession.SongTitle)))
+	}
+	actor := actorName(actorDisplayName, actorUserID)
+	pending = append(pending, entity.NewActivity(entity.ActivityVoteCast, actor,
+		fmt.Sprintf("voted to %s \"%s\" (%d/%d)", session.Type, session.SongTitle, session.VoteCount(), session.Threshold)))
+
 	// Threshold path.
 	if !session.IsPassed() {
 		return out, nil
@@ -322,6 +396,9 @@ func (i *Interactor) CastSkipVote(ctx context.Context, slug string, actorUserID 
 			// eviction-side "expired" resolution (if any) is also
 			// suppressed — the queue advanced, the old session is
 			// moot either way.
+			// R09i: only the already-recorded vote_cast (and any
+			// eviction vote_expired) stand; no vote_passed / action
+			// activity on the stale branch.
 			out.Resolution = ""
 			return out, ErrStaleSession
 		}
@@ -333,6 +410,14 @@ func (i *Interactor) CastSkipVote(ctx context.Context, slug string, actorUserID 
 	out.AdvancePrev = prevIdx
 	out.AdvanceNext = newIdx
 	out.AdvanceSong = newSong
+	// R09i: the queue action succeeded — record vote_passed then the
+	// decisive-actor skip action, after the already-recorded vote_cast.
+	pending = append(pending,
+		entity.NewActivity(entity.ActivityVotePassed, "System",
+			fmt.Sprintf("vote to %s \"%s\" passed", session.Type, session.SongTitle)),
+		entity.NewActivity(entity.ActivitySongSkipped, actor,
+			fmt.Sprintf("vote skipped \"%s\"", session.SongTitle)),
+	)
 	return out, nil
 }
 
@@ -355,26 +440,38 @@ func (i *Interactor) CastSkipVote(ctx context.Context, slug string, actorUserID 
 // and MUST NOT touch priority balances.
 //
 // Errors:
-//   room.ErrInvalidSlug        → malformed slug
-//   room.ErrRoomNotFound       → no room for slug
-//   room.ErrArchived           → room archived
-//   room.ErrForbidden          → actor is not an active member
-//   roomqueue.ErrInvalidIndex  → songIndex out of range
-//   entity.ErrVoteOnCurrentSong → songIndex identifies the current song
-//                                (at cast time OR the target became the
-//                                current song under a passing vote)
-//   entity.ErrAlreadyVoted     → this user already voted this session
-//   entity.ErrVoteSessionExpired → session existed but expired
-//   ErrStalePrioritizeSession  → a live session for this song ID exists
-//                                at a DIFFERENT index (same-ID/different-
-//                                entry conflict), OR the vote passed but
-//                                PrioritizeVote refused because the
-//                                target moved / was removed under us
+//
+//	room.ErrInvalidSlug        → malformed slug
+//	room.ErrRoomNotFound       → no room for slug
+//	room.ErrArchived           → room archived
+//	room.ErrForbidden          → actor is not an active member
+//	roomqueue.ErrInvalidIndex  → songIndex out of range
+//	entity.ErrVoteOnCurrentSong → songIndex identifies the current song
+//	                             (at cast time OR the target became the
+//	                             current song under a passing vote)
+//	entity.ErrAlreadyVoted     → this user already voted this session
+//	entity.ErrVoteSessionExpired → session existed but expired
+//	ErrStalePrioritizeSession  → a live session for this song ID exists
+//	                             at a DIFFERENT index (same-ID/different-
+//	                             entry conflict), OR the vote passed but
+//	                             PrioritizeVote refused because the
+//	                             target moved / was removed under us
 //
 // Actor identity comes ONLY from the resolved session token; the
 // actorUserID parameter is authoritative and body-supplied identity is
-// ignored by the caller.
-func (i *Interactor) CastPrioritizeVote(ctx context.Context, slug string, songIndex, actorUserID int) (*PrioritizeOutcome, error) {
+// ignored by the caller. actorDisplayName is the backend-resolved
+// display name used only for activity attribution; blank falls back to
+// "user #<id>".
+func (i *Interactor) CastPrioritizeVote(ctx context.Context, slug string, songIndex, actorUserID int, actorDisplayName string) (*PrioritizeOutcome, error) {
+	// R09i: ordered activity batch (expired → cast → passed → action)
+	// written AFTER the session mutex is released (defer registered
+	// BEFORE the Lock — see CastSkipVote).
+	var pendingRoomID int64
+	var pending []entity.Activity
+	defer func() {
+		i.appendActivities(ctx, pendingRoomID, slug, pending)
+	}()
+
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
@@ -389,6 +486,7 @@ func (i *Interactor) CastPrioritizeVote(ctx context.Context, slug string, songIn
 		}
 		return nil, fmt.Errorf("get room: %w", err)
 	}
+	pendingRoomID = roomObj.ID
 
 	if !i.queueInter.IsMember(ctx, roomObj.ID, actorUserID) {
 		return nil, room.ErrForbidden
@@ -457,6 +555,16 @@ func (i *Interactor) CastPrioritizeVote(ctx context.Context, slug string, songIn
 	}
 	out.Session = session
 
+	// R09i: the ballot was accepted — record the eviction's vote_expired
+	// (if any) before this ballot's vote_cast (see CastSkipVote).
+	if out.Resolution == "expired" && out.ExpiredSession != nil {
+		pending = append(pending, entity.NewActivity(entity.ActivityVoteExpired, "System",
+			fmt.Sprintf("vote to %s \"%s\" expired", out.ExpiredSession.Type, out.ExpiredSession.SongTitle)))
+	}
+	actor := actorName(actorDisplayName, actorUserID)
+	pending = append(pending, entity.NewActivity(entity.ActivityVoteCast, actor,
+		fmt.Sprintf("voted to %s \"%s\" (%d/%d)", session.Type, session.SongTitle, session.VoteCount(), session.Threshold)))
+
 	if !session.IsPassed() {
 		return out, nil
 	}
@@ -471,6 +579,9 @@ func (i *Interactor) CastPrioritizeVote(ctx context.Context, slug string, songIn
 	if err != nil {
 		if errors.Is(err, roomqueue.ErrStalePrioritizeVote) {
 			out.StaleSession = true
+			// R09i: only the already-recorded vote_cast (and any
+			// eviction vote_expired) stand; no vote_passed / action
+			// activity on the stale branch.
 			out.Resolution = ""
 			return out, ErrStalePrioritizeSession
 		}
@@ -482,6 +593,15 @@ func (i *Interactor) CastPrioritizeVote(ctx context.Context, slug string, songIn
 	out.FromIndex = fromIdx
 	out.ToIndex = toIdx
 	out.PrioritizeSong = song
+	// R09i: the queue action succeeded — record vote_passed then the
+	// decisive-actor prioritize action, after the already-recorded
+	// vote_cast.
+	pending = append(pending,
+		entity.NewActivity(entity.ActivityVotePassed, "System",
+			fmt.Sprintf("vote to %s \"%s\" passed", session.Type, session.SongTitle)),
+		entity.NewActivity(entity.ActivityPlayback, actor,
+			fmt.Sprintf("vote prioritized \"%s\"", session.SongTitle)),
+	)
 	return out, nil
 }
 
@@ -495,6 +615,22 @@ func (i *Interactor) CastPrioritizeVote(ctx context.Context, slug string, songIn
 // sessions so it matches room_vote_updated; skip sessions keep the
 // internal map key to preserve the accepted R09b contract.
 func (i *Interactor) ExpireSessions(ctx context.Context) ([]ExpiredOutcome, error) {
+	// R09i: one System vote_expired per evicted session, written AFTER
+	// the session mutex is released (defer registered BEFORE the Lock).
+	// Sessions whose room cannot be resolved are skipped (no room id to
+	// attribute the activity to).
+	type pendingExpiry struct {
+		roomID int64
+		slug   string
+		act    entity.Activity
+	}
+	var pendingActs []pendingExpiry
+	defer func() {
+		for _, p := range pendingActs {
+			i.appendActivities(ctx, p.roomID, p.slug, []entity.Activity{p.act})
+		}
+	}()
+
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	now := i.now()
@@ -508,6 +644,14 @@ func (i *Interactor) ExpireSessions(ctx context.Context) ([]ExpiredOutcome, erro
 		var q *entity.Queue
 		if r, err := i.queueInter.RoomBySlug(ctx, slug); err == nil {
 			q, _ = i.queueInter.GetStateByRoomID(ctx, r.ID)
+			if s != nil {
+				pendingActs = append(pendingActs, pendingExpiry{
+					roomID: r.ID,
+					slug:   slug,
+					act: entity.NewActivity(entity.ActivityVoteExpired, "System",
+						fmt.Sprintf("vote to %s \"%s\" expired", s.Type, s.SongTitle)),
+				})
+			}
 		}
 		// Prioritize outcomes must carry the SAME session identifier a
 		// client saw on room_vote_updated and the passed / expired-on-

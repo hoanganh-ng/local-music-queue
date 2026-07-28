@@ -108,11 +108,11 @@ type queueSnapshotLoader func(ctx context.Context, roomID int64) (*entity.Queue,
 
 // Interactor orchestrates per-room auto-queue triggers.
 type Interactor struct {
-	roomRepo          repository.RoomRepository
-	autoQueueRepo     domain.RoomAutoQueueRepository
-	fetcher           domain.RelatedSongFetcher
-	addRoomAutoSongFn AddRoomAutoQueueSongFunc
-	broadcaster       RoomAutoQueueBroadcaster
+	roomRepo            repository.RoomRepository
+	autoQueueRepo       domain.RoomAutoQueueRepository
+	fetcher             domain.RelatedSongFetcher
+	addRoomAutoSongFn   AddRoomAutoQueueSongFunc
+	broadcaster         RoomAutoQueueBroadcaster
 	queueSnapshotLoader queueSnapshotLoader
 
 	// mu serializes:
@@ -132,25 +132,50 @@ type Interactor struct {
 	// critical section, and SetEnabled's SaveConfig write.
 	mu       sync.Mutex
 	inFlight map[int64]bool // roomID -> in-flight flag
+
+	// activityWriter is the R09i room-activity seam. The System
+	// song_added activity is appended best-effort AFTER the
+	// coordinator mu is released and ONLY after a successful
+	// insertion; a write failure NEVER fails the trigger. nil is
+	// tolerated (no activities are produced).
+	activityWriter ActivityWriter
+}
+
+// ActivityWriter is the narrow R09i seam roomautoqueue uses to append
+// room-scoped activities. cmd/server injects the explicit no-op
+// implementation pre-R14c; the shape matches
+// repository.RoomActivityRepository.AddActivity.
+type ActivityWriter interface {
+	AddActivity(ctx context.Context, roomID int64, activity entity.Activity) error
 }
 
 // NewInteractor creates a per-room auto-queue Interactor. The
 // roomRepo is used for slug-to-roomid resolution (the broadcaster
 // and trigger receive slugs, but the coordinator map is keyed by
 // room id so a slug->id lookup runs once per CheckAndTrigger).
-func NewInteractor(roomRepo repository.RoomRepository, autoQueueRepo domain.RoomAutoQueueRepository, fetcher domain.RelatedSongFetcher) *Interactor {
+// activityWriter may be nil (activity production disabled).
+func NewInteractor(roomRepo repository.RoomRepository, autoQueueRepo domain.RoomAutoQueueRepository, fetcher domain.RelatedSongFetcher, activityWriter ActivityWriter) *Interactor {
 	return &Interactor{
-		roomRepo:      roomRepo,
-		autoQueueRepo: autoQueueRepo,
-		fetcher:       fetcher,
-		inFlight:      map[int64]bool{},
+		roomRepo:       roomRepo,
+		autoQueueRepo:  autoQueueRepo,
+		fetcher:        fetcher,
+		inFlight:       map[int64]bool{},
+		activityWriter: activityWriter,
 	}
 }
+
+// ActivityWriterSeam returns the wired activity writer, or nil when
+// unset. Read-only; its sole consumer is the cmd/server composition
+// regression test, which verifies normal wiring selects the explicit
+// no-op writer (pre-R14c) rather than the PostgreSQL repository.
+func (i *Interactor) ActivityWriterSeam() ActivityWriter { return i.activityWriter }
 
 // SetAddRoomAutoQueueSongFunc wires the roomqueue conditional
 // insertion seam. Mandatory; without it CheckAndTrigger refuses to
 // perform a candidate insertion (mirrors the global contract).
-func (i *Interactor) SetAddRoomAutoQueueSongFunc(fn AddRoomAutoQueueSongFunc) { i.addRoomAutoSongFn = fn }
+func (i *Interactor) SetAddRoomAutoQueueSongFunc(fn AddRoomAutoQueueSongFunc) {
+	i.addRoomAutoSongFn = fn
+}
 
 // SetBroadcaster wires the typed narrow broadcaster seam.
 func (i *Interactor) SetBroadcaster(b RoomAutoQueueBroadcaster) { i.broadcaster = b }
@@ -231,26 +256,27 @@ func (i *Interactor) SetEnabled(ctx context.Context, slug string, actorUserID in
 // Serialization contract (mirrors the global autoqueue contract):
 //
 //   - Pre-fetch (under mu):
-//       1. cfg = autoQueueRepo.GetConfig(roomID) (outside mu; see below)
-//       2. queue = queueSnapshotLoader(roomID) (outside mu; see below)
-//       3. mu is taken to check+set the per-room in-flight flag
-//          (returns nil if another trigger for THIS room is in
-//          flight — cross-room triggers are independent).
+//     1. cfg = autoQueueRepo.GetConfig(roomID) (outside mu; see below)
+//     2. queue = queueSnapshotLoader(roomID) (outside mu; see below)
+//     3. mu is taken to check+set the per-room in-flight flag
+//     (returns nil if another trigger for THIS room is in
+//     flight — cross-room triggers are independent).
 //
 //   - FetchRelated: held outside any lock.
 //
 //   - Post-fetch (under mu + serialized with SetEnabled):
-//       1. cfg is re-read; if disabled-mid-flight, candidate is
-//          dropped with no save, no history, no activity, no
-//          broadcast.
-//       2. addRoomAutoSongFn(slug, song, expectedSourceSongID) is
-//          invoked WHILE STILL HOLDING mu.
-//       3. mu is RELEASED IMMEDIATELY after the insertion call.
-//          History append and broadcaster call run OUTSIDE mu.
+//     1. cfg is re-read; if disabled-mid-flight, candidate is
+//     dropped with no save, no history, no activity, no
+//     broadcast.
+//     2. addRoomAutoSongFn(slug, song, expectedSourceSongID) is
+//     invoked WHILE STILL HOLDING mu.
+//     3. mu is RELEASED IMMEDIATELY after the insertion call.
+//     History append and broadcaster call run OUTSIDE mu.
 //
 //   - Returning:
-//       - The per-room in-flight flag is cleared BEFORE
-//         CheckAndTrigger returns.
+//
+//   - The per-room in-flight flag is cleared BEFORE
+//     CheckAndTrigger returns.
 func (i *Interactor) CheckAndTrigger(ctx context.Context, slug string) error {
 	roomObj, err := i.resolveRoom(ctx, slug)
 	if err != nil {
@@ -384,6 +410,15 @@ func (i *Interactor) CheckAndTrigger(ctx context.Context, slug string) error {
 	}
 
 	// mu released: downstream work runs outside the per-room mutex.
+	// R09i: successful insertion — append the System song_added
+	// activity best-effort, synchronously, outside the coordinator mu.
+	// Failed / stale / dropped candidates above record nothing.
+	if i.activityWriter != nil {
+		act := entity.NewActivity(entity.ActivitySongAdded, "System", fmt.Sprintf("added \"%s\"", song.Title))
+		if err := i.activityWriter.AddActivity(ctx, roomID, act); err != nil {
+			log.Printf("room activity: room %d (%s): append %s failed: %v", roomID, slug, act.Type, err)
+		}
+	}
 	historyEntry := domain.RoomPlayHistoryEntry{
 		VideoID:  lastSong.ID,
 		Title:    lastSong.Title,

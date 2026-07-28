@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"local-music-queue/internal/domain/entity"
@@ -45,13 +46,13 @@ var (
 	// usecase/room.Err* — they already do for the prior queue ops).
 	// ErrNoCurrentSong and ErrNoNextSong mirror the entity-layer
 	// sentinels for the same reason.
-	ErrNoCurrentSong      = errors.New("no current song")
-	ErrNoNextSong         = errors.New("no next song in queue")
-	ErrInvalidStatus      = errors.New("invalid playback status")
-	ErrInvalidElapsed     = errors.New("invalid elapsed value")
-	ErrPlaybackForbidden  = errors.New("not lease holder")
-	ErrPlaybackLeaseGone  = errors.New("player lease gone (past grace)")
-	ErrPlaybackLeaseLost  = errors.New("player lease not found")
+	ErrNoCurrentSong     = errors.New("no current song")
+	ErrNoNextSong        = errors.New("no next song in queue")
+	ErrInvalidStatus     = errors.New("invalid playback status")
+	ErrInvalidElapsed    = errors.New("invalid elapsed value")
+	ErrPlaybackForbidden = errors.New("not lease holder")
+	ErrPlaybackLeaseGone = errors.New("player lease gone (past grace)")
+	ErrPlaybackLeaseLost = errors.New("player lease not found")
 	// R09b: SkipVote is called by the vote interactor only after the
 	// vote session for the current song has been won. The expected
 	// current-song ID comes from the vote session's stored song at
@@ -123,15 +124,60 @@ type Interactor struct {
 	// tolerated (no per-room triggers fire when unset — mirrors the
 	// global queue.AutoQueueTrigger seam).
 	autoQueueUC RoomAutoQueueTrigger
+	// activityWriter is the R09i room-activity seam. Successful
+	// mutations append a best-effort activity AFTER the mutation mutex
+	// is released; a write failure NEVER fails the primary operation.
+	// nil is tolerated (no activities are produced).
+	activityWriter ActivityWriter
+}
+
+// ActivityWriter is the narrow R09i seam roomqueue uses to append
+// room-scoped activities. cmd/server injects the explicit no-op
+// implementation pre-R14c; the shape matches
+// repository.RoomActivityRepository.AddActivity so the PostgreSQL
+// writer can be swapped in by a later sprint without code changes here.
+type ActivityWriter interface {
+	AddActivity(ctx context.Context, roomID int64, activity entity.Activity) error
 }
 
 // NewInteractor constructs a room queue interactor. youtube may be nil
 // in tests that only exercise metadata-supplied Add paths.
-func NewInteractor(roomRepo repository.RoomRepository, queueRepo repository.RoomQueueRepository, youtube service.YouTubeService) *Interactor {
+// activityWriter may be nil (activity production disabled).
+func NewInteractor(roomRepo repository.RoomRepository, queueRepo repository.RoomQueueRepository, youtube service.YouTubeService, activityWriter ActivityWriter) *Interactor {
 	return &Interactor{
-		roomRepo:  roomRepo,
-		queueRepo: queueRepo,
-		youtube:   youtube,
+		roomRepo:       roomRepo,
+		queueRepo:      queueRepo,
+		youtube:        youtube,
+		activityWriter: activityWriter,
+	}
+}
+
+// ActivityWriterSeam returns the wired activity writer, or nil when
+// unset. Read-only; its sole consumer is the cmd/server composition
+// regression test, which verifies normal wiring selects the explicit
+// no-op writer (pre-R14c) rather than the PostgreSQL repository.
+func (i *Interactor) ActivityWriterSeam() ActivityWriter { return i.activityWriter }
+
+// actorName resolves the activity actor label: the authenticated
+// display name when present, otherwise the canonical "user #<id>"
+// fallback (R09i actor identity rule).
+func actorName(displayName string, userID int) string {
+	if strings.TrimSpace(displayName) == "" {
+		return fmt.Sprintf("user #%d", userID)
+	}
+	return displayName
+}
+
+// appendActivity performs one best-effort synchronous activity write.
+// Callers MUST invoke it after releasing i.mu (the R09i lock rule).
+// Failures are logged with only the room id/slug and activity type —
+// never the description or actor — and never propagate to the caller.
+func (i *Interactor) appendActivity(ctx context.Context, roomID int64, slug string, act entity.Activity) {
+	if i.activityWriter == nil {
+		return
+	}
+	if err := i.activityWriter.AddActivity(ctx, roomID, act); err != nil {
+		log.Printf("room activity: room %d (%s): append %s failed: %v", roomID, slug, act.Type, err)
 	}
 }
 
@@ -268,12 +314,17 @@ func (i *Interactor) GetState(ctx context.Context, slug string, actorUserID int)
 // the new queue, and returns the resulting queue plus the inserted
 // song. Any active member may add.
 //
-// actorUserID and actorDisplayName are server-resolved from the bearer
-// token by the delivery layer; request-body identity fields are ignored.
-// The interactor stamps the constructed Song's AddedBy / AddedByID so
-// the URL-only branch (no metadata body) also carries correct
-// attribution.
-func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, actorDisplayName string, url string, metadata *entity.SearchResult) (*entity.Queue, *entity.Song, error) {
+// actorUserID, addedByName and activityDisplayName are server-resolved
+// from the bearer token by the delivery layer; request-body identity
+// fields are ignored. addedByName keeps the established Song.AddedBy
+// attribution contract (display name → email → "user-<id>" fallback,
+// applied by delivery); the interactor stamps the constructed Song's
+// AddedBy / AddedByID so the URL-only branch (no metadata body) also
+// carries correct attribution. activityDisplayName is the RAW
+// authenticated display name for R09i activity attribution only — a
+// blank/whitespace value falls back to the canonical "user #<id>" via
+// actorName, never to the email or legacy placeholder.
+func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, addedByName string, activityDisplayName string, url string, metadata *entity.SearchResult) (*entity.Queue, *entity.Song, error) {
 	roomObj, err := i.resolveActiveRoom(ctx, slug)
 	if err != nil {
 		return nil, nil, err
@@ -307,8 +358,19 @@ func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, 
 	// Server-resolved attribution is authoritative. Overwrite any
 	// metadata-supplied AddedBy / AddedByID so a client cannot spoof a
 	// host's add via the request body.
-	song.AddedBy = actorDisplayName
+	song.AddedBy = addedByName
 	song.AddedByID = actorUserID
+
+	// R09i: the song_added activity is appended AFTER the mutex is
+	// released. The defer is registered BEFORE the Lock so Go's LIFO
+	// defer ordering runs the unlock first, then this write; the
+	// payload is snapshotted under the lock on the success path only.
+	var act *entity.Activity
+	defer func() {
+		if act != nil {
+			i.appendActivity(ctx, roomObj.ID, slug, *act)
+		}
+	}()
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -324,6 +386,8 @@ func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, 
 	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 		return nil, nil, fmt.Errorf("save room queue: %w", err)
 	}
+	a := entity.NewActivity(entity.ActivitySongAdded, actorName(activityDisplayName, actorUserID), fmt.Sprintf("added \"%s\"", song.Title))
+	act = &a
 	return queue, song, nil
 }
 
@@ -331,7 +395,7 @@ func (i *Interactor) AddSong(ctx context.Context, slug string, actorUserID int, 
 // any song; guests may remove only their own upcoming songs (CurrentIndex
 // < index, AddedByID == actorUserID). Mirrors the global queue's
 // permission rules so behavior is consistent.
-func (i *Interactor) RemoveSong(ctx context.Context, slug string, actorUserID int, actorRoomRole entity.RoomMemberRole, index int) (*entity.Queue, error) {
+func (i *Interactor) RemoveSong(ctx context.Context, slug string, actorUserID int, actorDisplayName string, actorRoomRole entity.RoomMemberRole, index int) (*entity.Queue, error) {
 	roomObj, err := i.resolveActiveRoom(ctx, slug)
 	if err != nil {
 		return nil, err
@@ -339,6 +403,15 @@ func (i *Interactor) RemoveSong(ctx context.Context, slug string, actorUserID in
 	if err := i.requireMember(ctx, roomObj.ID, actorUserID); err != nil {
 		return nil, err
 	}
+
+	// R09i: activity write deferred to after the mutex release (see
+	// AddSong for the LIFO-ordering rationale).
+	var act *entity.Activity
+	defer func() {
+		if act != nil {
+			i.appendActivity(ctx, roomObj.ID, slug, *act)
+		}
+	}()
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -365,12 +438,18 @@ func (i *Interactor) RemoveSong(ctx context.Context, slug string, actorUserID in
 		}
 	}
 
+	// Snapshot the title BEFORE the mutation — the activity describes
+	// the removed song, which is gone from the slice after Remove.
+	removedTitle := queue.Songs[index].Title
+
 	if err := queue.Remove(index); err != nil {
 		return nil, err
 	}
 	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 		return nil, fmt.Errorf("save room queue: %w", err)
 	}
+	a := entity.NewActivity(entity.ActivityPlayback, actorName(actorDisplayName, actorUserID), fmt.Sprintf("removed \"%s\" from queue", removedTitle))
+	act = &a
 	// R09f: trigger auto-queue when the removal leaves current==last.
 	defer i.maybeCheckRoomAutoQueue(ctx, slug, queue)
 	return queue, nil
@@ -378,7 +457,7 @@ func (i *Interactor) RemoveSong(ctx context.Context, slug string, actorUserID in
 
 // ClearQueue keeps the currently playing song and drops every upcoming
 // song. Host/admin only.
-func (i *Interactor) ClearQueue(ctx context.Context, slug string, actorUserID int, actorRoomRole entity.RoomMemberRole) (*entity.Queue, error) {
+func (i *Interactor) ClearQueue(ctx context.Context, slug string, actorUserID int, actorDisplayName string, actorRoomRole entity.RoomMemberRole) (*entity.Queue, error) {
 	roomObj, err := i.resolveActiveRoom(ctx, slug)
 	if err != nil {
 		return nil, err
@@ -389,6 +468,15 @@ func (i *Interactor) ClearQueue(ctx context.Context, slug string, actorUserID in
 	if actorRoomRole != entity.RoomRoleHost && actorRoomRole != entity.RoomRoleAdmin {
 		return nil, room.ErrForbidden
 	}
+
+	// R09i: activity write deferred to after the mutex release (see
+	// AddSong for the LIFO-ordering rationale).
+	var act *entity.Activity
+	defer func() {
+		if act != nil {
+			i.appendActivity(ctx, roomObj.ID, slug, *act)
+		}
+	}()
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -401,6 +489,8 @@ func (i *Interactor) ClearQueue(ctx context.Context, slug string, actorUserID in
 	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 		return nil, fmt.Errorf("save room queue: %w", err)
 	}
+	a := entity.NewActivity(entity.ActivityPlayback, actorName(actorDisplayName, actorUserID), "cleared the queue")
+	act = &a
 	// R09f: trigger auto-queue when the clear leaves current==last
 	// (only-one-song-remaining case).
 	defer i.maybeCheckRoomAutoQueue(ctx, slug, queue)
@@ -419,7 +509,7 @@ func (i *Interactor) ClearQueue(ctx context.Context, slug string, actorUserID in
 // when the index matches the current song, and room.ErrForbidden for guests
 // or non-privileged members. Caller must hold i.mu via the interactor — this
 // method acquires it.
-func (i *Interactor) PrioritizeSong(ctx context.Context, slug string, actorUserID int, actorRoomRole entity.RoomMemberRole, songIndex int) (*entity.Queue, int, int, entity.Song, error) {
+func (i *Interactor) PrioritizeSong(ctx context.Context, slug string, actorUserID int, actorDisplayName string, actorRoomRole entity.RoomMemberRole, songIndex int) (*entity.Queue, int, int, entity.Song, error) {
 	roomObj, err := i.resolveActiveRoom(ctx, slug)
 	if err != nil {
 		return nil, 0, 0, entity.Song{}, err
@@ -430,6 +520,15 @@ func (i *Interactor) PrioritizeSong(ctx context.Context, slug string, actorUserI
 	if actorRoomRole != entity.RoomRoleHost && actorRoomRole != entity.RoomRoleAdmin {
 		return nil, 0, 0, entity.Song{}, room.ErrForbidden
 	}
+
+	// R09i: activity write deferred to after the mutex release (see
+	// AddSong for the LIFO-ordering rationale).
+	var act *entity.Activity
+	defer func() {
+		if act != nil {
+			i.appendActivity(ctx, roomObj.ID, slug, *act)
+		}
+	}()
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -469,6 +568,8 @@ func (i *Interactor) PrioritizeSong(ctx context.Context, slug string, actorUserI
 	// pre-mutation snapshot used to leak the un-stamped copy and
 	// tripped the test that asserts the broadcast song has
 	// IsPrioritized=true.
+	a := entity.NewActivity(entity.ActivityPlayback, actorName(actorDisplayName, actorUserID), fmt.Sprintf("prioritized \"%s\"", queue.Songs[toIndex].Title))
+	act = &a
 	return queue, songIndex, toIndex, queue.Songs[toIndex], nil
 }
 
@@ -569,13 +670,14 @@ func (i *Interactor) maybeCheckRoomAutoQueue(ctx context.Context, slug string, q
 // active lease holder; otherwise returns a mapped error.
 //
 // Mapping:
-//   room.ErrInvalidSlug        → room.ErrInvalidSlug     (handler → 400)
-//   room.ErrRoomNotFound       → room.ErrRoomNotFound    (handler → 404)
-//   room.ErrArchived           → room.ErrArchived        (handler → 409)
-//   room.ErrPlayerLeaseNotFound → ErrPlaybackLeaseLost   (handler → 404)
-//   room.ErrNotLeaseHolder     → ErrPlaybackForbidden    (handler → 403)
-//   room.ErrPlayerLeaseGone    → ErrPlaybackLeaseGone    (handler → 410)
-//   any other                  → wrapped error           (handler → 500)
+//
+//	room.ErrInvalidSlug        → room.ErrInvalidSlug     (handler → 400)
+//	room.ErrRoomNotFound       → room.ErrRoomNotFound    (handler → 404)
+//	room.ErrArchived           → room.ErrArchived        (handler → 409)
+//	room.ErrPlayerLeaseNotFound → ErrPlaybackLeaseLost   (handler → 404)
+//	room.ErrNotLeaseHolder     → ErrPlaybackForbidden    (handler → 403)
+//	room.ErrPlayerLeaseGone    → ErrPlaybackLeaseGone    (handler → 410)
+//	any other                  → wrapped error           (handler → 500)
 func (i *Interactor) requirePlaybackLease(ctx context.Context, slug string, actorUserID int) error {
 	if i.leaseAuthorizer == nil {
 		return ErrPlaybackLeaseLost
@@ -606,15 +708,16 @@ func (i *Interactor) requirePlaybackLease(ctx context.Context, slug string, acto
 // used by the handler to broadcast room_playback_status_changed.
 //
 // Errors:
-//   ErrInvalidStatus        → status not playing|paused (handler → 400)
-//   ErrNoCurrentSong        → queue has no current song (handler → 400/404 per spec)
-//   ErrInvalidSlug          → malformed slug (handler → 400)
-//   ErrRoomNotFound         → unknown room (handler → 404)
-//   ErrArchived             → room archived (handler → 409)
-//   ErrPlaybackLeaseLost    → no active lease for the room (handler → 404)
-//   ErrPlaybackForbidden    → lease held by another user (handler → 403)
-//   ErrPlaybackLeaseGone    → lease past grace (handler → 410)
-func (i *Interactor) SetPlaybackStatus(ctx context.Context, slug string, actorUserID int, status entity.PlaybackStatus) (*entity.Queue, error) {
+//
+//	ErrInvalidStatus        → status not playing|paused (handler → 400)
+//	ErrNoCurrentSong        → queue has no current song (handler → 400/404 per spec)
+//	ErrInvalidSlug          → malformed slug (handler → 400)
+//	ErrRoomNotFound         → unknown room (handler → 404)
+//	ErrArchived             → room archived (handler → 409)
+//	ErrPlaybackLeaseLost    → no active lease for the room (handler → 404)
+//	ErrPlaybackForbidden    → lease held by another user (handler → 403)
+//	ErrPlaybackLeaseGone    → lease past grace (handler → 410)
+func (i *Interactor) SetPlaybackStatus(ctx context.Context, slug string, actorUserID int, actorDisplayName string, status entity.PlaybackStatus) (*entity.Queue, error) {
 	roomObj, err := i.resolveActiveRoom(ctx, slug)
 	if err != nil {
 		return nil, err
@@ -622,6 +725,15 @@ func (i *Interactor) SetPlaybackStatus(ctx context.Context, slug string, actorUs
 	if err := i.requirePlaybackLease(ctx, slug, actorUserID); err != nil {
 		return nil, err
 	}
+
+	// R09i: activity write deferred to after the mutex release (see
+	// AddSong for the LIFO-ordering rationale).
+	var act *entity.Activity
+	defer func() {
+		if act != nil {
+			i.appendActivity(ctx, roomObj.ID, slug, *act)
+		}
+	}()
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -644,6 +756,8 @@ func (i *Interactor) SetPlaybackStatus(ctx context.Context, slug string, actorUs
 	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 		return nil, fmt.Errorf("save room queue: %w", err)
 	}
+	a := entity.NewActivity(entity.ActivityPlayback, actorName(actorDisplayName, actorUserID), fmt.Sprintf("changed status to %s", status))
+	act = &a
 	return queue, nil
 }
 
@@ -652,9 +766,10 @@ func (i *Interactor) SetPlaybackStatus(ctx context.Context, slug string, actorUs
 // used by the handler to broadcast room_playback_elapsed_sync.
 //
 // Errors:
-//   ErrInvalidElapsed     → elapsed < 0 (handler → 400)
-//   ErrNoCurrentSong      → queue has no current song (handler → 400/404 per spec)
-//   ... lease sentinels (see SetPlaybackStatus)
+//
+//	ErrInvalidElapsed     → elapsed < 0 (handler → 400)
+//	ErrNoCurrentSong      → queue has no current song (handler → 400/404 per spec)
+//	... lease sentinels (see SetPlaybackStatus)
 func (i *Interactor) SyncPlaybackElapsed(ctx context.Context, slug string, actorUserID int, elapsed int) (*entity.Queue, error) {
 	roomObj, err := i.resolveActiveRoom(ctx, slug)
 	if err != nil {
@@ -694,10 +809,11 @@ func (i *Interactor) SyncPlaybackElapsed(ctx context.Context, slug string, actor
 // guards against partial mutation).
 //
 // Errors:
-//   ErrNoNextSong         → no upcoming song (handler → 400/404 per spec)
-//   ErrNoCurrentSong      → empty queue (handler → 400/404 per spec)
-//   ... lease sentinels (see SetPlaybackStatus)
-func (i *Interactor) SkipPlayback(ctx context.Context, slug string, actorUserID int) (*entity.Queue, int, int, *entity.Song, error) {
+//
+//	ErrNoNextSong         → no upcoming song (handler → 400/404 per spec)
+//	ErrNoCurrentSong      → empty queue (handler → 400/404 per spec)
+//	... lease sentinels (see SetPlaybackStatus)
+func (i *Interactor) SkipPlayback(ctx context.Context, slug string, actorUserID int, actorDisplayName string) (*entity.Queue, int, int, *entity.Song, error) {
 	roomObj, err := i.resolveActiveRoom(ctx, slug)
 	if err != nil {
 		return nil, 0, 0, nil, err
@@ -705,6 +821,15 @@ func (i *Interactor) SkipPlayback(ctx context.Context, slug string, actorUserID 
 	if err := i.requirePlaybackLease(ctx, slug, actorUserID); err != nil {
 		return nil, 0, 0, nil, err
 	}
+
+	// R09i: activity write deferred to after the mutex release (see
+	// AddSong for the LIFO-ordering rationale).
+	var act *entity.Activity
+	defer func() {
+		if act != nil {
+			i.appendActivity(ctx, roomObj.ID, slug, *act)
+		}
+	}()
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -726,6 +851,8 @@ func (i *Interactor) SkipPlayback(ctx context.Context, slug string, actorUserID 
 	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 		return nil, 0, 0, nil, fmt.Errorf("save room queue: %w", err)
 	}
+	a := entity.NewActivity(entity.ActivitySongSkipped, actorName(actorDisplayName, actorUserID), "skipped the current song")
+	act = &a
 	// R09f: trigger auto-queue only when the advance leaves current==last.
 	defer i.maybeCheckRoomAutoQueue(ctx, slug, queue)
 	return queue, prevIdx, queue.CurrentIndex, newSong, nil
@@ -746,8 +873,9 @@ func (i *Interactor) SkipPlayback(ctx context.Context, slug string, actorUserID 
 // the queue was paused at end-of-queue.
 //
 // Errors:
-//   ErrNoCurrentSong      → empty queue (handler → 400/404 per spec)
-//   ... lease sentinels (see SetPlaybackStatus)
+//
+//	ErrNoCurrentSong      → empty queue (handler → 400/404 per spec)
+//	... lease sentinels (see SetPlaybackStatus)
 func (i *Interactor) PlaybackEnded(ctx context.Context, slug string, actorUserID int) (*entity.Queue, int, int, *entity.Song, bool, error) {
 	roomObj, err := i.resolveActiveRoom(ctx, slug)
 	if err != nil {
@@ -756,6 +884,16 @@ func (i *Interactor) PlaybackEnded(ctx context.Context, slug string, actorUserID
 	if err := i.requirePlaybackLease(ctx, slug, actorUserID); err != nil {
 		return nil, 0, 0, nil, false, err
 	}
+
+	// R09i: natural-end activities are System-authored. The write is
+	// deferred to after the mutex release (see AddSong for the
+	// LIFO-ordering rationale).
+	var act *entity.Activity
+	defer func() {
+		if act != nil {
+			i.appendActivity(ctx, roomObj.ID, slug, *act)
+		}
+	}()
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -781,6 +919,8 @@ func (i *Interactor) PlaybackEnded(ctx context.Context, slug string, actorUserID
 		if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 			return nil, 0, 0, nil, false, fmt.Errorf("save room queue: %w", err)
 		}
+		a := entity.NewActivity(entity.ActivityPlayback, "System", "song finished playing")
+		act = &a
 		// R09f: trigger auto-queue when the advance leaves current==last.
 		defer i.maybeCheckRoomAutoQueue(ctx, slug, queue)
 		return queue, prevIdx, queue.CurrentIndex, newSong, true, nil
@@ -799,6 +939,8 @@ func (i *Interactor) PlaybackEnded(ctx context.Context, slug string, actorUserID
 	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 		return nil, 0, 0, nil, false, fmt.Errorf("save room queue: %w", err)
 	}
+	a := entity.NewActivity(entity.ActivityPlayback, "System", "queue finished playing")
+	act = &a
 	// R09f: end-of-queue pause leaves current==last; trigger auto-queue.
 	defer i.maybeCheckRoomAutoQueue(ctx, slug, queue)
 	return queue, queue.CurrentIndex, queue.CurrentIndex, &currentSong, false, nil
@@ -1044,18 +1186,20 @@ func (i *Interactor) AddRoomAutoQueueSong(ctx context.Context, slug string, song
 // maps to 400. The method enforces:
 //   - active room (else room.ErrArchived / room.ErrRoomNotFound)
 //   - active player-lease holder (else lease sentinels per R09a)
+//
 // It does NOT load or save the queue and does NOT require a current
 // song. The returned error is nil on success so the handler can
 // broadcast unconditionally.
 //
 // Errors:
-//   ErrInvalidDirection  → direction != "up" and != "down" (handler → 400)
-//   ErrInvalidSlug       → malformed slug (handler → 400)
-//   ErrRoomNotFound      → unknown room (handler → 404)
-//   ErrArchived          → archived room (handler → 409)
-//   ErrPlaybackLeaseLost → no active lease (handler → 404)
-//   ErrPlaybackForbidden → lease held by another user (handler → 403)
-//   ErrPlaybackLeaseGone → lease past grace (handler → 410)
+//
+//	ErrInvalidDirection  → direction != "up" and != "down" (handler → 400)
+//	ErrInvalidSlug       → malformed slug (handler → 400)
+//	ErrRoomNotFound      → unknown room (handler → 404)
+//	ErrArchived          → archived room (handler → 409)
+//	ErrPlaybackLeaseLost → no active lease (handler → 404)
+//	ErrPlaybackForbidden → lease held by another user (handler → 403)
+//	ErrPlaybackLeaseGone → lease past grace (handler → 410)
 func (i *Interactor) ChangePlaybackVolume(ctx context.Context, slug string, actorUserID int, direction string) error {
 	if direction != "up" && direction != "down" {
 		return ErrInvalidDirection
@@ -1085,15 +1229,16 @@ func (i *Interactor) ChangePlaybackVolume(ctx context.Context, slug string, acto
 // sentinels into the local roomqueue ones for handler-side mapping.
 //
 // Errors:
-//   ErrNoPreviousSong    → already on the first song (handler → 400)
-//   ErrNoCurrentSong     → empty queue (handler → 400)
-//   ErrInvalidSlug       → malformed slug (handler → 400)
-//   ErrRoomNotFound      → unknown room (handler → 404)
-//   ErrArchived          → archived room (handler → 409)
-//   ErrPlaybackLeaseLost → no active lease (handler → 404)
-//   ErrPlaybackForbidden → lease held by another user (handler → 403)
-//   ErrPlaybackLeaseGone → lease past grace (handler → 410)
-func (i *Interactor) PrevPlayback(ctx context.Context, slug string, actorUserID int) (*entity.Queue, int, int, *entity.Song, error) {
+//
+//	ErrNoPreviousSong    → already on the first song (handler → 400)
+//	ErrNoCurrentSong     → empty queue (handler → 400)
+//	ErrInvalidSlug       → malformed slug (handler → 400)
+//	ErrRoomNotFound      → unknown room (handler → 404)
+//	ErrArchived          → archived room (handler → 409)
+//	ErrPlaybackLeaseLost → no active lease (handler → 404)
+//	ErrPlaybackForbidden → lease held by another user (handler → 403)
+//	ErrPlaybackLeaseGone → lease past grace (handler → 410)
+func (i *Interactor) PrevPlayback(ctx context.Context, slug string, actorUserID int, actorDisplayName string) (*entity.Queue, int, int, *entity.Song, error) {
 	roomObj, err := i.resolveActiveRoom(ctx, slug)
 	if err != nil {
 		return nil, 0, 0, nil, err
@@ -1101,6 +1246,15 @@ func (i *Interactor) PrevPlayback(ctx context.Context, slug string, actorUserID 
 	if err := i.requirePlaybackLease(ctx, slug, actorUserID); err != nil {
 		return nil, 0, 0, nil, err
 	}
+
+	// R09i: activity write deferred to after the mutex release (see
+	// AddSong for the LIFO-ordering rationale).
+	var act *entity.Activity
+	defer func() {
+		if act != nil {
+			i.appendActivity(ctx, roomObj.ID, slug, *act)
+		}
+	}()
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -1122,5 +1276,7 @@ func (i *Interactor) PrevPlayback(ctx context.Context, slug string, actorUserID 
 	if err := i.queueRepo.Save(ctx, roomObj.ID, queue); err != nil {
 		return nil, 0, 0, nil, fmt.Errorf("save room queue: %w", err)
 	}
+	a := entity.NewActivity(entity.ActivityPlayback, actorName(actorDisplayName, actorUserID), "went to the previous song")
+	act = &a
 	return queue, prevIdx, queue.CurrentIndex, newSong, nil
 }

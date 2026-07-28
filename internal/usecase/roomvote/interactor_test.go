@@ -262,9 +262,9 @@ func TestRoomVote_FirstVoteCreatesSessionWithMinThreshold(t *testing.T) {
 	fq := newFakeRoomQueue()
 	seedRoomWithTwoSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 
-	out, err := inter.CastSkipVote(context.Background(), "alpha", 42)
+	out, err := inter.CastSkipVote(context.Background(), "alpha", 42, "")
 	if err != nil {
 		t.Fatalf("cast: %v", err)
 	}
@@ -292,10 +292,10 @@ func TestRoomVote_PassingVoteCallsSkipVoteAndPopulatesAdvance(t *testing.T) {
 	fq := newFakeRoomQueue()
 	seedRoomWithTwoSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true, 43: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 2}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 2}}, 30*time.Second, nil)
 
 	// First vote — threshold = max(2, 2/2 + 1) = 2; only 1 vote so not passed.
-	out1, err := inter.CastSkipVote(context.Background(), "alpha", 42)
+	out1, err := inter.CastSkipVote(context.Background(), "alpha", 42, "")
 	if err != nil {
 		t.Fatalf("cast1: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestRoomVote_PassingVoteCallsSkipVoteAndPopulatesAdvance(t *testing.T) {
 	}
 
 	// Second vote — meets threshold; resolves passed.
-	out2, err := inter.CastSkipVote(context.Background(), "alpha", 43)
+	out2, err := inter.CastSkipVote(context.Background(), "alpha", 43, "")
 	if err != nil {
 		t.Fatalf("cast2: %v", err)
 	}
@@ -345,12 +345,12 @@ func TestRoomVote_DuplicateVoteFromSameUserReturnsErrAlreadyVoted(t *testing.T) 
 	fq := newFakeRoomQueue()
 	seedRoomWithTwoSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true, 43: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 2}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 2}}, 30*time.Second, nil)
 
-	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42); err != nil {
+	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42, ""); err != nil {
 		t.Fatalf("first cast: %v", err)
 	}
-	_, err := inter.CastSkipVote(context.Background(), "alpha", 42)
+	_, err := inter.CastSkipVote(context.Background(), "alpha", 42, "")
 	if !errors.Is(err, entity.ErrAlreadyVoted) {
 		t.Fatalf("expected ErrAlreadyVoted, got %v", err)
 	}
@@ -360,10 +360,10 @@ func TestRoomVote_StaleSessionReturnsErrStaleAndNoMutation(t *testing.T) {
 	fq := newFakeRoomQueue()
 	seedRoomWithTwoSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true, 43: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 2}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 2}}, 30*time.Second, nil)
 
 	// First vote from 42 — not passed yet (threshold 2 of 2).
-	out1, err := inter.CastSkipVote(context.Background(), "alpha", 42)
+	out1, err := inter.CastSkipVote(context.Background(), "alpha", 42, "")
 	if err != nil {
 		t.Fatalf("cast1: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestRoomVote_StaleSessionReturnsErrStaleAndNoMutation(t *testing.T) {
 	fq.mu.Unlock()
 
 	// User 43's vote — threshold now met, SkipVote called.
-	out2, err := inter.CastSkipVote(context.Background(), "alpha", 43)
+	out2, err := inter.CastSkipVote(context.Background(), "alpha", 43, "")
 	if !errors.Is(err, ErrStaleSession) {
 		t.Fatalf("expected ErrStaleSession, got %v", err)
 	}
@@ -411,10 +411,10 @@ func TestRoomVote_ExpiredSessionIsRecreatedOnNextVote(t *testing.T) {
 	fq.members[1] = map[int]bool{42: true}
 	clockVal, clockFn := nowClock()
 	clock := clockVal
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 	inter.SetClock(func() time.Time { return clock })
 
-	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42); err != nil {
+	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42, ""); err != nil {
 		t.Fatalf("cast: %v", err)
 	}
 	if got := inter.ActiveSession("alpha", "song1"); got == nil {
@@ -433,7 +433,7 @@ func TestRoomVote_ExpiredSessionIsRecreatedOnNextVote(t *testing.T) {
 	}
 
 	// A new cast should evict the expired session and start a fresh one.
-	out, err := inter.CastSkipVote(context.Background(), "alpha", 42)
+	out, err := inter.CastSkipVote(context.Background(), "alpha", 42, "")
 	if err != nil {
 		t.Fatalf("post-expiry cast: %v", err)
 	}
@@ -456,9 +456,9 @@ func TestRoomVote_SessionsAreRoomScoped(t *testing.T) {
 	seedRoomWithTwoSongs(t, fq, "beta", 2)
 	fq.members[1] = map[int]bool{42: true}
 	fq.members[2] = map[int]bool{42: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1, "beta": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1, "beta": 1}}, 30*time.Second, nil)
 
-	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42); err != nil {
+	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42, ""); err != nil {
 		t.Fatalf("alpha cast: %v", err)
 	}
 	if got := inter.ActiveSession("alpha", "song1"); got == nil {
@@ -473,9 +473,9 @@ func TestRoomVote_NonMemberReturnsErrForbidden(t *testing.T) {
 	fq := newFakeRoomQueue()
 	seedRoomWithTwoSongs(t, fq, "alpha", 1)
 	// user 42 not a member of room 1
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 
-	_, err := inter.CastSkipVote(context.Background(), "alpha", 42)
+	_, err := inter.CastSkipVote(context.Background(), "alpha", 42, "")
 	if !errors.Is(err, room.ErrForbidden) {
 		t.Fatalf("expected ErrForbidden, got %v", err)
 	}
@@ -490,8 +490,8 @@ func TestRoomVote_NoCurrentSongReturnsErrNoCurrentSong(t *testing.T) {
 	fq.members[1] = map[int]bool{42: true}
 	fq.mu.Unlock()
 
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
-	_, err := inter.CastSkipVote(context.Background(), "alpha", 42)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
+	_, err := inter.CastSkipVote(context.Background(), "alpha", 42, "")
 	if !errors.Is(err, entity.ErrNoCurrentSong) {
 		t.Fatalf("expected ErrNoCurrentSong, got %v", err)
 	}
@@ -509,8 +509,8 @@ func TestRoomVote_ArchivedRoomReturnsErrArchived(t *testing.T) {
 	fq.members[1] = map[int]bool{42: true}
 	fq.mu.Unlock()
 
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
-	_, err := inter.CastSkipVote(context.Background(), "alpha", 42)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
+	_, err := inter.CastSkipVote(context.Background(), "alpha", 42, "")
 	if !errors.Is(err, room.ErrArchived) {
 		t.Fatalf("expected ErrArchived, got %v", err)
 	}
@@ -522,11 +522,11 @@ func TestRoomVote_ExpiredSessionOnEntryProducesExpiredOutcomeAlongsideNewSession
 	fq.members[1] = map[int]bool{42: true, 43: true}
 	clockVal, _ := nowClock()
 	clock := clockVal
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 	inter.SetClock(func() time.Time { return clock })
 
 	// Cast at T0 — creates session skip:alpha:song1.
-	out1, err := inter.CastSkipVote(context.Background(), "alpha", 42)
+	out1, err := inter.CastSkipVote(context.Background(), "alpha", 42, "")
 	if err != nil {
 		t.Fatalf("cast1: %v", err)
 	}
@@ -544,7 +544,7 @@ func TestRoomVote_ExpiredSessionOnEntryProducesExpiredOutcomeAlongsideNewSession
 
 	// Cast by user 42 again — eviction-on-entry must fire (the original
 	// skip:alpha:song1 session is now expired per interactor clock).
-	out2, err := inter.CastSkipVote(context.Background(), "alpha", 42)
+	out2, err := inter.CastSkipVote(context.Background(), "alpha", 42, "")
 	if err != nil {
 		t.Fatalf("cast2: %v", err)
 	}
@@ -575,11 +575,11 @@ func TestRoomVote_ExpireSessionsReturnsExpiredOutcomes(t *testing.T) {
 	fq.members[1] = map[int]bool{42: true}
 	clockVal, _ := nowClock()
 	clock := clockVal
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1, "beta": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1, "beta": 1}}, 30*time.Second, nil)
 	inter.SetClock(func() time.Time { return clock })
 
 	// Cast in alpha → seed session skip:alpha:song1.
-	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42); err != nil {
+	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42, ""); err != nil {
 		t.Fatalf("alpha cast: %v", err)
 	}
 	// Set up beta room + cast → seed session skip:beta:song1.
@@ -594,7 +594,7 @@ func TestRoomVote_ExpireSessionsReturnsExpiredOutcomes(t *testing.T) {
 	}
 	fq.members[2] = map[int]bool{42: true}
 	fq.mu.Unlock()
-	if _, err := inter.CastSkipVote(context.Background(), "beta", 42); err != nil {
+	if _, err := inter.CastSkipVote(context.Background(), "beta", 42, ""); err != nil {
 		t.Fatalf("beta cast: %v", err)
 	}
 
@@ -654,15 +654,15 @@ func TestRoomVote_ExpireSessionsPrioritizeUsesSessionID(t *testing.T) {
 	fq.members[1] = map[int]bool{42: true}
 	clockVal, _ := nowClock()
 	clock := clockVal
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 	inter.SetClock(func() time.Time { return clock })
 
 	// Seed a skip session (current song song1) and a prioritize session
 	// (upcoming song song2 at index 1).
-	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42); err != nil {
+	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42, ""); err != nil {
 		t.Fatalf("skip cast: %v", err)
 	}
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 42); err != nil {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 42, ""); err != nil {
 		t.Fatalf("prioritize cast: %v", err)
 	}
 
@@ -753,9 +753,9 @@ func TestRoomVotePrioritize_NonMemberForbidden(t *testing.T) {
 	fq := newFakeRoomQueue()
 	seedRoomWithThreeSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 999); !errors.Is(err, room.ErrForbidden) {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 999, ""); !errors.Is(err, room.ErrForbidden) {
 		t.Fatalf("expected ErrForbidden for non-member, got %v", err)
 	}
 }
@@ -764,9 +764,9 @@ func TestRoomVotePrioritize_InvalidIndexRejected(t *testing.T) {
 	fq := newFakeRoomQueue()
 	seedRoomWithThreeSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 99, 42); !errors.Is(err, roomqueue.ErrInvalidIndex) {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 99, 42, ""); !errors.Is(err, roomqueue.ErrInvalidIndex) {
 		t.Fatalf("expected ErrInvalidIndex for out-of-range index, got %v", err)
 	}
 }
@@ -775,9 +775,9 @@ func TestRoomVotePrioritize_CurrentSongRejected(t *testing.T) {
 	fq := newFakeRoomQueue()
 	seedRoomWithThreeSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 0, 42); !errors.Is(err, entity.ErrVoteOnCurrentSong) {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 0, 42, ""); !errors.Is(err, entity.ErrVoteOnCurrentSong) {
 		t.Fatalf("expected ErrVoteOnCurrentSong for current index, got %v", err)
 	}
 }
@@ -786,9 +786,9 @@ func TestRoomVotePrioritize_FirstVoteCreatesSessionSnapshot(t *testing.T) {
 	fq := newFakeRoomQueue()
 	seedRoomWithThreeSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 
-	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42)
+	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42, "")
 	if err != nil {
 		t.Fatalf("cast: %v", err)
 	}
@@ -817,12 +817,12 @@ func TestRoomVotePrioritize_DuplicateBallotRejected(t *testing.T) {
 	fq := newFakeRoomQueue()
 	seedRoomWithThreeSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 42); err != nil {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 42, ""); err != nil {
 		t.Fatalf("first cast: %v", err)
 	}
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 42); !errors.Is(err, entity.ErrAlreadyVoted) {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 42, ""); !errors.Is(err, entity.ErrAlreadyVoted) {
 		t.Fatalf("expected ErrAlreadyVoted on duplicate ballot, got %v", err)
 	}
 }
@@ -831,13 +831,13 @@ func TestRoomVotePrioritize_PassMovesTargetOnce(t *testing.T) {
 	fq := newFakeRoomQueue()
 	seedRoomWithThreeSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true, 99: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 
 	// Threshold is max(2, 1/2+1) = 2. Two distinct voters pass it.
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42, ""); err != nil {
 		t.Fatalf("first cast: %v", err)
 	}
-	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 99)
+	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 99, "")
 	if err != nil {
 		t.Fatalf("second cast: %v", err)
 	}
@@ -875,9 +875,9 @@ func TestRoomVotePrioritize_StaleTargetSurfacesConflict(t *testing.T) {
 	fq := newFakeRoomQueue()
 	seedRoomWithThreeSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true, 99: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42, ""); err != nil {
 		t.Fatalf("first cast: %v", err)
 	}
 	// The target moves/was removed between the passing vote's load and
@@ -885,7 +885,7 @@ func TestRoomVotePrioritize_StaleTargetSurfacesConflict(t *testing.T) {
 	fq.mu.Lock()
 	fq.staleOnNextPrioritize = true
 	fq.mu.Unlock()
-	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 99)
+	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 99, "")
 	if !errors.Is(err, ErrStalePrioritizeSession) {
 		t.Fatalf("expected ErrStalePrioritizeSession, got %v", err)
 	}
@@ -898,12 +898,12 @@ func TestRoomVotePrioritize_DistinctTargetsAreIndependentSessions(t *testing.T) 
 	fq := newFakeRoomQueue()
 	seedRoomWithThreeSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 42); err != nil {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 42, ""); err != nil {
 		t.Fatalf("cast song2: %v", err)
 	}
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42, ""); err != nil {
 		t.Fatalf("cast song3: %v", err)
 	}
 	if inter.ActivePrioritizeSession("alpha", "song2") == nil {
@@ -920,9 +920,9 @@ func TestRoomVotePrioritize_CrossRoomIsolation(t *testing.T) {
 	seedRoomWithThreeSongs(t, fq, "beta", 2)
 	fq.members[1] = map[int]bool{42: true}
 	fq.members[2] = map[int]bool{42: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1, "beta": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1, "beta": 1}}, 30*time.Second, nil)
 
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 42); err != nil {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 42, ""); err != nil {
 		t.Fatalf("cast alpha: %v", err)
 	}
 	if inter.ActivePrioritizeSession("alpha", "song2") == nil {
@@ -937,11 +937,11 @@ func TestRoomVotePrioritize_ExpirySweepEvictsSession(t *testing.T) {
 	fq := newFakeRoomQueue()
 	seedRoomWithThreeSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 	t0, clock := nowClock()
 	inter.SetClock(clock)
 
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42, ""); err != nil {
 		t.Fatalf("cast: %v", err)
 	}
 	// Advance the clock past expiry and sweep.
@@ -971,12 +971,12 @@ func TestRoomVotePrioritize_SkipSessionUntouched(t *testing.T) {
 	fq := newFakeRoomQueue()
 	seedRoomWithThreeSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 
-	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42); err != nil {
+	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42, ""); err != nil {
 		t.Fatalf("skip cast: %v", err)
 	}
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42, ""); err != nil {
 		t.Fatalf("prioritize cast: %v", err)
 	}
 	// Both sessions coexist.
@@ -1058,16 +1058,16 @@ func TestRoomVoteSkip_EvictionOnEntry_LeavesPrioritizeSession(t *testing.T) {
 	fq := newFakeRoomQueue()
 	seedRoomWithThreeSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true, 7: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 2}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 2}}, 30*time.Second, nil)
 	t0, clock := nowClock()
 	inter.SetClock(clock)
 
 	// Seed a skip session (current song1) and a prioritize session
 	// (song3) at t0.
-	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42); err != nil {
+	if _, err := inter.CastSkipVote(context.Background(), "alpha", 42, ""); err != nil {
 		t.Fatalf("skip cast: %v", err)
 	}
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42, ""); err != nil {
 		t.Fatalf("prioritize cast: %v", err)
 	}
 
@@ -1075,7 +1075,7 @@ func TestRoomVoteSkip_EvictionOnEntry_LeavesPrioritizeSession(t *testing.T) {
 	// again. Eviction-on-entry must reap the expired skip session
 	// (surfacing an "expired" resolution) and rebuild a fresh one.
 	inter.SetClock(func() time.Time { return t0.Add(31 * time.Second) })
-	out, err := inter.CastSkipVote(context.Background(), "alpha", 7)
+	out, err := inter.CastSkipVote(context.Background(), "alpha", 7, "")
 	if err != nil {
 		t.Fatalf("second skip cast: %v", err)
 	}
@@ -1103,11 +1103,11 @@ func TestRoomVotePrioritize_ExpiredMatchingSessionRestartsWithExpiredOutcome(t *
 	fq := newFakeRoomQueue()
 	seedRoomWithThreeSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true, 7: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 3}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 3}}, 30*time.Second, nil)
 	t0, clock := nowClock()
 	inter.SetClock(clock)
 
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42, ""); err != nil {
 		t.Fatalf("first cast: %v", err)
 	}
 	first := inter.ActivePrioritizeSession("alpha", "song3")
@@ -1118,7 +1118,7 @@ func TestRoomVotePrioritize_ExpiredMatchingSessionRestartsWithExpiredOutcome(t *
 	// Advance past expiry; the next ballot for the same target evicts the
 	// expired session and restarts a fresh one.
 	inter.SetClock(func() time.Time { return t0.Add(31 * time.Second) })
-	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 7)
+	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 7, "")
 	if err != nil {
 		t.Fatalf("second cast: %v", err)
 	}
@@ -1162,10 +1162,10 @@ func TestRoomVotePrioritize_SameSongIDDifferentIndexRejectedWithoutBallotChange(
 	fq := newFakeRoomQueue()
 	seedRoomWithThreeSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true, 7: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 3}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 3}}, 30*time.Second, nil)
 
 	// First ballot: song3 at index 2 -> session SongIndex=2, one vote.
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42, ""); err != nil {
 		t.Fatalf("first cast: %v", err)
 	}
 	before := inter.ActivePrioritizeSession("alpha", "song3")
@@ -1184,7 +1184,7 @@ func TestRoomVotePrioritize_SameSongIDDifferentIndexRejectedWithoutBallotChange(
 	}
 	fq.mu.Unlock()
 
-	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 7)
+	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 1, 7, "")
 	if !errors.Is(err, ErrStalePrioritizeSession) {
 		t.Fatalf("expected ErrStalePrioritizeSession for same-id/different-index, got %v", err)
 	}
@@ -1214,9 +1214,9 @@ func TestRoomVotePrioritize_BecameCurrentUnderVotePassesThroughCurrentSong(t *te
 	fq := newFakeRoomQueue()
 	seedRoomWithThreeSongs(t, fq, "alpha", 1)
 	fq.members[1] = map[int]bool{42: true, 7: true}
-	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second)
+	inter := NewInteractor(queueAdapter{f: fq}, stubResolver{counts: map[string]int{"alpha": 1}}, 30*time.Second, nil)
 
-	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42); err != nil {
+	if _, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 42, ""); err != nil {
 		t.Fatalf("first cast: %v", err)
 	}
 	// The target becomes current between the passing vote's load and the
@@ -1225,7 +1225,7 @@ func TestRoomVotePrioritize_BecameCurrentUnderVotePassesThroughCurrentSong(t *te
 	fq.currentOnNextPrioritize = true
 	fq.mu.Unlock()
 
-	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 7)
+	out, err := inter.CastPrioritizeVote(context.Background(), "alpha", 2, 7, "")
 	if !errors.Is(err, entity.ErrVoteOnCurrentSong) {
 		t.Fatalf("expected entity.ErrVoteOnCurrentSong passed through, got %v (out=%+v)", err, out)
 	}

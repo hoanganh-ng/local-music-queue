@@ -27,9 +27,9 @@ import (
 	usecasePriority "local-music-queue/internal/usecase/priority"
 	usecaseQueue "local-music-queue/internal/usecase/queue"
 	usecaseRoom "local-music-queue/internal/usecase/room"
-	usecaseRoomQueue "local-music-queue/internal/usecase/roomqueue"
 	usecaseRoomAutoQueue "local-music-queue/internal/usecase/roomautoqueue"
 	usecaseRoomChat "local-music-queue/internal/usecase/roomchat"
+	usecaseRoomQueue "local-music-queue/internal/usecase/roomqueue"
 	usecaseRoomVote "local-music-queue/internal/usecase/roomvote"
 	usecaseVote "local-music-queue/internal/usecase/vote"
 
@@ -87,6 +87,23 @@ func main() {
 }
 
 func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, *usecaseRoomVote.Interactor, func(), error) {
+	return setupAppWithActivityObserver(nil)
+}
+
+// setupAppWithActivityObserver runs the real composition path. When a
+// non-nil observer is supplied (same-package composition tests only),
+// it is invoked once with the three activity-producing interactors of
+// exactly this invocation, after all three are wired. The observer is a
+// local parameter — no package-level state is written — so repeated
+// invocations cannot leak or observe each other's composition. main and
+// production callers go through setupApp, which passes nil.
+func setupAppWithActivityObserver(
+	observer func(
+		*usecaseRoomQueue.Interactor,
+		*usecaseRoomVote.Interactor,
+		*usecaseRoomAutoQueue.Interactor,
+	),
+) (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, *usecaseRoomVote.Interactor, func(), error) {
 	// 1. Load configuration
 	cfg := config.Load()
 	log.Printf("Starting Local Music Queue server on port %s", cfg.Port)
@@ -188,7 +205,11 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	ytRelatedFetcher := youtube.NewYtDlpRelatedFetcher(cfg.YTDLPPath, 10)
 	autoQueueInteractor := usecaseAutoQueue.NewInteractor(autoQueueRepo, queueRepo, ytRelatedFetcher)
 	roomInteractor := usecaseRoom.NewInteractor(pgRoom)
-	roomQueueInteractor := usecaseRoomQueue.NewInteractor(pgRoom, pgRoomQueue, ytService)
+	// R09i: the explicit no-op room-activity writer is the ONLY
+	// implementation composed pre-R14c (collision guard — activities
+	// are produced but not persisted until the cutover-id sprint).
+	noopRoomActivityWriter := persistence.NewNoopRoomActivityRepository()
+	roomQueueInteractor := usecaseRoomQueue.NewInteractor(pgRoom, pgRoomQueue, ytService, noopRoomActivityWriter)
 
 	// R11a: per-room plain-text chat (active members only; archived
 	// rooms map to 409). The interactor owns trim/CRLF normalization
@@ -297,7 +318,7 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	// auto-queue tables or the global /ws event; it rides
 	// /ws/rooms/{slug} only.
 	pgRoomAutoQueue := persistence.NewPostgresRoomAutoQueueRepository(dbHandle)
-	roomAutoQueueInteractor := usecaseRoomAutoQueue.NewInteractor(pgRoom, pgRoomAutoQueue, ytRelatedFetcher)
+	roomAutoQueueInteractor := usecaseRoomAutoQueue.NewInteractor(pgRoom, pgRoomAutoQueue, ytRelatedFetcher, noopRoomActivityWriter)
 	roomAutoQueueInteractor.SetQueueSnapshotLoader(roomQueueInteractor.GetStateByRoomID)
 	roomAutoQueueInteractor.SetAddRoomAutoQueueSongFunc(func(ctx context.Context, slug string, song *entity.Song, expectedSourceSongID string) (*usecaseRoomAutoQueue.AddRoomAutoQueueSongResult, error) {
 		q, ci, cs, st, el, err := roomQueueInteractor.AddRoomAutoQueueSong(ctx, slug, song, expectedSourceSongID)
@@ -334,8 +355,18 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 	// UniqueConnectedUserIDs(slug) so the threshold is captured from
 	// the live connection set at session creation. 30s expiry mirrors
 	// the global vote package.
-	roomVoteInteractor := usecaseRoomVote.NewInteractor(roomQueueInteractor, roomWSHub, 30*time.Second)
-	roomVoteHandlers := delivery.NewRoomVoteHandlers(roomVoteInteractor, roomQueueInteractor)
+	roomVoteInteractor := usecaseRoomVote.NewInteractor(roomQueueInteractor, roomWSHub, 30*time.Second, noopRoomActivityWriter)
+	roomVoteHandlers := delivery.NewRoomVoteHandlers(roomVoteInteractor, roomQueueInteractor, authInteractor)
+
+	// R09i composition seam: hand the three activity-producing
+	// interactors of this invocation to the test-supplied observer so
+	// the same-package composition regression test can verify (via
+	// their ActivityWriterSeam accessors) that normal wiring selects
+	// the explicit no-op writer and never the PostgreSQL repository.
+	// Nil in production; nothing is retained after the call.
+	if observer != nil {
+		observer(roomQueueInteractor, roomVoteInteractor, roomAutoQueueInteractor)
+	}
 
 	// Wire auto-queue broadcaster to WS hub
 	autoQueueInteractor.SetBroadcaster(hub.Broadcast)

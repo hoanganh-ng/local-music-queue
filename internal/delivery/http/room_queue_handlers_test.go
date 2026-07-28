@@ -51,11 +51,45 @@ func newRoomQueueHandlers(t *testing.T) (*RoomQueueHandlers, *sql.DB, func()) {
 		persistence.NewPostgresUserRepository(db),
 		"", nil, nil, nil, nil,
 	)
-	rqh := NewRoomQueueHandlers(roomqueue.NewInteractor(roomRepo, queueRepo, nil), authI)
+	rqh := NewRoomQueueHandlers(roomqueue.NewInteractor(roomRepo, queueRepo, nil, nil), authI)
 	cleanup := func() {
 		// schema drop + db close registered by newRoomHandlers' t.Cleanup
 	}
 	return rqh, db, cleanup
+}
+
+// captureRoomActivityWriter records every room-activity append so
+// delivery-boundary tests can assert the actor attribution produced by
+// the full handler → interactor path.
+type captureRoomActivityWriter struct {
+	mu      sync.Mutex
+	roomIDs []int64
+	acts    []entity.Activity
+}
+
+func (w *captureRoomActivityWriter) AddActivity(_ context.Context, roomID int64, act entity.Activity) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.roomIDs = append(w.roomIDs, roomID)
+	w.acts = append(w.acts, act)
+	return nil
+}
+
+// newRoomQueueHandlersWithActivity mirrors newRoomQueueHandlers but
+// wires a capture activity writer into the roomqueue interactor, so
+// tests can observe the recorded activity actor end to end.
+func newRoomQueueHandlersWithActivity(t *testing.T) (*RoomQueueHandlers, *sql.DB, *captureRoomActivityWriter, func()) {
+	t.Helper()
+	_, _, db := newRoomHandlers(t)
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	queueRepo := persistence.NewPostgresRoomQueueRepository(db)
+	authI := auth.NewInteractor(
+		persistence.NewPostgresUserRepository(db),
+		"", nil, nil, nil, nil,
+	)
+	w := &captureRoomActivityWriter{}
+	rqh := NewRoomQueueHandlers(roomqueue.NewInteractor(roomRepo, queueRepo, nil, w), authI)
+	return rqh, db, w, func() {}
 }
 
 // mustRoomIDQueue looks up the numeric room id for slug via the same
@@ -124,6 +158,66 @@ func TestRoomQueue_AddSong_ReturnsInsertedSong(t *testing.T) {
 	}
 	if got.AddedByID != 42 {
 		t.Errorf("expected AddedByID=42, got %d", got.AddedByID)
+	}
+}
+
+// TestRoomQueue_AddSong_BlankDisplayName_ActivityActorIsUserID is the
+// R09i corrective regression for manual-add activity attribution: an
+// authenticated user with a BLANK display_name and a non-empty email
+// must produce the canonical "user #<id>" activity actor — never the
+// email and never the legacy "user-<id>" queue placeholder — while the
+// established Song.AddedBy contract (email fallback) stays unchanged.
+func TestRoomQueue_AddSong_BlankDisplayName_ActivityActorIsUserID(t *testing.T) {
+	rqh, db, w, cleanup := newRoomQueueHandlersWithActivity(t)
+	defer cleanup()
+
+	// Blank display_name + non-empty email (seedUserQueue always sets
+	// display_name = email, so insert directly).
+	if _, err := db.Exec(
+		`INSERT INTO users (id, email, display_name, profile_picture, role, priority_balance, created_at, updated_at)
+		 VALUES (42, 'blank-name@example.com', '', '', 'host', 0, NOW(), NOW())`,
+	); err != nil {
+		t.Fatalf("seed blank-name user: %v", err)
+	}
+	roomRepo := persistence.NewPostgresRoomRepository(db)
+	ctx := context.Background()
+	if _, err := roomRepo.CreateRoomAndHost(ctx, "rq-rest-act", "RQAct", 42, time.Now().UTC()); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	body := []byte(`{"metadata":{"id":"vid-act","title":"Act Me","url":"https://example/vid-act"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/rq-rest-act/queue/add", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	rqh.HandleAddRoomSong(rr, req, "rq-rest-act", 42)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// Established song-attribution contract unchanged: blank display
+	// name still falls back to the email for Song.AddedBy.
+	var got entity.Song
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode song: %v", err)
+	}
+	if got.AddedBy != "blank-name@example.com" || got.AddedByID != 42 {
+		t.Errorf("expected AddedBy=email / AddedByID=42, got %q / %d", got.AddedBy, got.AddedByID)
+	}
+
+	// Activity actor: canonical fallback only.
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.acts) != 1 {
+		t.Fatalf("expected exactly 1 activity, got %d: %+v", len(w.acts), w.acts)
+	}
+	if w.acts[0].User != "user #42" {
+		t.Errorf("expected activity actor %q, got %q", "user #42", w.acts[0].User)
+	}
+	if w.acts[0].User == "blank-name@example.com" || w.acts[0].User == "user-42" {
+		t.Errorf("activity actor must not use email or legacy placeholder, got %q", w.acts[0].User)
+	}
+	if want := mustRoomIDQueue(t, db, "rq-rest-act"); w.roomIDs[0] != want {
+		t.Errorf("expected room id %d, got %d", want, w.roomIDs[0])
 	}
 }
 
@@ -223,18 +317,18 @@ func TestRoomQueue_AddSong_RequiresAuthenticatedActor(t *testing.T) {
 // WebSocket. The handler tests assert it was invoked on success and
 // NOT invoked on error paths.
 type recordingRoomBroadcaster struct {
-	mu                     sync.Mutex
-	syncCalls              []string
-	addCalls               []string
-	removeCalls            []int
-	clearCalls             []string
-	prioCalls              []recordingPrioCall
-	statusCalls            []recordingStatusCall
-	elapsedCalls           []recordingElapsedCall
-	advancedCalls          []recordingAdvancedCall
-	volumeCalls            []recordingVolumeCall
-	previousCalls          []recordingPreviousCall
-	autoQueueAddedCalls    []recordingAutoQueueAddedCall
+	mu                          sync.Mutex
+	syncCalls                   []string
+	addCalls                    []string
+	removeCalls                 []int
+	clearCalls                  []string
+	prioCalls                   []recordingPrioCall
+	statusCalls                 []recordingStatusCall
+	elapsedCalls                []recordingElapsedCall
+	advancedCalls               []recordingAdvancedCall
+	volumeCalls                 []recordingVolumeCall
+	previousCalls               []recordingPreviousCall
+	autoQueueAddedCalls         []recordingAutoQueueAddedCall
 	autoQueueConfigChangedCalls []recordingAutoQueueConfigChangedCall
 }
 
@@ -345,7 +439,8 @@ func (r *recordingRoomBroadcaster) BroadcastRoomPlaybackSongAdvanced(slug, reaso
 	defer r.mu.Unlock()
 	r.advancedCalls = append(r.advancedCalls, recordingAdvancedCall{slug: slug, reason: reason, prev: prev, next: next, song: song, status: status, elapsed: elapsed})
 }
-func (r *recordingRoomBroadcaster) BroadcastRoomVoteUpdated(_ string, _ *entity.VoteSession, _ int, _ *entity.Queue) {}
+func (r *recordingRoomBroadcaster) BroadcastRoomVoteUpdated(_ string, _ *entity.VoteSession, _ int, _ *entity.Queue) {
+}
 func (r *recordingRoomBroadcaster) BroadcastRoomVoteResolved(_, _, _ string, _ *entity.Queue) {}
 func (r *recordingRoomBroadcaster) BroadcastRoomPlaybackVolumeChanged(slug, direction string) {
 	r.mu.Lock()

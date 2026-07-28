@@ -1,11 +1,13 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 
 	"local-music-queue/internal/domain/entity"
+	"local-music-queue/internal/usecase/auth"
 	"local-music-queue/internal/usecase/room"
 	"local-music-queue/internal/usecase/roomqueue"
 	"local-music-queue/internal/usecase/roomvote"
@@ -15,7 +17,7 @@ import (
 // supplied by the roomAuth routing wrapper in main.go which has already
 // resolved the bearer token (R07b+). R09b adds a single endpoint:
 //
-//   POST /api/rooms/{slug}/vote/skip
+//	POST /api/rooms/{slug}/vote/skip
 //
 // Any active room member may cast a vote against the current song.
 // Sessions are room-scoped, current-song-scoped, 30-second expiring,
@@ -27,15 +29,35 @@ import (
 type RoomVoteHandlers struct {
 	vote  *roomvote.Interactor
 	queue *roomqueue.Interactor
+	auth  *auth.Interactor
 }
 
 // NewRoomVoteHandlers constructs the handlers. queue is the SAME
 // roomqueue.Interactor that owns queue state; the handler reads its
 // Broadcaster() to dispatch per-room WebSocket events. Wiring the
 // real *roomqueue.Interactor (not an interface) keeps the handler in
-// lock-step with the roomqueue mutex and persistence layer.
-func NewRoomVoteHandlers(vote *roomvote.Interactor, queue *roomqueue.Interactor) *RoomVoteHandlers {
-	return &RoomVoteHandlers{vote: vote, queue: queue}
+// lock-step with the roomqueue mutex and persistence layer. a is the
+// auth interactor used to resolve the actor's display name for R09i
+// activity attribution; nil is tolerated (attribution falls back to
+// the use-case "user #<id>" rule).
+func NewRoomVoteHandlers(vote *roomvote.Interactor, queue *roomqueue.Interactor, a *auth.Interactor) *RoomVoteHandlers {
+	return &RoomVoteHandlers{vote: vote, queue: queue, auth: a}
+}
+
+// activityDisplayName resolves the raw authenticated display name for
+// R09i activity attribution. No email/placeholder fallback — a blank
+// name is forwarded as-is so the use-case actorName helper applies the
+// canonical "user #<id>" fallback. Lookup failures degrade to "" and
+// NEVER block the vote flow.
+func (h *RoomVoteHandlers) activityDisplayName(ctx context.Context, actorUserID int) string {
+	if h.auth == nil {
+		return ""
+	}
+	user, err := h.auth.GetUserByID(ctx, actorUserID)
+	if err != nil || user == nil {
+		return ""
+	}
+	return user.DisplayName
 }
 
 // HandleCastRoomVoteSkip: POST /api/rooms/{slug}/vote/skip — any active
@@ -73,7 +95,7 @@ func (h *RoomVoteHandlers) HandleCastRoomVoteSkip(w http.ResponseWriter, r *http
 	}
 
 	// Body is intentionally unread; identity is server-resolved.
-	out, err := h.vote.CastSkipVote(r.Context(), slug, actorUserID)
+	out, err := h.vote.CastSkipVote(r.Context(), slug, actorUserID, h.activityDisplayName(r.Context(), actorUserID))
 	if err != nil {
 		writeRoomVoteError(w, err)
 		return
@@ -192,7 +214,7 @@ func (h *RoomVoteHandlers) HandleCastRoomVotePrioritize(w http.ResponseWriter, r
 		return
 	}
 
-	out, err := h.vote.CastPrioritizeVote(r.Context(), slug, *req.SongIndex, actorUserID)
+	out, err := h.vote.CastPrioritizeVote(r.Context(), slug, *req.SongIndex, actorUserID, h.activityDisplayName(r.Context(), actorUserID))
 	if err != nil {
 		writeRoomVoteError(w, err)
 		return
