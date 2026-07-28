@@ -18,7 +18,7 @@ This directory contains documentation for active and past sprints.
 | 010    | Room Domain, Invite, Membership, and Lifecycle / R04 | In progress — awaiting Architect review and Product Owner approval |
 | 020    | Allowed Origins and WebSocket Origin Policy / A01    | Closed (2026-06-26) — pending Product Owner acceptance             |
 | 027    | Room activity runtime parity / R09i                  | Closed and accepted (2026-07-28; PR #24; merge `c112000d`)         |
-| 028    | Frontend global-path retirement / R14d               | Active (activated 2026-07-28; base `f9760693`)                     |
+| 028    | Frontend global-path retirement / R14d               | Closed and accepted (2026-07-28; PR #25; merge `67bd57a8`)         |
 
 ## File Naming
 
