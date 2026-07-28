@@ -37,7 +37,13 @@ other non-empty value fails explicitly (the error never echoes the raw value).
 No other module reads `import.meta.env.VITE_ROOM_CUTOVER_AUTHORITATIVE`, and no
 runtime configuration request, local-storage switch, query parameter, cookie,
 or feature-flag service exists. The setting is documented in
-`frontend/.env.example`, defaulting to `false`.
+`frontend/.env.example`, defaulting to `false`. Per the Architect review of
+PR #25, the `.env.example` comment was corrected (documentation-only): an
+invalid value does **not** fail `npm run build` (Vite does not evaluate
+application modules during build); it fails explicitly at frontend
+startup/module evaluation (the parser throw fires before the app mounts, and
+the unit suite fails the same way), and an invalid value never silently
+selects a mode. No build-time validation step was added.
 
 ### Shared authenticated landing decision
 
@@ -132,6 +138,66 @@ VITE_ROOM_CUTOVER_AUTHORITATIVE=true  npm run build → ✓ built (exit 0)
 Note: the true build still **emits** the `DashboardView` chunk (Rollup bundles
 every `import()` expression it sees), but no route references it, so it is
 unreachable through normal routing.
+
+## Manual compatibility verification (2026-07-28, PR #25 review follow-up)
+
+Environment: local isolated setup only. Backend `go run ./cmd/server` on
+`http://localhost:1111` against a fresh dedicated PostgreSQL database (no
+production or shared data); false artifact built with
+`VITE_ROOM_CUTOVER_AUTHORITATIVE=false` and served via `vite preview` at
+`http://localhost:4173`; true artifact built with
+`VITE_ROOM_CUTOVER_AUTHORITATIVE=true` at `http://localhost:4174`. Both
+artifacts built with `VITE_API_BASE_URL=http://localhost:1111`. Nothing was
+deployed; production cutover has NOT been executed.
+
+Real Google login is not possible in this isolated environment: the backend
+verifies a real Google ID token server-side and enforces a company email
+domain allow-list, sessions are in-memory server state, and no local bypass
+exists. Checks that require a server-accepted session are reported
+**Blocked** with that obstruction. Client-side routing/landing checks were
+performed with a synthetic browser `localStorage` session (the router guard
+is client-side), which exercises the exact R14d routing surface.
+
+### False artifact (`http://localhost:4173`)
+
+| Check | Action | Observed | Result |
+|---|---|---|---|
+| Successful login lands on Dashboard | Real Google login | Server-side Google ID-token verification + email-domain allow-list; no local bypass | **Blocked** (surrogate below passed) |
+| Landing surrogate | Authenticated navigation to `/auth` (same shared `authenticatedLandingRouteName()` used by the post-login push) | Redirected to `/`, Dashboard rendered | Pass |
+| `/` renders Dashboard | Navigate `/` with client session | Dashboard rendered (Up Next / Now Playing / Activity Log) | Pass |
+| Global queue loads | Observe network + backend log | `GET /api/queue → 200` (browser and backend log) | Pass |
+| Global `/ws` connects | Observe header + backend log | Header `CONNECTED`; backend log `GET /ws → 200`, `New WebSocket client connected` | Pass |
+| Rooms navigation opens RoomEntry | Click `Rooms` | URL `/rooms`, RoomEntry rendered with `Back to dashboard` | Pass |
+| RoomEntry returns to Dashboard | Click `Back to dashboard` | URL `/`, Dashboard rendered | Pass |
+| `/rooms` direct | Navigate `/rooms` | RoomEntry rendered | Pass |
+| `/rooms/{slug}` direct | Navigate `/rooms/test-room` | Route resolved, RoomView rendered (room data 401 without server session) | Pass (routing) |
+| Unauthenticated `/` | Navigate `/` with no session | Redirected to `/auth`, Auth view rendered | Pass |
+
+### True artifact (`http://localhost:4174`)
+
+| Check | Action | Observed | Result |
+|---|---|---|---|
+| Successful login lands on RoomEntry | Real Google login | Same obstruction as above | **Blocked** (surrogate below passed) |
+| Landing surrogate | Authenticated navigation to `/auth` (same shared landing helper) | Redirected to `/rooms`, RoomEntry rendered | Pass |
+| `/` lands on RoomEntry | Navigate `/` with client session | URL `/rooms`, RoomEntry rendered | Pass |
+| No Dashboard route exists | Navigate `/`; inspect rendered controls | `/` redirects to RoomEntry; `Sign out` shown instead of `Back to dashboard`; router graph has no `Dashboard` route in true mode | Pass |
+| Sign-out clears session and returns to Auth | Click `Sign out` | URL `/auth`, Auth view rendered; `lmq_session_token`, `lmq_session_expires_at`, `lmq_user_session` all cleared | Pass |
+| Room list / create / manual-open / invite-redemption | Exercise forms | UI surfaces render and are reachable, but every flow needs a server-accepted session; `GET /api/rooms → 401` with synthetic token | **Blocked** (no server-accepted session without real Google login) |
+| `/rooms/{slug}` direct | Navigate `/rooms/test-room` | Route resolved, RoomView rendered (room data 401 without server session) | Pass (routing) |
+| No global `/ws` attempt | Inspect browser network log + backend log after load | Only `GET /api/rooms` observed; no `/ws` request in either log | Pass |
+| No global `/ws` reconnect after the reconnect interval | Wait 8s (> 3s reconnect interval), re-inspect both logs | Still no `/ws` request | Pass |
+
+Automation note: with synthetic (JS-dispatched) clicks the `App.vue`
+`<transition mode="out-in">` view swap can stall in the automated browser;
+the identical stall reproduces on the **pre-existing** Dashboard `Exit`
+control in the false artifact, and trusted user clicks complete the swap
+normally in both artifacts, so this is an automation artifact and not an
+R14d regression. No runtime correction was necessary.
+
+This is NOT the R14c paired-production smoke test. No production
+compatibility is claimed; future true-server compatibility requires R14c's
+paired maintenance-window smoke test. The true artifact was not deployed.
+R14c and R14e remain inactive.
 
 The true artifact is **not** claimed production-compatible with the future
 true server; that requires the paired R14c maintenance-window smoke test.
