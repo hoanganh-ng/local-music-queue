@@ -19,6 +19,7 @@ This directory contains documentation for active and past sprints.
 | 020    | Allowed Origins and WebSocket Origin Policy / A01    | Closed (2026-06-26) — pending Product Owner acceptance             |
 | 027    | Room activity runtime parity / R09i                  | Closed and accepted (2026-07-28; PR #24; merge `c112000d`)         |
 | 028    | Frontend global-path retirement / R14d               | Closed and accepted (2026-07-28; PR #25; merge `67bd57a8`)         |
+| 029    | Coordinated authoritative room cutover / R14c        | Active — Gate 1 implementation and isolated rehearsal only         |
 
 ## File Naming
 
@@ -32,6 +33,8 @@ Sprints progress through defined lifecycle states:
 2. **In progress — awaiting Architect review and Product Owner approval:** Under active development or documentation, but pending final sign-off.
 3. **Approved:** Ready for execution.
 4. **Completed / Closed:** Work is finished and accepted.
+
+R14c uses an additional operational gate inside the active sprint: implementation/rehearsal approval does not authorize production execution. The real maintenance window requires a separate Product Owner go/no-go.
 
 ## `active.md` Semantics
 
@@ -49,6 +52,7 @@ Builders (AI Agents) are strictly prohibited from:
 - Pushing to remote repositories.
 - Merging branches or opening pull requests.
 - Advancing sprint statuses on their own authority.
+- Executing R14c production migration or deployment operations.
 
 ## Historical Retention
 
