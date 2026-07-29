@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"local-music-queue/internal/domain/entity"
 	deliveryhttp "local-music-queue/internal/delivery/http"
+	"local-music-queue/internal/domain/entity"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -83,7 +83,7 @@ func TestSetupApp_PostgresDBStaysOpen(t *testing.T) {
 
 	t.Setenv("DATABASE_URL", dsn+"&search_path="+schema)
 
-	mux, _, _, _, _, cleanup, err := setupApp()
+	mux, _, _, _, _, cleanup, err := setupApp(setupOptions{})
 	if err != nil {
 		t.Fatalf("setupApp failed: %v", err)
 	}
@@ -103,8 +103,8 @@ func TestSetupApp_PostgresDBStaysOpen(t *testing.T) {
 	// mux directly (no HTTP server, so the round-trip Google login is
 	// not available).
 	body, _ := json.Marshal(map[string]interface{}{
-		"url":        "https://example.com/watch?v=test",
-		"added_by":   "lifecycle-test",
+		"url":         "https://example.com/watch?v=test",
+		"added_by":    "lifecycle-test",
 		"added_by_id": 0,
 		"metadata": &entity.SearchResult{
 			ID:     "test-song-id",

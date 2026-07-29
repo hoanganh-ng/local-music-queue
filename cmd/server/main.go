@@ -47,7 +47,16 @@ func envMode(isLocal bool) string {
 }
 
 func main() {
-	mux, cfg, policy, roomWSHub, roomVoteInteractor, cleanup, err := setupApp()
+	// R14c: parse the runtime mode BEFORE database composition and before
+	// any listener opens. Invalid value, unknown flag, or positional
+	// argument is a startup error; an omitted flag selects false.
+	opts, err := parseRoomCutoverFlag(os.Args[1:])
+	if err != nil {
+		log.Fatalf("Invalid arguments: %v", err)
+	}
+	log.Printf("Room cutover authoritative mode: %t", opts.roomCutoverAuthoritative)
+
+	mux, cfg, policy, roomWSHub, roomVoteInteractor, cleanup, err := setupApp(opts)
 	if err != nil {
 		log.Fatalf("Failed to setup application: %v", err)
 	}
@@ -86,8 +95,8 @@ func main() {
 	}
 }
 
-func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, *usecaseRoomVote.Interactor, func(), error) {
-	return setupAppWithActivityObserver(nil)
+func setupApp(opts setupOptions) (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, *usecaseRoomVote.Interactor, func(), error) {
+	return setupAppWithActivityObserver(opts, nil)
 }
 
 // setupAppWithActivityObserver runs the real composition path. When a
@@ -97,7 +106,12 @@ func setupApp() (*http.ServeMux, *config.Config, *origin.Policy, *ws.RoomWSHub, 
 // local parameter — no package-level state is written — so repeated
 // invocations cannot leak or observe each other's composition. main and
 // production callers go through setupApp, which passes nil.
+//
+// opts is the R14c immutable runtime mode parsed in main; it is read
+// here exactly once (guard + writer selection + route registration) and
+// never stored beyond the composition.
 func setupAppWithActivityObserver(
+	opts setupOptions,
 	observer func(
 		*usecaseRoomQueue.Interactor,
 		*usecaseRoomVote.Interactor,
@@ -180,12 +194,29 @@ func setupAppWithActivityObserver(
 		}
 	}
 
-	// Run embedded PostgreSQL schema migrations defensively on backend startup.
-	// The db-init Compose job is authoritative; this is belt-and-braces for
-	// `go run ./cmd/server` and CI. ErrNoChange is not an error.
-	if err := persistence.RunEmbeddedMigrationsUp(dbHandle); err != nil {
-		cleanup()
-		return nil, nil, nil, nil, nil, nil, err
+	if opts.roomCutoverAuthoritative {
+		// R14c fail-closed startup guard: inspect the EXISTING schema
+		// state and require the durable cutover marker BEFORE any
+		// defensive migration could touch an older database. The guard
+		// rejects a dirty migration state, a schema version below 9,
+		// and a missing room_cutover_marker.id = 1 row. It never
+		// creates schema, never edits the marker, and never invokes the
+		// cutover CLI. Defensive startup migration is intentionally
+		// skipped in authoritative mode so a future migration (e.g.
+		// R14e's 0010) can never be applied implicitly by a true-mode
+		// restart.
+		if err := persistence.VerifyRoomCutoverStartupReadiness(dbHandle); err != nil {
+			cleanup()
+			return nil, nil, nil, nil, nil, nil, err
+		}
+	} else {
+		// Run embedded PostgreSQL schema migrations defensively on backend startup.
+		// The db-init Compose job is authoritative; this is belt-and-braces for
+		// `go run ./cmd/server` and CI. ErrNoChange is not an error.
+		if err := persistence.RunEmbeddedMigrationsUp(dbHandle); err != nil {
+			cleanup()
+			return nil, nil, nil, nil, nil, nil, err
+		}
 	}
 
 	ytService := youtube.NewYTDLPService(cfg.YTDLPPath)
@@ -205,11 +236,21 @@ func setupAppWithActivityObserver(
 	ytRelatedFetcher := youtube.NewYtDlpRelatedFetcher(cfg.YTDLPPath, 10)
 	autoQueueInteractor := usecaseAutoQueue.NewInteractor(autoQueueRepo, queueRepo, ytRelatedFetcher)
 	roomInteractor := usecaseRoom.NewInteractor(pgRoom)
-	// R09i: the explicit no-op room-activity writer is the ONLY
-	// implementation composed pre-R14c (collision guard — activities
-	// are produced but not persisted until the cutover-id sprint).
-	noopRoomActivityWriter := persistence.NewNoopRoomActivityRepository()
-	roomQueueInteractor := usecaseRoomQueue.NewInteractor(pgRoom, pgRoomQueue, ytService, noopRoomActivityWriter)
+	// R14c activity-writer composition: exactly ONE writer is selected
+	// during setup and the same instance is injected into all three
+	// activity-producing room interactors (roomqueue / roomvote /
+	// roomautoqueue). False mode keeps the explicit no-op collision
+	// guard (activities are produced but not persisted pre-cutover);
+	// true mode — reachable only after the fail-closed startup guard
+	// passed — selects the real PostgreSQL room-activity repository.
+	// The selection is immutable after startup.
+	var roomActivityWriter repository.RoomActivityRepository
+	if opts.roomCutoverAuthoritative {
+		roomActivityWriter = persistence.NewPostgresRoomActivityRepository(dbHandle)
+	} else {
+		roomActivityWriter = persistence.NewNoopRoomActivityRepository()
+	}
+	roomQueueInteractor := usecaseRoomQueue.NewInteractor(pgRoom, pgRoomQueue, ytService, roomActivityWriter)
 
 	// R11a: per-room plain-text chat (active members only; archived
 	// rooms map to 409). The interactor owns trim/CRLF normalization
@@ -318,7 +359,7 @@ func setupAppWithActivityObserver(
 	// auto-queue tables or the global /ws event; it rides
 	// /ws/rooms/{slug} only.
 	pgRoomAutoQueue := persistence.NewPostgresRoomAutoQueueRepository(dbHandle)
-	roomAutoQueueInteractor := usecaseRoomAutoQueue.NewInteractor(pgRoom, pgRoomAutoQueue, ytRelatedFetcher, noopRoomActivityWriter)
+	roomAutoQueueInteractor := usecaseRoomAutoQueue.NewInteractor(pgRoom, pgRoomAutoQueue, ytRelatedFetcher, roomActivityWriter)
 	roomAutoQueueInteractor.SetQueueSnapshotLoader(roomQueueInteractor.GetStateByRoomID)
 	roomAutoQueueInteractor.SetAddRoomAutoQueueSongFunc(func(ctx context.Context, slug string, song *entity.Song, expectedSourceSongID string) (*usecaseRoomAutoQueue.AddRoomAutoQueueSongResult, error) {
 		q, ci, cs, st, el, err := roomQueueInteractor.AddRoomAutoQueueSong(ctx, slug, song, expectedSourceSongID)
@@ -355,7 +396,7 @@ func setupAppWithActivityObserver(
 	// UniqueConnectedUserIDs(slug) so the threshold is captured from
 	// the live connection set at session creation. 30s expiry mirrors
 	// the global vote package.
-	roomVoteInteractor := usecaseRoomVote.NewInteractor(roomQueueInteractor, roomWSHub, 30*time.Second, noopRoomActivityWriter)
+	roomVoteInteractor := usecaseRoomVote.NewInteractor(roomQueueInteractor, roomWSHub, 30*time.Second, roomActivityWriter)
 	roomVoteHandlers := delivery.NewRoomVoteHandlers(roomVoteInteractor, roomQueueInteractor, authInteractor)
 
 	// R09i composition seam: hand the three activity-producing
@@ -416,28 +457,46 @@ func setupAppWithActivityObserver(
 	hostOrAdmin := delivery.RequireRole(entity.RoleHost, entity.RoleAdmin)
 	voterOrAdmin := delivery.RequireRole(entity.RoleGuest, entity.RoleAdmin)
 
-	// HTTP API
+	// HTTP API — contracts that survive the R14c cutover are registered
+	// unconditionally in both modes: auth, priority balance, and
+	// YouTube search remain live per Sprint 029.
 	mux.HandleFunc("POST /api/auth/google", handlers.HandleGoogleLogin)
 	mux.HandleFunc("POST /api/auth", handlers.HandleLogin) // Deprecated
-	mux.HandleFunc("GET /api/queue", handlers.HandleGetQueue)
-	mux.HandleFunc("POST /api/queue/add", auth(handlers.HandleAddSong))
-	mux.HandleFunc("POST /api/queue/skip", auth(hostOrAdmin(handlers.HandleSkipSong)))
-	mux.HandleFunc("POST /api/queue/status", auth(hostOrAdmin(handlers.HandleSetStatus)))
-	mux.HandleFunc("POST /api/queue/sync", auth(hostOrAdmin(handlers.HandleSyncPlayback)))
-	mux.HandleFunc("POST /api/queue/ended", auth(hostOrAdmin(handlers.HandleSongEnded)))
-	mux.HandleFunc("POST /api/queue/prev", auth(hostOrAdmin(handlers.HandlePrevSong)))
-	mux.HandleFunc("POST /api/queue/remove", auth(handlers.HandleRemoveSong))
-	mux.HandleFunc("POST /api/queue/clear", auth(hostOrAdmin(handlers.HandleClearQueue)))
-	mux.HandleFunc("POST /api/queue/volume", auth(hostOrAdmin(handlers.HandleChangeVolume)))
-	mux.HandleFunc("POST /api/queue/prioritize", auth(handlers.HandlePrioritizeSong))
 	mux.HandleFunc("GET /api/user/priority-balance", handlers.HandleGetPriorityBalance)
 	mux.HandleFunc("GET /api/youtube/search", handlers.HandleSearchYouTube)
-	mux.HandleFunc("POST /api/vote/skip", auth(voterOrAdmin(handlers.HandleVoteSkip)))
-	mux.HandleFunc("POST /api/vote/prioritize", auth(voterOrAdmin(handlers.HandleVotePriority)))
 
-	// Auto-queue API
-	mux.HandleFunc("POST /api/autoqueue/toggle", auth(hostOrAdmin(autoQueueHandlers.HandleToggleAutoQueue)))
-	mux.HandleFunc("GET /api/autoqueue/status", autoQueueHandlers.HandleGetAutoQueueStatus)
+	// R14c: ONE central all-or-nothing registration decision for the
+	// approved legacy global contract. In authoritative mode every
+	// retired method+path — and the global /ws HTTP phase — is served
+	// by the single repository-free 410 Gone tombstone (registered
+	// without any auth wrapper so it runs before authentication and
+	// resolves no session). Otherwise the real legacy handlers are
+	// registered exactly as before. There is no per-route runtime
+	// configuration.
+	if opts.roomCutoverAuthoritative {
+		tombstone := delivery.NewGlobalContractTombstone()
+		for _, pattern := range retiredGlobalContractPatterns {
+			mux.HandleFunc(pattern, tombstone)
+		}
+	} else {
+		mux.HandleFunc("GET /api/queue", handlers.HandleGetQueue)
+		mux.HandleFunc("POST /api/queue/add", auth(handlers.HandleAddSong))
+		mux.HandleFunc("POST /api/queue/skip", auth(hostOrAdmin(handlers.HandleSkipSong)))
+		mux.HandleFunc("POST /api/queue/status", auth(hostOrAdmin(handlers.HandleSetStatus)))
+		mux.HandleFunc("POST /api/queue/sync", auth(hostOrAdmin(handlers.HandleSyncPlayback)))
+		mux.HandleFunc("POST /api/queue/ended", auth(hostOrAdmin(handlers.HandleSongEnded)))
+		mux.HandleFunc("POST /api/queue/prev", auth(hostOrAdmin(handlers.HandlePrevSong)))
+		mux.HandleFunc("POST /api/queue/remove", auth(handlers.HandleRemoveSong))
+		mux.HandleFunc("POST /api/queue/clear", auth(hostOrAdmin(handlers.HandleClearQueue)))
+		mux.HandleFunc("POST /api/queue/volume", auth(hostOrAdmin(handlers.HandleChangeVolume)))
+		mux.HandleFunc("POST /api/queue/prioritize", auth(handlers.HandlePrioritizeSong))
+		mux.HandleFunc("POST /api/vote/skip", auth(voterOrAdmin(handlers.HandleVoteSkip)))
+		mux.HandleFunc("POST /api/vote/prioritize", auth(voterOrAdmin(handlers.HandleVotePriority)))
+
+		// Auto-queue API
+		mux.HandleFunc("POST /api/autoqueue/toggle", auth(hostOrAdmin(autoQueueHandlers.HandleToggleAutoQueue)))
+		mux.HandleFunc("GET /api/autoqueue/status", autoQueueHandlers.HandleGetAutoQueueStatus)
+	}
 
 	// Room API (R04) — all routes require a valid bearer token; the resolved
 	// actor user id is injected into the request context by roomAuth.
@@ -633,8 +692,13 @@ func setupAppWithActivityObserver(
 		roomChatHandlers.HandlePostChatMessage(w, r, r.PathValue("slug"), actorFromCtx(r.Context()))
 	}))
 
-	// WebSocket
-	mux.HandleFunc("/ws", hub.RegisterHandler)
+	// WebSocket — in authoritative mode the global /ws HTTP phase is
+	// answered by the 410 tombstone registered above (it never upgrades
+	// and never registers a client); the per-room endpoint is unchanged
+	// in both modes.
+	if !opts.roomCutoverAuthoritative {
+		mux.HandleFunc("/ws", hub.RegisterHandler)
+	}
 	// R07b: per-room WebSocket endpoint. Shares the same ALLOWED_ORIGINS
 	// policy as the global /ws endpoint through roomWSHub.originChecker.
 	mux.HandleFunc("/ws/rooms/{slug}", roomWSHub.RegisterHandler)

@@ -9,6 +9,10 @@ tmp/
 frontend/node_modules/
 frontend/dist/
 
+# Cert material lives in named volumes at runtime; never ship in build context
+letsencrypt-backend/
+letsencrypt-frontend/
+
 # IDE / System
 .vscode/
 .idea/

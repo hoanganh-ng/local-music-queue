@@ -18,6 +18,12 @@ COPY . .
 # Build the application with CGO enabled for SQLite
 RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o server ./cmd/server
 
+# R14c: package the operator cutover CLI alongside the server so the
+# production cutover (Gate 2) can run `docker compose run backend
+# /app/room-cutover ...` inside the deployed image without a separate
+# toolchain.
+RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o room-cutover ./cmd/room-cutover
+
 # Final stage
 FROM alpine:latest
 
@@ -38,8 +44,9 @@ RUN apk add --no-cache \
 # Create directories
 RUN mkdir -p /app/data /app/certs
 
-# Copy binary from builder
+# Copy binaries from builder (server + R14c operator cutover CLI)
 COPY --from=builder /app/server .
+COPY --from=builder /app/room-cutover .
 
 # Copy certificate setup script
 COPY docker/setup-certs.sh /app/setup-certs.sh

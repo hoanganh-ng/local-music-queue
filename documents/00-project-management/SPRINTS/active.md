@@ -1,13 +1,17 @@
 # Active Sprint
 
-**No sprint is currently active.**
+**Active sprint: R14c — Coordinated authoritative room cutover** ([`029-coordinated-authoritative-room-cutover.md`](./029-coordinated-authoritative-room-cutover.md)).
 
-R14d — Frontend global-path retirement behind the cutover build gate — was accepted by the Product Owner and closed on 2026-07-28. PR #25 was merged into `dev` at merge commit `67bd57a8abef92d42cdfefb90069563340147d10`; the final reviewed feature head was `491770ed90e3940307df3933d4236508fac838f3`.
+R14c was approved by the Product Owner and activated on 2026-07-28 on branch `sprint/r14c-coordinated-production-cutover`, cut from `dev` at approved base commit `13c09549fc89febac2c79085afcf7249a43f62a4`.
 
-R14d delivered two frontend artifacts from one source behind the single Vite build-time setting `VITE_ROOM_CUTOVER_AUTHORITATIVE`: the `false` artifact preserves the authoritative pre-cutover Dashboard/global runtime and remains the current rollback-compatible artifact; the `true` artifact lands on RoomEntry, retires legacy global client state, and disables the global `/ws` client. The true artifact has **not** been deployed.
+Gate 1 implementation is open as **PR #26** (base `dev`, changed-file count per GitHub PR #26) with review-head sequence `1502c3a243b3350b6a18ff2454118981f4032357` (initial Gate 1) → `0daa8fbe22b896c6def5f2e75af129792ee41229` (first corrective pass, F1–F6) → `328aba41db44ca1fc41e02ee052d2d6c2c63ca36` (second corrective pass, the reviewed head) → the final corrective head from this pass (exact SHA recorded only in the PR #26 lifecycle ledger). Architect review returned focused findings; the final documentation-only corrective pass is prepared for re-review and Gate 1 remains **pending re-review — not accepted**. The Builder does not merge or advance the sprint.
 
-The accepted verification record reports 443/443 frontend tests and a successful build in each baked mode, plus focused local compatibility checks. Real Google-login and server-authenticated room list/create/open/invite checks remained blocked in the isolated environment and must be completed before or during the separately approved R14c paired maintenance-window smoke test.
+Activation authorizes **Gate 1 only**: implementation, automated verification, Docker/Compose artifact pairing, packaging of the existing `room-cutover` CLI, an isolated production-like rehearsal, and completion of the redacted operational runbook.
 
-R14c is the next sprint in the approved sequence, but it has **not** been activated. R14c, R14e, and all unrelated planned work remain inactive. Production cutover has **not** been executed. Room epic Issue #17 remains open.
+Activation does **not** authorize Gate 2. The Builder must not execute production migration commands, deploy the `true` server/SPA pair, close or reopen public traffic, modify production data or secrets, or perform the live maintenance window. Production execution requires a separate Product Owner go/no-go after Architect review and Gate 1 acceptance.
 
-See [`028-frontend-global-path-retirement.md`](./028-frontend-global-path-retirement.md) and [PR #25](https://github.com/hoanganh-ng/local-music-queue/pull/25) for the complete contract, implementation, verification evidence, review findings, and closure record.
+R14c owns the runtime server flag `--room-cutover-authoritative`, the fail-closed schema/marker startup guard, no-op versus PostgreSQL room-activity writer composition, atomic repository-free `410 Gone` tombstones for all approved legacy global REST routes and `/ws`, deployment pairing with R14d's `VITE_ROOM_CUTOVER_AUTHORITATIVE` bundle, and the production cutover/rollback runbook.
+
+R14d remains closed and accepted. Its `false` bundle remains the pre-cutover and rollback-compatible frontend; its `true` bundle has not been deployed. Production cutover has **not** been executed.
+
+R14e remains inactive. Migration 0010, schema version 10, and legacy-table deletion are not authorized. Room epic Issue #17 remains open.

@@ -104,7 +104,7 @@ func TestAPIIntegration_ServerStarts(t *testing.T) {
 		os.Unsetenv("GOOGLE_CLIENT_ID")
 	})
 
-	mux, _, _, _, _, cleanup, err := setupApp()
+	mux, _, _, _, _, cleanup, err := setupApp(setupOptions{})
 	if err != nil {
 		t.Fatalf("setupApp: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestAPIIntegration_QueueREST(t *testing.T) {
 		os.Unsetenv("GOOGLE_CLIENT_ID")
 	})
 
-	mux, _, _, _, _, cleanup, err := setupApp()
+	mux, _, _, _, _, cleanup, err := setupApp(setupOptions{})
 	if err != nil {
 		t.Fatalf("setupApp: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestAPIIntegration_WebSocketBroadcast(t *testing.T) {
 		os.Unsetenv("GOOGLE_CLIENT_ID")
 	})
 
-	mux, _, _, _, _, cleanup, err := setupApp()
+	mux, _, _, _, _, cleanup, err := setupApp(setupOptions{})
 	if err != nil {
 		t.Fatalf("setupApp: %v", err)
 	}
