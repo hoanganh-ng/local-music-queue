@@ -4,7 +4,7 @@
 **Overlays:** the accepted runbook [`room-cutover-runbook.md`](./room-cutover-runbook.md) (written and reviewed under R14c Gate 1, PR #26, integrated into `dev` as `c8ab4af029d10dda889d1165464e16068a5be573`)
 **Status:** Documentation only. **Nothing in this package has been executed.** Gate 2 production execution remains explicitly pending and requires a Product Owner GO recorded against this package and the runbook.
 
-This package is the single authoritative readiness and governance overlay for Gate 2. It does **not** modify, replace, or reorder any step of the accepted runbook. On any conflict about *what to execute or in what order*, the runbook prevails; on any conflict about *whether execution is authorized*, this package and the Product Owner decision prevail. Placeholders only — no production hostname, credential, DSN, email address, token, or account identity appears here or may ever be committed.
+This package is the single authoritative readiness and governance overlay for Gate 2. Apart from the Architect-required non-argv connection-supply correction applied to the runbook in this same PR (a focused documentation-only security amendment; command order and behavior unchanged), it does **not** modify, replace, or reorder any step of the runbook. On any conflict about *what to execute or in what order*, the runbook prevails; on any conflict about *whether execution is authorized*, this package and the Product Owner decision prevail. Placeholders only — no production hostname, credential, DSN, email address, token, or account identity appears here or may ever be committed.
 
 ## 1. Purpose and authority
 
@@ -37,8 +37,11 @@ Every placeholder used by the runbook, with its owner and the only approved secu
 | `<PROD_HOST>` | Production deployment host | Operator | Operator-local input file; hostname only, no credentials |
 | `<DUMP_FILE>` | Timestamped pre-cutover `pg_dump` archive | Operator | Created inside the window; copied to `<BACKUP_LOCATION>`; mode `0600` |
 | `<EVIDENCE_DIR>` | Operator-controlled host directory for all reports | Operator | Created before the window, mode `0700`, outside the repository working tree and any web-served path; every report `0600`; bind-mounted into one-off containers; contents never committed |
-| `<SNAPSHOT_DSN>` | Read-only production snapshot DSN | Operator (provisions) | Supplied only in the operator's private shell / operator-local input file with `0600`; never committed, never echoed into retained logs |
-| `<ISOLATED_SNAPSHOT_DSN>` | Throwaway snapshot copy for the `up --dry-run` rehearsal only | Operator (provisions) | Same handling as `<SNAPSHOT_DSN>`; destroyed after rehearsal |
+| `<SNAPSHOT_DSN>` | Read-only production snapshot DSN | Operator (provisions) | Exists **only** inside the protected connection bundle (Section 2.4) — as the `r14c-snapshot` service in `<PGSERVICE_FILE>` for host `psql`, and as the `SNAPSHOT_DSN` export in `<CONNECTION_ENV_FILE>` for the containerized rehearsal. Never in argv, the input file, retained logs, or any committed file |
+| `<ISOLATED_SNAPSHOT_DSN>` | Throwaway snapshot copy for the `up --dry-run` rehearsal only | Operator (provisions) | Same handling as `<SNAPSHOT_DSN>` (`r14c-snapshot-isolated` service / `ISOLATED_SNAPSHOT_DSN` export); destroyed after rehearsal |
+| `<PGSERVICE_FILE>` | libpq connection service file (services `r14c-snapshot`, `r14c-snapshot-isolated`, `r14c-live`) | Operator (creates) | Part of the connection bundle: operator-local, mode `0600`, outside the repo and web-served paths; selected via `PGSERVICEFILE`/`PGSERVICE` environment variables; holds no passwords; never committed |
+| `<PGPASS_FILE>` | libpq password file for the bundle services | Operator (creates) | Part of the connection bundle: mode `0600`, referenced only via `PGPASSFILE`; the sole place passwords live; never committed |
+| `<CONNECTION_ENV_FILE>` | Shell env file exporting `SNAPSHOT_DSN` / `ISOLATED_SNAPSHOT_DSN` for containerized `room-cutover` | Operator (creates) | Part of the connection bundle: mode `0600`; loaded with `set -a; . <CONNECTION_ENV_FILE>; set +a` in the private shell; values reach a command only via a per-command `DATABASE_URL="$…"` prefix and name-only `-e DATABASE_URL`; never committed |
 
 ### 2.3 Environment variables and fixed identities referenced by the runbook
 
@@ -46,7 +49,8 @@ Every placeholder used by the runbook, with its owner and the only approved secu
 |---|---|---|---|
 | `ROOM_CUTOVER_AUTHORITATIVE` | The single Compose pairing switch in the deployment `.env`; also used as an inline per-command prefix to pin rehearsal commands to the prebuilt `:true` backend image | Operator | Set in the deployment `.env` (untracked) only at runbook step 7; rehearsal commands always carry the inline prefix |
 | `VITE_ROOM_CUTOVER_AUTHORITATIVE` | Frontend build argument baked at build time | Operator (via Compose build) | Never set independently of the backend half |
-| `DATABASE_URL` | Used by the backup `pg_dump` step | Operator | Lives only in the deployment environment; never committed or echoed |
+| `DATABASE_URL` | The only approved connection channel into `room-cutover` (its documented fallback when `--postgres` is omitted); also the backend service's own connection source | Operator | Live window: consumed from the Compose backend service environment (deployment `.env`). Rehearsals: per-command `DATABASE_URL="$SNAPSHOT_DSN"` / `"$ISOLATED_SNAPSHOT_DSN"` prefix from the connection bundle, forwarded by name only with `-e DATABASE_URL`. Never committed, echoed, or placed in argv |
+| `PGSERVICEFILE` / `PGSERVICE` / `PGPASSFILE` | libpq environment selectors for host `psql` / `pg_dump` | Operator | Point at the connection bundle files; the values placed in argv-visible positions are only file paths and service names, never DSNs or passwords |
 | `LIVE_EMAIL` | Transient carrier for the live account address | Operator | `read -rs`, per-command environment scope, `unset` afterwards; never in process arguments, files, or history |
 | `HOST_EMAILS` / `ADMIN_EMAILS` | Account-level role allow-lists | Product Owner (content), Operator (deployment env) | Explanatory only in the runbook — they do **not** drive login eligibility or room-host membership; do not modify for the cutover |
 | `local-music-queue-{backend,frontend}:{false,true}` | Mode-qualified image identities | Operator | Built from `<REVIEWED_COMMIT_SHA>`; the `true` build never overwrites the `false` pair |
@@ -54,12 +58,21 @@ Every placeholder used by the runbook, with its owner and the only approved secu
 | `rollback-{backend,frontend}-r14c.tar` | Durable rollback archives | Operator | Stored in `<BACKUP_LOCATION>`, mode `0600`, retained until the rollback window closes |
 | `plan-report.json`, `up-dry-run.json`, `live-plan.json`, `live-up.json`, `live-verify.json`, `compose-false.yml`, `compose-true.yml` | Evidence artifacts | Operator | All under `<EVIDENCE_DIR>`, mode `0600`, PII-free, never committed |
 
+### 2.4 Approved connection-supply model (no DSN or credential in argv)
+
+This is the **single approved model** for supplying database connection data during Gate 2; no alternative that expands a DSN or credential into a command line is permitted. Rationale: argv is visible through `ps`/`/proc/*/cmdline` and can persist in shell history and retained logs.
+
+- All connection data lives in one operator-local **protected connection bundle** — `<PGSERVICE_FILE>`, `<PGPASS_FILE>`, `<CONNECTION_ENV_FILE>` — each mode `0600`, outside the repository working tree and any web-served path (see the runbook's "Connection supply" section).
+- Host `psql` and `pg_dump` connect **only** via `PGSERVICEFILE`/`PGSERVICE`/`PGPASSFILE` environment selectors (`r14c-snapshot`, `r14c-snapshot-isolated`, `r14c-live`).
+- Every `room-cutover` invocation **omits `--postgres`** and consumes its documented `DATABASE_URL` fallback: in rehearsals via a per-command `DATABASE_URL="$…"` environment prefix plus name-only `docker compose run -e DATABASE_URL` passthrough; in the live window from the Compose backend service environment (deployment `.env`). A value is never typed after `-e`.
+- **No-argv rule:** no DSN, password, or credential may appear as a positional argument or flag value of `psql`, `pg_dump`, `pg_restore`, or any `room-cutover` invocation, at any Gate 2 step.
+
 ## 3. Maintenance roles
 
 | Role | Assignee | Responsibilities |
 |---|---|---|
 | Product Owner | *(unassigned — blocker B1)* | Approves the six operator inputs; records GO / NO-GO / DEFER (Section 9); owns the reopen-traffic decision after the smoke matrix; closes the rollback window; decides forward recovery vs database restoration after any rollback |
-| Operator | *(unassigned — blocker B1)* | The only person who executes runbook commands; provisions `<SNAPSHOT_DSN>`, `<ISOLATED_SNAPSHOT_DSN>`, `<BACKUP_LOCATION>`, `<EVIDENCE_DIR>`; custodian of all evidence artifacts; performs rollback on any failed mandatory check |
+| Operator | *(unassigned — blocker B1)* | The only person who executes runbook commands; provisions `<SNAPSHOT_DSN>`, `<ISOLATED_SNAPSHOT_DSN>`, the protected connection bundle (Section 2.4), `<BACKUP_LOCATION>`, `<EVIDENCE_DIR>`; custodian of all evidence artifacts; performs rollback on any failed mandatory check |
 | Scribe / witness (optional but recommended) | *(unassigned)* | Timestamps each runbook step, records smoke-matrix initials, keeps the abort/rollback log; must never handle credentials |
 | Builder (AI agent) | n/a | **Prohibited from all Gate 2 actions.** May only produce/update documentation before the window on Product Owner instruction |
 
@@ -73,6 +86,7 @@ One person may hold Product Owner and Scribe; the Operator role must not be comb
 - The completed smoke-matrix checklist with operator initials and timestamps is retained in `<EVIDENCE_DIR>`.
 - Nothing from `<EVIDENCE_DIR>` or `<BACKUP_LOCATION>` is ever committed to the repository; these artifacts can contain real identities.
 - The operator-local input file (Section 7) lives outside the repository, mode `0600`, and is destroyed or archived per Product Owner instruction after the rollback window closes.
+- The protected connection bundle (`<PGSERVICE_FILE>`, `<PGPASS_FILE>`, `<CONNECTION_ENV_FILE>`, each mode `0600`, outside the repository and web-served paths) is created and held solely by the Operator; the snapshot entries are removed when the snapshots are destroyed, and the whole bundle is destroyed or rotated per Product Owner instruction after the rollback window closes. It is never committed, copied into `<EVIDENCE_DIR>`, or shared.
 
 ## 5. Current blockers
 
@@ -82,7 +96,7 @@ All of the following block Gate 2 entry today:
 - **B2 — Operator inputs unapproved.** None of the six Section 2.1 inputs has an approved value; `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` additionally needs the account holder's availability during the window.
 - **B3 — Window not scheduled.** `<MAINTENANCE_WINDOW>` is not agreed; closure/announcement channels are not identified.
 - **B4 — Backup posture unverified.** `<BACKUP_LOCATION>` writability, ≥ 30-day retention, and restore-readability have not been demonstrated.
-- **B5 — Snapshot infrastructure not provisioned.** `<SNAPSHOT_DSN>` and `<ISOLATED_SNAPSHOT_DSN>` do not exist yet; the pre-window plan and `up --dry-run` rehearsals cannot run without them.
+- **B5 — Snapshot infrastructure not provisioned.** `<SNAPSHOT_DSN>` and `<ISOLATED_SNAPSHOT_DSN>` do not exist yet and the protected connection bundle (Section 2.4) has not been created; the pre-window plan and `up --dry-run` rehearsals cannot run without them.
 - **B6 — Deployment-host commit not confirmed.** `<REVIEWED_COMMIT_SHA>` has not been declared or verified on `<PROD_HOST>`.
 - **B7 — GO record absent.** No Product Owner GO / NO-GO / DEFER decision has been recorded (Section 9).
 
@@ -96,20 +110,21 @@ The runbook's pre-window checklist (steps 1–14) is the executable procedure. T
 2. False/false rollback pair captured from the **running containers** by immutable ID + digest, pinned under `rollback-r14c` tags, archived to `<BACKUP_LOCATION>`, and re-verified to resolve to the captured IDs — all **before** any rebuild or prune (step 2).
 3. `<EVIDENCE_DIR>` exists, mode `0700`, outside the repo and web-served paths (step 3).
 4. `<TARGET_ROOM_SLUG>` verified unused and non-reserved (step 4).
-5. `<HOST_USER_ID>` existence check returns exactly one row, boolean output only (step 5).
-6. `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` → `<HOST_USER_ID>` equality confirmed via the `read -rs` / `\getenv` / `:'email'` procedure; result `t`; address never on a command line or in a file (step 6).
+5. `<HOST_USER_ID>` existence check returns exactly one row, boolean output only, connecting via `PGSERVICE=r14c-snapshot` from the bundle — no DSN in argv (step 5).
+6. `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` → `<HOST_USER_ID>` equality confirmed via the `read -rs` / `\getenv` / `:'email'` procedure with the bundle's `PGSERVICE` connection; result `t`; neither the address nor a DSN ever on a command line or in a file (step 6).
 7. Login for the live account confirmed on the current false deployment, distinguishing login eligibility, account-level `users.role`, and room-host membership (step 8).
 8. Both Compose renders reviewed in `<EVIDENCE_DIR>`; each render pairs backend and frontend in the **same** mode; false render references the `:false` pair, true render the `:true` pair (step 9).
 9. Both artifact pairs built from `<REVIEWED_COMMIT_SHA>`; backend image contains `/app/server` and `/app/room-cutover`; `:true` pair IDs recorded (step 10).
-10. Snapshot `plan` and isolated `up --dry-run` rehearsals completed **through the packaged `:true` backend image with the inline `ROOM_CUTOVER_AUTHORITATIVE=true` prefix**, reports durable on the host, `0600`, PII-free, counts plausible and mutually consistent (steps 11–12). These runs also prove first-cutover readiness as defined by R14b: target slug absent, `room_activities` empty, and the legacy singleton source rows present — exactly one `queue_state` row (`id = 1`) and exactly one `auto_queue_config` row (`id = 1`) — with a missing singleton failing up front, distinctly from other failures.
+10. Snapshot `plan` and isolated `up --dry-run` rehearsals completed **through the packaged `:true` backend image with the inline `ROOM_CUTOVER_AUTHORITATIVE=true` prefix**, with the snapshot DSNs supplied per Section 2.4 (per-command `DATABASE_URL` prefix, name-only `-e DATABASE_URL`, `--postgres` never used), reports durable on the host, `0600`, PII-free, counts plausible and mutually consistent (steps 11–12). These runs also prove first-cutover readiness as defined by R14b: target slug absent, `room_activities` empty, and the legacy singleton source rows present — exactly one `queue_state` row (`id = 1`) and exactly one `auto_queue_config` row (`id = 1`) — with a missing singleton failing up front, distinctly from other failures.
 11. Gate 1 isolated end-to-end rehearsal evidence accepted (step 13).
 12. `<BACKUP_LOCATION>` writable, verified, ≥ 30-day retention (step 14).
 13. PostgreSQL migration state clean and schema version exactly 9 (the CLI refuses anything else); the client used for identity checks supports `\getenv` (psql ≥ 15; deployment runs PostgreSQL 16).
 14. Rollback and abort rules (Section 8 of this package; runbook Rollback section) read aloud and acknowledged by Operator and Product Owner.
+15. Protected connection bundle in place per Section 2.4: `<PGSERVICE_FILE>`, `<PGPASS_FILE>`, `<CONNECTION_ENV_FILE>` exist, each mode `0600`, outside the repo and web-served paths; spot-check confirms no planned command carries a DSN or credential in argv (`--postgres` unused everywhere).
 
 ## 7. Operator-local input template
 
-A placeholder-only template is tracked at [`room-cutover-gate2-inputs.template.md`](./room-cutover-gate2-inputs.template.md). Before the GO / NO-GO review the Operator copies it **outside the repository working tree** (alongside, or under, `<EVIDENCE_DIR>`), sets mode `0600`, and fills it in. The filled copy is never committed, never web-served, and never contains the live Google account address — that value exists only transiently in `LIVE_EMAIL` per Section 2.1.
+A placeholder-only template is tracked at [`room-cutover-gate2-inputs.template.md`](./room-cutover-gate2-inputs.template.md). Before the GO / NO-GO review the Operator copies it **outside the repository working tree** (alongside, or under, `<EVIDENCE_DIR>`), sets mode `0600`, and fills it in. The filled copy is never committed, never web-served, and never contains the live Google account address — that value exists only transiently in `LIVE_EMAIL` per Section 2.1. It also never contains a DSN or password: connection data lives only in the protected connection bundle (Section 2.4), and the input file records only the bundle file **paths**.
 
 ## 8. Abort rules
 
@@ -126,7 +141,7 @@ Gate 2 may be entered only when every entry criterion below is met. The checklis
 | # | Entry criterion | Met? |
 |---|---|---|
 | E1 | Gate 1 integrated: PR #26 squash-merged into `dev` as `c8ab4af029d10dda889d1165464e16068a5be573`; runbook accepted | ☐ |
-| E2 | All six operator inputs (Section 2.1) approved, supplied via their secure methods, and recorded in the operator-local input file | ☐ |
+| E2 | All six operator inputs (Section 2.1) approved, supplied via their secure methods, and recorded in the operator-local input file; the protected connection bundle (Section 2.4) is in place and no command supplies a DSN or credential via argv | ☐ |
 | E3 | Roles assigned (Section 3): named Operator and Product Owner-of-record; Operator ≠ Product Owner | ☐ |
 | E4 | `<MAINTENANCE_WINDOW>` scheduled with announcement plan for closing and reopening traffic | ☐ |
 | E5 | Backup posture verified: `<BACKUP_LOCATION>` writable, ≥ 30-day retention, restore-readability demonstrated | ☐ |

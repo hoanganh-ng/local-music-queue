@@ -11,6 +11,8 @@ Usage (see [`room-cutover-gate2-readiness.md`](./room-cutover-gate2-readiness.md
 
 Hard rule: `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` is **never written into the filled copy** (or any other file). It is supplied only at execution time via `read -rs` into `LIVE_EMAIL` per the runbook. Record only a confirmation reference here.
 
+Hard rule: **no DSN, password, or other connection credential is ever written into the filled copy either.** Connection data lives only in the protected connection bundle (`<PGSERVICE_FILE>`, `<PGPASS_FILE>`, `<CONNECTION_ENV_FILE>`, each mode `0600` — readiness package Section 2.4), and commands consume it exclusively through environment/service/passfile channels — never through positional arguments and never as a value given to the `--postgres` flag. This file records only the bundle file **paths**.
+
 ## Operator inputs (approved at GO / NO-GO)
 
 | Field | Value |
@@ -29,8 +31,10 @@ Hard rule: `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` is **never written into the filled co
 | `REVIEWED_COMMIT_SHA` | `<REVIEWED_COMMIT_SHA>` |
 | `PROD_HOST` (hostname only, no credentials) | `<PROD_HOST>` |
 | `EVIDENCE_DIR` (host path, mode `0700`) | `<EVIDENCE_DIR>` |
-| `SNAPSHOT_DSN` (read-only snapshot) | `<SNAPSHOT_DSN>` |
-| `ISOLATED_SNAPSHOT_DSN` (throwaway dry-run copy) | `<ISOLATED_SNAPSHOT_DSN>` |
+| `SNAPSHOT_DSN` / `ISOLATED_SNAPSHOT_DSN` | DO NOT WRITE DSNs — they live only in the connection bundle below |
+| `PGSERVICE_FILE` (path only, mode `0600`) | `<PGSERVICE_FILE>` |
+| `PGPASS_FILE` (path only, mode `0600`) | `<PGPASS_FILE>` |
+| `CONNECTION_ENV_FILE` (path only, mode `0600`) | `<CONNECTION_ENV_FILE>` |
 | `DUMP_FILE` (timestamped, set inside the window) | `<DUMP_FILE>` |
 | `FALSE_PAIR_IMAGE_TAGS` (backend ID+digest line) | `<FALSE_PAIR_BACKEND_ID_DIGEST>` |
 | `FALSE_PAIR_IMAGE_TAGS` (frontend ID+digest line) | `<FALSE_PAIR_FRONTEND_ID_DIGEST>` |

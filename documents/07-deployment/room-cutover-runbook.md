@@ -1,7 +1,7 @@
 # R14c Production Runbook — Coordinated Authoritative Room Cutover
 
 **Sprint:** 029 (R14c) — `documents/00-project-management/SPRINTS/029-coordinated-authoritative-room-cutover.md`
-**Status:** Written and reviewed under Gate 1. **NOT executed.** Gate 2 (production execution) requires a separate Product Owner go/no-go.
+**Status:** Written and reviewed under Gate 1. **NOT executed.** Gate 2 (production execution) requires a separate Product Owner go/no-go. Amended under Sprint 030 (PR #27 Architect review) with one focused documentation-only security correction: all connection data is supplied through protected non-argv channels (see "Connection supply" below); command order and behavior are unchanged.
 
 This runbook uses **placeholders only**. No production hostname, credential, DSN, email address, token, or account identity appears here. Every `<PLACEHOLDER>` must be filled in by the operator from the approved Gate 2 inputs at execution time and must never be committed to the repository.
 
@@ -16,7 +16,17 @@ This runbook uses **placeholders only**. No production hostname, credential, DSN
 | `<BACKUP_LOCATION>` | Verified destination for the pre-cutover `pg_dump` | ≥ 30-day retention |
 | `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` | Real allow-listed Google account for the smoke matrix | Mandatory (R14d's isolated review could not exercise real login) |
 
-Supporting placeholders used below: `<REVIEWED_COMMIT_SHA>`, `<FALSE_PAIR_IMAGE_TAGS>`, `<TRUE_PAIR_IMAGE_TAGS>`, `<PROD_HOST>`, `<DUMP_FILE>`, `<EVIDENCE_DIR>`, `<SNAPSHOT_DSN>` (read-only production snapshot), `<ISOLATED_SNAPSHOT_DSN>` (a throwaway copy of the snapshot used only for the `up --dry-run` rehearsal).
+Supporting placeholders used below: `<REVIEWED_COMMIT_SHA>`, `<FALSE_PAIR_IMAGE_TAGS>`, `<TRUE_PAIR_IMAGE_TAGS>`, `<PROD_HOST>`, `<DUMP_FILE>`, `<EVIDENCE_DIR>`, `<SNAPSHOT_DSN>` (read-only production snapshot), `<ISOLATED_SNAPSHOT_DSN>` (a throwaway copy of the snapshot used only for the `up --dry-run` rehearsal), `<PGSERVICE_FILE>`, `<PGPASS_FILE>`, `<CONNECTION_ENV_FILE>` (the protected connection bundle defined below).
+
+## Connection supply — no DSN or credential in argv
+
+No PostgreSQL DSN, password, or other connection credential may ever appear as a command-line argument (positional or flag value) of `psql`, `pg_dump`, `pg_restore`, or any `room-cutover` invocation: argv is visible through `ps`/`/proc/*/cmdline` and can land in shell history and retained logs. All connection data lives in one operator-local **protected connection bundle**, each file mode `0600`, outside the repository working tree and any web-served path, and reaches every tool through the environment only:
+
+- `<PGSERVICE_FILE>` — a libpq connection service file defining services `r14c-snapshot` (the read-only production snapshot), `r14c-snapshot-isolated` (the throwaway dry-run copy), and `r14c-live` (the live database; used only for the in-window backup). Host `psql`/`pg_dump` commands select a service with `PGSERVICEFILE`/`PGSERVICE`; no DSN in argv.
+- `<PGPASS_FILE>` — the matching libpq password file, referenced via `PGPASSFILE`; passwords never appear in the service file, argv, or any other file.
+- `<CONNECTION_ENV_FILE>` — a shell environment file exporting `SNAPSHOT_DSN` and `ISOLATED_SNAPSHOT_DSN` for the containerized `room-cutover` rehearsals. The operator loads it into a private shell with `set -a; . <CONNECTION_ENV_FILE>; set +a` and hands a value to a single command through a per-command `DATABASE_URL="$…"` environment prefix plus name-only `docker compose run -e DATABASE_URL` passthrough — the value is never typed after `-e` and never appears in argv. `room-cutover` reads `DATABASE_URL` (or `MIGRATE_DATABASE_URL`) whenever `--postgres` is omitted; **`--postgres` is never used in this runbook.**
+
+`<SNAPSHOT_DSN>` and `<ISOLATED_SNAPSHOT_DSN>` therefore exist only inside the connection bundle; they are never written into any command line, report, or committed file.
 
 `<EVIDENCE_DIR>` is an operator-controlled host directory (outside the repository working tree and outside any web-served path) that holds every cutover report and rendered configuration. Reports are written *through a bind mount* so they survive `docker compose run --rm`. Create it before the window with mode `0700` and set every report file to `0600` (see the pre-window checklist). Never commit real reports or identities from `<EVIDENCE_DIR>` to the repository.
 
@@ -76,20 +86,22 @@ Never set the two halves independently. Flipping the value requires `docker comp
    ```
 
 4. Confirm `<TARGET_ROOM_SLUG>` is unused: authenticated `GET /api/rooms` and a direct slug lookup must show no existing room with that slug; the slug must not be reserved.
-5. Validate `<HOST_USER_ID>` as a boolean/existence check (do not print the row into any retained log): the query must return exactly one row for a positive integer id.
+5. Validate `<HOST_USER_ID>` as a boolean/existence check (do not print the row into any retained log): the query must return exactly one row for a positive integer id. Connection data comes from the protected bundle; nothing sensitive appears in argv.
 
    ```bash
-   # Prints 't' iff a users row with this positive id exists. No PII in output.
-   psql "<SNAPSHOT_DSN>" -tAc "SELECT EXISTS (SELECT 1 FROM users WHERE id = <HOST_USER_ID> AND id > 0);"
+   # Prints 't' iff a users row with this positive id exists. No PII in output, no DSN in argv.
+   PGSERVICEFILE=<PGSERVICE_FILE> PGPASSFILE=<PGPASS_FILE> PGSERVICE=r14c-snapshot \
+     psql -tAc "SELECT EXISTS (SELECT 1 FROM users WHERE id = <HOST_USER_ID> AND id > 0);"
    ```
 
 6. Confirm the account represented by `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` resolves to that **same** `<HOST_USER_ID>`, as a secure operator-only comparison. Bind the real address through an environment variable so it never lands in a committed file, retained log, or shell history, and compare by boolean equality rather than printing the stored identity. Keep the address out of **process arguments** as well: hand it to `psql` through the environment and bind it inside the psql process with `\getenv` into a **quoted psql variable** (the `:'name'` interpolation), never on the command line and never by shell-interpolating it into the SQL string, so it is invisible to `ps`/`/proc/*/cmdline` and a value containing quotes or other SQL metacharacters cannot alter the query:
 
    ```bash
    # Operator pastes the real allow-listed address into their private shell; not echoed,
-   # never written to a file, never placed on any command line.
+   # never written to a file, never placed on any command line. Connection data comes
+   # from the protected bundle; neither the address nor a DSN appears in argv.
    read -rs LIVE_EMAIL
-   LIVE_EMAIL="$LIVE_EMAIL" psql "<SNAPSHOT_DSN>" -tA <<'SQL'
+   LIVE_EMAIL="$LIVE_EMAIL" PGSERVICEFILE=<PGSERVICE_FILE> PGPASSFILE=<PGPASS_FILE> PGSERVICE=r14c-snapshot psql -tA <<'SQL'
    \getenv email LIVE_EMAIL
    SELECT (SELECT id FROM users WHERE lower(email) = lower(:'email')) = <HOST_USER_ID>;
    SQL
@@ -120,26 +132,30 @@ Never set the two halves independently. Flipping the value requires `docker comp
     ```
 
     Confirm the backend image contains both `/app/server` and `/app/room-cutover`, and record the `:true` pair IDs/digests as `<TRUE_PAIR_IMAGE_TAGS>` the same way as step 2.
-11. Run a read-only plan against a **production snapshot** (never the live database at this stage), **through the packaged `:true` backend image** so the rehearsal exercises the same binary that will run the cutover. Bind-mount `<EVIDENCE_DIR>` into the one-off container so the report survives `--rm`, then confirm it landed on the host and lock it down:
+11. Run a read-only plan against a **production snapshot** (never the live database at this stage), **through the packaged `:true` backend image** so the rehearsal exercises the same binary that will run the cutover. The snapshot DSN reaches the container through the environment only: load the protected connection env file into the private shell, prefix the single command with `DATABASE_URL="$SNAPSHOT_DSN"`, and forward it by **name only** with `-e DATABASE_URL` (`room-cutover` falls back to `DATABASE_URL` because `--postgres` is omitted; never pass `--postgres` and never type a value after `-e`). Bind-mount `<EVIDENCE_DIR>` into the one-off container so the report survives `--rm`, then confirm it landed on the host and lock it down:
 
     ```bash
-    ROOM_CUTOVER_AUTHORITATIVE=true docker compose run --rm --no-deps -v <EVIDENCE_DIR>:/evidence backend /app/room-cutover plan \
+    set -a; . <CONNECTION_ENV_FILE>; set +a   # exports SNAPSHOT_DSN / ISOLATED_SNAPSHOT_DSN (file mode 0600)
+    DATABASE_URL="$SNAPSHOT_DSN" ROOM_CUTOVER_AUTHORITATIVE=true docker compose run --rm --no-deps \
+      -e DATABASE_URL -v <EVIDENCE_DIR>:/evidence backend /app/room-cutover plan \
       --room-slug <TARGET_ROOM_SLUG> --room-name "<TARGET_ROOM_NAME>" --host-user-id <HOST_USER_ID> \
-      --postgres "<SNAPSHOT_DSN>" --report-file /evidence/plan-report.json
+      --report-file /evidence/plan-report.json
     test -f <EVIDENCE_DIR>/plan-report.json && chmod 0600 <EVIDENCE_DIR>/plan-report.json
     ```
 
-    Review the report; it must be PII-free and its counts must look plausible against known production volume. (The inline `ROOM_CUTOVER_AUTHORITATIVE=true` prefix makes Compose unambiguously select the prebuilt `local-music-queue-backend:true` image from step 10, regardless of what the deployment `.env` currently holds.)
-12. Run `room-cutover up --dry-run` against an **isolated copy** of the snapshot (`<ISOLATED_SNAPSHOT_DSN>`, never the live database or the shared snapshot), again **through the packaged backend image** with `<EVIDENCE_DIR>` bind-mounted, writing a **separate** durable report and locking it down. Confirm it reports the same evidence as the plan without writing:
+    Review the report; it must be PII-free and its counts must look plausible against known production volume. (The inline `ROOM_CUTOVER_AUTHORITATIVE=true` prefix makes Compose unambiguously select the prebuilt `local-music-queue-backend:true` image from step 10, regardless of what the deployment `.env` currently holds; the inline `DATABASE_URL` prefix scopes the snapshot DSN to this one command without exporting it to the wider session.)
+12. Run `room-cutover up --dry-run` against an **isolated copy** of the snapshot (never the live database or the shared snapshot), again **through the packaged backend image** with `<EVIDENCE_DIR>` bind-mounted, writing a **separate** durable report and locking it down. The isolated DSN is supplied the same non-argv way — `DATABASE_URL="$ISOLATED_SNAPSHOT_DSN"` prefix plus name-only `-e DATABASE_URL`; `--postgres` is never used. Confirm it reports the same evidence as the plan without writing:
 
     ```bash
-    ROOM_CUTOVER_AUTHORITATIVE=true docker compose run --rm --no-deps -v <EVIDENCE_DIR>:/evidence backend /app/room-cutover up --dry-run \
+    DATABASE_URL="$ISOLATED_SNAPSHOT_DSN" ROOM_CUTOVER_AUTHORITATIVE=true docker compose run --rm --no-deps \
+      -e DATABASE_URL -v <EVIDENCE_DIR>:/evidence backend /app/room-cutover up --dry-run \
       --room-slug <TARGET_ROOM_SLUG> --room-name "<TARGET_ROOM_NAME>" --host-user-id <HOST_USER_ID> \
-      --postgres "<ISOLATED_SNAPSHOT_DSN>" --report-file /evidence/up-dry-run.json
+      --report-file /evidence/up-dry-run.json
     test -f <EVIDENCE_DIR>/up-dry-run.json && chmod 0600 <EVIDENCE_DIR>/up-dry-run.json
+    unset SNAPSHOT_DSN ISOLATED_SNAPSHOT_DSN
     ```
 
-    Confirm `<EVIDENCE_DIR>/up-dry-run.json` exists on the host and that its counts/hashes match `plan-report.json`; a missing report means the bind mount was omitted and the step must be re-run. (As in step 11, the inline `ROOM_CUTOVER_AUTHORITATIVE=true` prefix pins the rehearsal to the prebuilt `:true` backend image.)
+    Confirm `<EVIDENCE_DIR>/up-dry-run.json` exists on the host and that its counts/hashes match `plan-report.json`; a missing report means the bind mount was omitted and the step must be re-run. (As in step 11, the inline `ROOM_CUTOVER_AUTHORITATIVE=true` prefix pins the rehearsal to the prebuilt `:true` backend image. The trailing `unset` clears both snapshot DSNs from the private shell once the rehearsals are done.)
 13. Confirm the isolated end-to-end rehearsal (Gate 1 evidence) is accepted.
 14. Confirm `<BACKUP_LOCATION>` is writable, verified, and retains dumps for at least 30 days.
 
@@ -147,11 +163,13 @@ Never set the two halves independently. Flipping the value requires `docker comp
 
 Execute strictly in order inside `<MAINTENANCE_WINDOW>`. Any failure at any step → go directly to **Rollback**.
 
+Connection supply in this window follows the no-argv rule: every `room-cutover` invocation (steps 4–6) omits `--postgres` and consumes the `DATABASE_URL` already present in the Compose backend service environment (the deployment `.env`); the backup connects through the protected service/passfile bundle. No DSN or credential appears in any command line.
+
 1. **Close public traffic** (stop ingress/port exposure at `<PROD_HOST>`; method per deployment topology). Announce closure.
-2. **Backup:** take and verify a timestamped dump:
+2. **Backup:** take and verify a timestamped dump, connecting via the `r14c-live` service from the protected bundle (no DSN in argv):
 
    ```bash
-   pg_dump "$DATABASE_URL" -Fc -f <DUMP_FILE>
+   PGSERVICEFILE=<PGSERVICE_FILE> PGPASSFILE=<PGPASS_FILE> PGSERVICE=r14c-live pg_dump -Fc -f <DUMP_FILE>
    pg_restore --list <DUMP_FILE> | head    # verify readability
    ```
 
