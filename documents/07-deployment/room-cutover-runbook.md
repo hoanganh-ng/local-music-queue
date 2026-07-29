@@ -16,7 +16,7 @@ This runbook uses **placeholders only**. No production hostname, credential, DSN
 | `<BACKUP_LOCATION>` | Verified destination for the pre-cutover `pg_dump` | ≥ 30-day retention |
 | `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` | Real allow-listed Google account for the smoke matrix | Mandatory (R14d's isolated review could not exercise real login) |
 
-Supporting placeholders used below: `<REVIEWED_COMMIT_SHA>`, `<FALSE_PAIR_IMAGE_TAGS>`, `<TRUE_PAIR_IMAGE_TAGS>`, `<PROD_HOST>`, `<DUMP_FILE>`, `<EVIDENCE_DIR>`.
+Supporting placeholders used below: `<REVIEWED_COMMIT_SHA>`, `<FALSE_PAIR_IMAGE_TAGS>`, `<TRUE_PAIR_IMAGE_TAGS>`, `<PROD_HOST>`, `<DUMP_FILE>`, `<EVIDENCE_DIR>`, `<SNAPSHOT_DSN>` (read-only production snapshot), `<ISOLATED_SNAPSHOT_DSN>` (a throwaway copy of the snapshot used only for the `up --dry-run` rehearsal).
 
 `<EVIDENCE_DIR>` is an operator-controlled host directory (outside the repository working tree and outside any web-served path) that holds every cutover report and rendered configuration. Reports are written *through a bind mount* so they survive `docker compose run --rm`. Create it before the window with mode `0700` and set every report file to `0600` (see the pre-window checklist). Never commit real reports or identities from `<EVIDENCE_DIR>` to the repository.
 
@@ -33,14 +33,19 @@ Never set the two halves independently. Flipping the value requires `docker comp
 ## Pre-window checklist (all items before `<MAINTENANCE_WINDOW>` opens)
 
 1. Confirm the reviewed commit: `git rev-parse HEAD` on the deployment host equals `<REVIEWED_COMMIT_SHA>` (the accepted R14c review commit).
-2. Record the exact **false/false rollback pair** as immutable identifiers: capture the image ID *and* the repo digest of the currently-live backend and frontend, not just the mutable `:false` tag:
+2. Record the exact **false/false rollback pair** as immutable identifiers, and do this **before any rebuild or image prune** so no later `docker compose build` or `docker image prune` can move a tag or garbage-collect the layers you are relying on. Resolve the image straight from the **currently running** backend and frontend *containers* rather than from a tag (a tag such as `:false` is mutable and may not even point at what is live), then capture that image's ID *and* repo digest:
 
    ```bash
-   docker image inspect local-music-queue-backend:false  --format '{{.Id}} {{join .RepoDigests ","}}'
-   docker image inspect local-music-queue-frontend:false --format '{{.Id}} {{join .RepoDigests ","}}'
+   # Resolve the image each LIVE container is actually running, by container id.
+   backend_img=$(docker inspect --format '{{.Image}}' "$(docker compose ps -q backend)")
+   frontend_img=$(docker inspect --format '{{.Image}}' "$(docker compose ps -q frontend)")
+
+   # Record the immutable ID + repo digest of each running image.
+   docker image inspect "$backend_img"  --format '{{.Id}} {{join .RepoDigests ","}}'
+   docker image inspect "$frontend_img" --format '{{.Id}} {{join .RepoDigests ","}}'
    ```
 
-   Record both lines as `<FALSE_PAIR_IMAGE_TAGS>`. Because the images are mode-qualified (`:false` vs `:true`), a later `true` build cannot overwrite this pair; these recorded IDs/digests are the only approved rollback artifacts.
+   Record both output lines as `<FALSE_PAIR_IMAGE_TAGS>` — these captured IDs/digests are the only approved rollback artifacts, and they must be written down before step 10 builds anything or any prune runs. Because the images are mode-qualified (`:false` vs `:true`), a later `true` build cannot overwrite this pair; the recorded immutable IDs let Rollback re-select the exact live pair even if the `:false` tag is later reassigned.
 3. Create the durable evidence directory on the host with restrictive permissions (it must live outside the repository working tree and outside any web-served path):
 
    ```bash
@@ -55,22 +60,23 @@ Never set the two halves independently. Flipping the value requires `docker comp
    psql "<SNAPSHOT_DSN>" -tAc "SELECT EXISTS (SELECT 1 FROM users WHERE id = <HOST_USER_ID> AND id > 0);"
    ```
 
-6. Confirm the account represented by `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` resolves to that **same** `<HOST_USER_ID>`, as a secure operator-only comparison. Bind the real address through an environment variable so it never lands in a committed file, retained log, or shell history, and compare by boolean equality rather than printing the stored identity:
+6. Confirm the account represented by `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` resolves to that **same** `<HOST_USER_ID>`, as a secure operator-only comparison. Bind the real address through an environment variable so it never lands in a committed file, retained log, or shell history, and compare by boolean equality rather than printing the stored identity. Pass the address as a **quoted `psql` variable** (`-v` plus the `:'name'` interpolation), never by shell-interpolating it into the SQL string, so a value containing quotes or other SQL metacharacters cannot alter the query:
 
    ```bash
    # Operator exports LIVE_EMAIL in their private shell; it is never written to a file.
    read -rs LIVE_EMAIL   # paste the real allow-listed address; not echoed
-   psql "<SNAPSHOT_DSN>" -tAc \
-     "SELECT (SELECT id FROM users WHERE lower(email) = lower('$LIVE_EMAIL')) = <HOST_USER_ID>;"
+   psql "<SNAPSHOT_DSN>" -tA -v email="$LIVE_EMAIL" -c \
+     "SELECT (SELECT id FROM users WHERE lower(email) = lower(:'email')) = <HOST_USER_ID>;"
    unset LIVE_EMAIL
    ```
 
-   The result must be `t`. Use `display_name` only if a human-readable disambiguation is genuinely required, and only in the operator's private session — never in a retained artifact.
+   `:'email'` makes `psql` safely single-quote and escape the value on the server side, so it is treated strictly as data. The result must be `t`. Use `display_name` only if a human-readable disambiguation is genuinely required, and only in the operator's private session (again via a quoted `-v` variable) — never in a retained artifact.
 7. Confirm the migrated room's sole host resolves to `<HOST_USER_ID>` after `up` (checked again in the smoke matrix): the target room's single host membership must be exactly this user id.
-8. Confirm login for `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` on the current (false) deployment. **Login permission and host-role assignment are distinct backend conditions — do not conflate them:**
-   - the backend's *login allow condition* decides whether a Google account may authenticate at all; it is enforced in the auth interactor and is **not** driven by `HOST_EMAILS`;
-   - `HOST_EMAILS` only decides which already-allowed accounts are additionally granted the host role;
-   - therefore `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` must satisfy the login allow condition to sign in, and separately must be configured so it receives the host role for the migrated room. Verify the account can actually log in on the false deployment rather than inferring it from `HOST_EMAILS` membership alone.
+8. Confirm login for `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` on the current (false) deployment. **Three backend conditions are separate — do not conflate them:**
+   - **Login eligibility** decides whether a Google account may authenticate at all. It is enforced in the auth interactor (Google ID-token verification plus the hard-coded allowed email-domain check) and is **not** driven by `HOST_EMAILS` or `ADMIN_EMAILS`. An account that fails this gate cannot sign in regardless of any role configuration.
+   - **Account-level `users.role`** is a global role column on the `users` row (`host` / `admin` / `guest`), assigned at login time from the `HOST_EMAILS` / `ADMIN_EMAILS` allow-lists; an eligible account in neither list defaults to `guest`. This governs global capabilities and is **not** per-room and **not** created by the cutover.
+   - **Room-host membership** is a per-room `room_members` row with role `host`. It is created only by `room-cutover up --host-user-id <HOST_USER_ID>`, which inserts exactly this one host membership for the migrated room (enforced sole-host by a one-host-per-room partial unique index). It does **not** read or write `users.role` and does **not** consult `HOST_EMAILS`.
+   - Therefore `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` must (a) satisfy login eligibility to sign in, and (b) map to `<HOST_USER_ID>`, which the cutover makes the sole room host via `room_members`. Verify the account can actually log in on the false deployment rather than inferring eligibility from `HOST_EMAILS` membership or from its account-level `users.role`.
 9. Render and review **both** Compose configurations into the evidence directory, confirming the backend flag, the frontend build arg, and the mode-qualified image references all agree:
 
    ```bash
@@ -88,16 +94,26 @@ Never set the two halves independently. Flipping the value requires `docker comp
     ```
 
     Confirm the backend image contains both `/app/server` and `/app/room-cutover`, and record the `:true` pair IDs/digests as `<TRUE_PAIR_IMAGE_TAGS>` the same way as step 2.
-11. Run a read-only plan against a **production snapshot** (never the live database at this stage), writing the report into the durable evidence directory and locking it down:
+11. Run a read-only plan against a **production snapshot** (never the live database at this stage), **through the packaged `:true` backend image** so the rehearsal exercises the same binary that will run the cutover. Bind-mount `<EVIDENCE_DIR>` into the one-off container so the report survives `--rm`, then confirm it landed on the host and lock it down:
 
     ```bash
-    /app/room-cutover plan --room-slug <TARGET_ROOM_SLUG> --room-name "<TARGET_ROOM_NAME>" \
-      --host-user-id <HOST_USER_ID> --postgres "<SNAPSHOT_DSN>" --report-file <EVIDENCE_DIR>/plan-report.json
-    chmod 0600 <EVIDENCE_DIR>/plan-report.json
+    docker compose run --rm --no-deps -v <EVIDENCE_DIR>:/evidence backend /app/room-cutover plan \
+      --room-slug <TARGET_ROOM_SLUG> --room-name "<TARGET_ROOM_NAME>" --host-user-id <HOST_USER_ID> \
+      --postgres "<SNAPSHOT_DSN>" --report-file /evidence/plan-report.json
+    test -f <EVIDENCE_DIR>/plan-report.json && chmod 0600 <EVIDENCE_DIR>/plan-report.json
     ```
 
-    Review the report; it must be PII-free and its counts must look plausible against known production volume.
-12. Run `room-cutover up --dry-run` against an **isolated copy** of the snapshot and confirm it reports the same evidence without writing.
+    Review the report; it must be PII-free and its counts must look plausible against known production volume. (Run this with `ROOM_CUTOVER_AUTHORITATIVE=true` so Compose selects the `:true` backend image built in step 10.)
+12. Run `room-cutover up --dry-run` against an **isolated copy** of the snapshot (`<ISOLATED_SNAPSHOT_DSN>`, never the live database or the shared snapshot), again **through the packaged backend image** with `<EVIDENCE_DIR>` bind-mounted, writing a **separate** durable report and locking it down. Confirm it reports the same evidence as the plan without writing:
+
+    ```bash
+    docker compose run --rm --no-deps -v <EVIDENCE_DIR>:/evidence backend /app/room-cutover up --dry-run \
+      --room-slug <TARGET_ROOM_SLUG> --room-name "<TARGET_ROOM_NAME>" --host-user-id <HOST_USER_ID> \
+      --postgres "<ISOLATED_SNAPSHOT_DSN>" --report-file /evidence/up-dry-run.json
+    test -f <EVIDENCE_DIR>/up-dry-run.json && chmod 0600 <EVIDENCE_DIR>/up-dry-run.json
+    ```
+
+    Confirm `<EVIDENCE_DIR>/up-dry-run.json` exists on the host and that its counts/hashes match `plan-report.json`; a missing report means the bind mount was omitted and the step must be re-run.
 13. Confirm the isolated end-to-end rehearsal (Gate 1 evidence) is accepted.
 14. Confirm `<BACKUP_LOCATION>` is writable, verified, and retains dumps for at least 30 days.
 
@@ -225,7 +241,7 @@ All evidence lives on the host under `<EVIDENCE_DIR>` (mode `0700`), never insid
 
 - Timestamped `<DUMP_FILE>` in `<BACKUP_LOCATION>` (≥ 30 days).
 - `<EVIDENCE_DIR>/live-plan.json`, `<EVIDENCE_DIR>/live-up.json`, `<EVIDENCE_DIR>/live-verify.json` (redacted reports, mode `0600`), each confirmed present on the host after its `docker compose run --rm` exited.
-- `<EVIDENCE_DIR>/plan-report.json` from the pre-window snapshot plan (mode `0600`).
+- `<EVIDENCE_DIR>/plan-report.json` and `<EVIDENCE_DIR>/up-dry-run.json` from the pre-window snapshot plan and isolated `up --dry-run` rehearsal (each mode `0600`, each written through the bind mount and confirmed present on the host).
 - Rendered `<EVIDENCE_DIR>/compose-false.yml` and `<EVIDENCE_DIR>/compose-true.yml`.
 - Recorded false-pair and true-pair image IDs/digests (`<FALSE_PAIR_IMAGE_TAGS>`, `<TRUE_PAIR_IMAGE_TAGS>`).
 - Completed smoke-matrix checklist with operator initials and timestamps.

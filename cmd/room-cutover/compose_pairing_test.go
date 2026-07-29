@@ -12,10 +12,12 @@ package main
 //     always carry the SAME mode suffix, so no command can silently
 //     produce a true server with a false SPA (or vice versa).
 //
-// The tests are docker-gated: they skip when the docker CLI or the
+// The tests are docker-gated: they skip ONLY when the docker CLI or the
 // compose v2 plugin is unavailable, so they never fail on a host without
-// Docker. They only inspect rendered configuration; they never build,
-// pull, run, or deploy anything.
+// Docker. When the tooling IS present, a configuration-rendering failure
+// (a broken `docker compose config`) fails the test rather than skipping.
+// They only inspect rendered configuration; they never build, pull, run,
+// or deploy anything.
 
 import (
 	"bytes"
@@ -48,13 +50,22 @@ func repoRootFromTest(t *testing.T) string {
 // renderComposeImages runs `docker compose config --format json` at the
 // repository root with ROOM_CUTOVER_AUTHORITATIVE=mode and returns the
 // rendered backend and frontend image references. It skips (never fails)
-// when Docker or the compose v2 plugin is unavailable.
+// ONLY when Docker or the compose v2 plugin is unavailable; once the
+// tooling is present, a configuration-rendering failure FAILS the test.
 func renderComposeImages(t *testing.T, mode string) (backend, frontend string) {
 	t.Helper()
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skipf("docker CLI unavailable: %v", err)
 	}
 	root := repoRootFromTest(t)
+
+	// Probe the compose v2 plugin separately from the actual render. A
+	// missing/unusable plugin is an environment limitation and skips; a
+	// failure of `docker compose config` below is a real config problem
+	// and must fail the test.
+	if out, err := composeProbe(root); err != nil {
+		t.Skipf("docker compose v2 plugin unavailable: %v\n%s", err, out)
+	}
 
 	cmd := exec.Command("docker", "compose", "config", "--format", "json")
 	cmd.Dir = root
@@ -69,10 +80,11 @@ func renderComposeImages(t *testing.T, mode string) (backend, frontend string) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		// A missing compose plugin or an unsupported --format flag must
-		// not fail the suite on a Docker-less host. Report only stderr
-		// (variable-name warnings), never the rendered config body.
-		t.Skipf("docker compose config unavailable or failed (mode=%s): %v\nstderr: %s", mode, err, stderr.String())
+		// The compose plugin is present (probe passed), so a failure here
+		// is a genuine configuration-rendering problem and must fail the
+		// suite. Report only stderr (variable-name warnings), never the
+		// rendered config body.
+		t.Fatalf("docker compose config failed (mode=%s): %v\nstderr: %s", mode, err, stderr.String())
 	}
 
 	var rendered struct {
@@ -94,6 +106,16 @@ func renderComposeImages(t *testing.T, mode string) (backend, frontend string) {
 		t.Fatalf("mode=%s: rendered config has no frontend service", mode)
 	}
 	return be.Image, fe.Image
+}
+
+// composeProbe reports whether the docker compose v2 plugin is usable by
+// invoking `docker compose version` at the repository root. It returns the
+// combined output alongside any error so callers can decide to skip (plugin
+// absent) rather than fail. It never renders or reads the compose file.
+func composeProbe(root string) ([]byte, error) {
+	cmd := exec.Command("docker", "compose", "version")
+	cmd.Dir = root
+	return cmd.CombinedOutput()
 }
 
 // TestComposePairing_ModeQualifiedImages proves each mode selects a
