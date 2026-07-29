@@ -1,7 +1,7 @@
 # R14c Production Runbook — Coordinated Authoritative Room Cutover
 
 **Sprint:** 029 (R14c) — `documents/00-project-management/SPRINTS/029-coordinated-authoritative-room-cutover.md`
-**Status:** Written and reviewed under Gate 1. **NOT executed.** Gate 2 (production execution) requires a separate Product Owner go/no-go. Amended under Sprint 030 (PR #27 Architect review) with one focused documentation-only security correction: all connection data is supplied through protected non-argv channels (see "Connection supply" below); command order and behavior are unchanged.
+**Status:** Written and reviewed under Gate 1. **NOT executed.** Gate 2 (production execution) requires a separate Product Owner go/no-go. Amended under Sprint 030 (PR #27 Architect reviews) with focused documentation-only security corrections: all connection data is supplied through protected non-argv channels with the snapshot DSNs kept as un-exported private shell variables (see "Connection supply" below), and retained Compose evidence is limited to allowlisted pairing lines instead of full secret-bearing renders (step 9); command order and behavior are unchanged.
 
 This runbook uses **placeholders only**. No production hostname, credential, DSN, email address, token, or account identity appears here. Every `<PLACEHOLDER>` must be filled in by the operator from the approved Gate 2 inputs at execution time and must never be committed to the repository.
 
@@ -24,11 +24,11 @@ No PostgreSQL DSN, password, or other connection credential may ever appear as a
 
 - `<PGSERVICE_FILE>` — a libpq connection service file defining services `r14c-snapshot` (the read-only production snapshot), `r14c-snapshot-isolated` (the throwaway dry-run copy), and `r14c-live` (the live database; used only for the in-window backup). Host `psql`/`pg_dump` commands select a service with `PGSERVICEFILE`/`PGSERVICE`; no DSN in argv.
 - `<PGPASS_FILE>` — the matching libpq password file, referenced via `PGPASSFILE`; passwords never appear in the service file, argv, or any other file.
-- `<CONNECTION_ENV_FILE>` — a shell environment file exporting `SNAPSHOT_DSN` and `ISOLATED_SNAPSHOT_DSN` for the containerized `room-cutover` rehearsals. The operator loads it into a private shell with `set -a; . <CONNECTION_ENV_FILE>; set +a` and hands a value to a single command through a per-command `DATABASE_URL="$…"` environment prefix plus name-only `docker compose run -e DATABASE_URL` passthrough — the value is never typed after `-e` and never appears in argv. `room-cutover` reads `DATABASE_URL` (or `MIGRATE_DATABASE_URL`) whenever `--postgres` is omitted; **`--postgres` is never used in this runbook.**
+- `<CONNECTION_ENV_FILE>` — a shell variable file containing plain (non-`export`) assignments of `SNAPSHOT_DSN` and `ISOLATED_SNAPSHOT_DSN` for the containerized `room-cutover` rehearsals. The operator sources it into a private shell with `. <CONNECTION_ENV_FILE>`; because the assignments are not exported, both DSNs stay **private shell variables** invisible to child processes. Only the selected value reaches only the selected command, through a per-command `DATABASE_URL="$…"` environment prefix plus name-only `docker compose run -e DATABASE_URL` passthrough — the value is never typed after `-e` and never appears in argv. `room-cutover` reads `DATABASE_URL` (or `MIGRATE_DATABASE_URL`) whenever `--postgres` is omitted; **`--postgres` is never used in this runbook.**
 
 `<SNAPSHOT_DSN>` and `<ISOLATED_SNAPSHOT_DSN>` therefore exist only inside the connection bundle; they are never written into any command line, report, or committed file.
 
-`<EVIDENCE_DIR>` is an operator-controlled host directory (outside the repository working tree and outside any web-served path) that holds every cutover report and rendered configuration. Reports are written *through a bind mount* so they survive `docker compose run --rm`. Create it before the window with mode `0700` and set every report file to `0600` (see the pre-window checklist). Never commit real reports or identities from `<EVIDENCE_DIR>` to the repository.
+`<EVIDENCE_DIR>` is an operator-controlled host directory (outside the repository working tree and outside any web-served path) that holds every cutover report and the allowlisted pairing evidence (never a full rendered Compose configuration — see step 9). Reports are written *through a bind mount* so they survive `docker compose run --rm`. Create it before the window with mode `0700` and set every report file to `0600` (see the pre-window checklist). Never commit real reports or identities from `<EVIDENCE_DIR>` to the repository.
 
 ## The single pairing input
 
@@ -115,15 +115,19 @@ Never set the two halves independently. Flipping the value requires `docker comp
    - **Account-level `users.role`** is a global role column on the `users` row (`host` / `admin` / `guest`), assigned at login time from the `HOST_EMAILS` / `ADMIN_EMAILS` allow-lists; an eligible account in neither list defaults to `guest`. This governs global capabilities and is **not** per-room and **not** created by the cutover.
    - **Room-host membership** is a per-room `room_members` row with role `host`. It is created only by `room-cutover up --host-user-id <HOST_USER_ID>`, which inserts exactly this one host membership for the migrated room (enforced sole-host by a one-host-per-room partial unique index). It does **not** read or write `users.role` and does **not** consult `HOST_EMAILS`.
    - Therefore `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` must (a) satisfy login eligibility to sign in, and (b) map to `<HOST_USER_ID>`, which the cutover makes the sole room host via `room_members`. Verify the account can actually log in on the false deployment rather than inferring eligibility from `HOST_EMAILS` membership or from its account-level `users.role`.
-9. Render and review **both** Compose configurations into the evidence directory, confirming the backend flag, the frontend build arg, and the mode-qualified image references all agree:
+9. Extract and review **allowlisted pairing evidence** from both Compose renders, confirming the backend flag, the frontend build arg, and the mode-qualified image references all agree. The full `docker compose config` output interpolates sensitive deployment values (database credentials, `DATABASE_URL`, Google and DuckDNS configuration) and is therefore **never written to disk**; it exists only transiently in the pipe, and the retained files contain only the image references and authoritative flags:
 
    ```bash
-   ROOM_CUTOVER_AUTHORITATIVE=false docker compose config > <EVIDENCE_DIR>/compose-false.yml
-   ROOM_CUTOVER_AUTHORITATIVE=true  docker compose config > <EVIDENCE_DIR>/compose-true.yml
-   chmod 0600 <EVIDENCE_DIR>/compose-false.yml <EVIDENCE_DIR>/compose-true.yml
+   ROOM_CUTOVER_AUTHORITATIVE=false docker compose config \
+     | grep -E 'image: local-music-queue-|room-cutover-authoritative=|VITE_ROOM_CUTOVER_AUTHORITATIVE:' \
+     > <EVIDENCE_DIR>/pairing-false.txt
+   ROOM_CUTOVER_AUTHORITATIVE=true  docker compose config \
+     | grep -E 'image: local-music-queue-|room-cutover-authoritative=|VITE_ROOM_CUTOVER_AUTHORITATIVE:' \
+     > <EVIDENCE_DIR>/pairing-true.txt
+   chmod 0600 <EVIDENCE_DIR>/pairing-false.txt <EVIDENCE_DIR>/pairing-true.txt
    ```
 
-   The false render must reference `local-music-queue-backend:false` + `local-music-queue-frontend:false`; the true render must reference the `:true` pair; backend and frontend must carry the same mode in each render.
+   The false extract must reference `local-music-queue-backend:false` + `local-music-queue-frontend:false` with `--room-cutover-authoritative=false` and `VITE_ROOM_CUTOVER_AUTHORITATIVE: "false"`; the true extract must show the `:true` pair with both flags `true`; backend and frontend must carry the same mode in each extract. Confirm each extract contains **no** environment block, credential, or other value beyond these allowlisted lines before retaining it.
 10. Build both artifact pairs from `<REVIEWED_COMMIT_SHA>`; because the image references are mode-qualified, the two builds produce distinct, independently selectable pairs and the `true` build never overwrites the `false` rollback pair:
 
     ```bash
@@ -135,7 +139,7 @@ Never set the two halves independently. Flipping the value requires `docker comp
 11. Run a read-only plan against a **production snapshot** (never the live database at this stage), **through the packaged `:true` backend image** so the rehearsal exercises the same binary that will run the cutover. The snapshot DSN reaches the container through the environment only: load the protected connection env file into the private shell, prefix the single command with `DATABASE_URL="$SNAPSHOT_DSN"`, and forward it by **name only** with `-e DATABASE_URL` (`room-cutover` falls back to `DATABASE_URL` because `--postgres` is omitted; never pass `--postgres` and never type a value after `-e`). Bind-mount `<EVIDENCE_DIR>` into the one-off container so the report survives `--rm`, then confirm it landed on the host and lock it down:
 
     ```bash
-    set -a; . <CONNECTION_ENV_FILE>; set +a   # exports SNAPSHOT_DSN / ISOLATED_SNAPSHOT_DSN (file mode 0600)
+    . <CONNECTION_ENV_FILE>   # plain assignments (mode 0600): SNAPSHOT_DSN / ISOLATED_SNAPSHOT_DSN stay un-exported private shell variables
     DATABASE_URL="$SNAPSHOT_DSN" ROOM_CUTOVER_AUTHORITATIVE=true docker compose run --rm --no-deps \
       -e DATABASE_URL -v <EVIDENCE_DIR>:/evidence backend /app/room-cutover plan \
       --room-slug <TARGET_ROOM_SLUG> --room-name "<TARGET_ROOM_NAME>" --host-user-id <HOST_USER_ID> \
@@ -286,7 +290,7 @@ All evidence lives on the host under `<EVIDENCE_DIR>` (mode `0700`), never insid
 - Timestamped `<DUMP_FILE>` in `<BACKUP_LOCATION>` (≥ 30 days).
 - `<EVIDENCE_DIR>/live-plan.json`, `<EVIDENCE_DIR>/live-up.json`, `<EVIDENCE_DIR>/live-verify.json` (redacted reports, mode `0600`), each confirmed present on the host after its `docker compose run --rm` exited.
 - `<EVIDENCE_DIR>/plan-report.json` and `<EVIDENCE_DIR>/up-dry-run.json` from the pre-window snapshot plan and isolated `up --dry-run` rehearsal (each mode `0600`, each written through the bind mount and confirmed present on the host).
-- Rendered `<EVIDENCE_DIR>/compose-false.yml` and `<EVIDENCE_DIR>/compose-true.yml`.
+- Allowlisted pairing evidence `<EVIDENCE_DIR>/pairing-false.txt` and `<EVIDENCE_DIR>/pairing-true.txt` (image references and authoritative flags only — never the full rendered Compose configuration, which interpolates deployment secrets).
 - Recorded false-pair and true-pair image IDs/digests (`<FALSE_PAIR_IMAGE_TAGS>`, `<TRUE_PAIR_IMAGE_TAGS>`), the protected `rollback-r14c` tags pinning the false pair, and the two rollback image archives in `<BACKUP_LOCATION>` (mode `0600`, retained until the Product Owner closes the rollback window).
 - Completed smoke-matrix checklist with operator initials and timestamps.
 
