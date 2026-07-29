@@ -1,6 +1,6 @@
 # Sprint 031 — R14c Gate 2 Preflight and Go/No-Go Preparation
 
-**Status:** In progress — awaiting Architect review and Product Owner approval (documentation-only; unmerged PR #28 submitted for review)
+**Status:** In progress — tracking scaffold integrated; operational preflight not started; readiness incomplete (`DEFER / NOT READY`)
 **Branch:** `sprint/r14c-gate2-preflight`
 **Base:** `dev` at `8ae823e8dc7b337a70bd6d420745595463680666`
 **Parent epic:** Issue #17
@@ -9,7 +9,7 @@
 
 ## Goal
 
-Assemble the preflight-tracking and go/no-go preparation layer that sits on top of the accepted Sprint 030 readiness package, so the Product Owner can convene an evidence-based GO / NO-GO / DEFER review for the R14c production cutover window. This sprint produces the tracking scaffolding only. It resolves nothing: every blocker, preflight check, and entry criterion is recorded as unmet/open pending redacted human-Operator evidence, and no GO is declared.
+Assemble the preflight-tracking and go/no-go preparation layer that sits on top of the accepted Sprint 030 readiness package, so the Product Owner can convene an evidence-based GO / NO-GO / DEFER review for the R14c production cutover window. This sprint produces the tracking scaffolding only. It resolves nothing: every blocker, preflight check, and entry criterion is recorded as `Not started` pending redacted human-Operator evidence, and no GO is declared.
 
 ## Current behavior
 
@@ -51,7 +51,7 @@ These four deployment documents are tracking and preparation overlays. They do n
 - Beginning the maintenance-window procedure, the production cutover, any traffic change, true-mode deployment, or rollback.
 - Any R14e action: migration 0010, schema version 10, legacy-table deletion, marker edits.
 - Modifying any code, schema, Docker/Compose configuration, frontend asset, the runbook, or the Sprint 030 readiness package/input template.
-- Merging the PR or advancing sprint status.
+- Closing Sprint 031, resolving readiness items without accepted evidence, or advancing the epic.
 
 ## Verification
 
@@ -73,9 +73,11 @@ No Go, frontend, or Docker verification applies — no code or configuration fil
 
 ## Record
 
-- Prepared from `dev` at `8ae823e8dc7b337a70bd6d420745595463680666` on branch `sprint/r14c-gate2-preflight` as an unmerged PR for Architect review and Product Owner decision.
-- Delivered as PR #28, base `dev`, open and non-draft; it must remain unmerged pending Architect review and Product Owner decision. Initial delivery head `bb4a29d564fa47bc11450ecd631d7e1f097e4b31`; the current review head is recorded in PR #28.
-- A focused documentation-only corrective pass was applied on PR #28 following Architect review, within the same approved base, branch, and eight-file scope: self-referencing PR-head claims replaced with the initial-delivery-head formulation above; the preflight ledger moved to the deterministic status model (`Not started` / `In progress` / `Resolved` / `Failed` / `Blocked` / `Not applicable` only where explicitly permitted) with per-row owner, pass condition, consequence, and safe checked/updated date; the evidence-return template aligned to that status model with protected-reference identifiers instead of infrastructure paths; the discrepancy register expanded with required fields and the Architect + Product Owner classification rule; the go/no-go packet expanded with current summaries and an unsigned `DEFER / NOT READY` recommendation; and stale lifecycle language corrected in the project-state trackers. All Gate 2 prohibitions are unchanged.
+- Prepared from `dev` at `8ae823e8dc7b337a70bd6d420745595463680666` on branch `sprint/r14c-gate2-preflight` for Architect review and Product Owner decision.
+- Delivered through PR #28. Initial delivery head `bb4a29d564fa47bc11450ecd631d7e1f097e4b31`; final accepted head `effc27f92f7b2cbee3c2357fe4dba97f67872a11`.
+- Architect final acceptance was recorded as review comment #4806672210. The Product Owner squash-merged PR #28 into `dev` on 2026-07-29 as commit `e7e057b6b35244cc5625368570ed3f6a26cabc40` (`docs(r14c): add Gate 2 preflight tracking (#28)`).
+- The merge integrates the tracking scaffold only. Sprint 031 remains active; all B1–B6, PF-01–PF-15, and E1–E10 rows remain `Not started`; the evidence inventory and discrepancy register remain empty; the unsigned recommendation remains `DEFER / NOT READY`.
+- A focused documentation-only corrective pass was applied on PR #28 following Architect review, within the same approved base, branch, and eight-file scope: self-referencing PR-head claims replaced with stable lifecycle wording; the preflight ledger moved to the deterministic status model (`Not started` / `In progress` / `Resolved` / `Failed` / `Blocked` / `Not applicable` only where explicitly permitted) with per-row owner, pass condition, consequence, and safe checked/updated date; the evidence-return template aligned to that status model with protected-reference identifiers instead of infrastructure paths; the discrepancy register expanded with required fields and the Architect + Product Owner classification rule; the go/no-go packet expanded with current summaries and an unsigned `DEFER / NOT READY` recommendation; and stale lifecycle language corrected in the project-state trackers. All Gate 2 prohibitions are unchanged.
 - False-mode status: Not observed by Builder — no deployment access. Repository state says false mode remains authoritative; human Operator confirmation is still required before readiness advances.
 - No production system, snapshot, deployment host, container, connection bundle, evidence directory, credential, or identity was accessed in preparing this sprint. No runbook step was executed. No operational item was marked resolved and no GO was declared.
 - This record does **not** authorize the production cutover. Blockers B1–B7 remain unresolved; Gate 2 remains pending and unauthorized until a GO is recorded in the readiness package's decision block against redacted human-Operator evidence; production remains untouched.

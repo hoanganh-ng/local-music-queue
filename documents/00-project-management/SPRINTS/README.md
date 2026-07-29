@@ -21,7 +21,7 @@ This directory contains documentation for active and past sprints.
 | 028    | Frontend global-path retirement / R14d               | Closed and accepted (2026-07-28; PR #25; merge `67bd57a8`)         |
 | 029    | Coordinated authoritative room cutover / R14c        | Gate 1 integrated (PR #26 squash-merged into `dev` as `c8ab4af0` 2026-07-29); Gate 2 production execution pending |
 | 030    | R14c Gate 2 Readiness Package                        | Closed and accepted (2026-07-29; PR #27; merge `d27c56ff`) — Gate 2 production execution remains pending and unauthorized |
-| 031    | R14c Gate 2 Preflight and Go/No-Go Preparation       | In progress — documentation-only; unmerged PR #28 (base `dev` `8ae823e8`); Gate 2 production execution remains pending and unauthorized |
+| 031    | R14c Gate 2 Preflight and Go/No-Go Preparation       | In progress — tracking scaffold integrated (2026-07-29; PR #28; merge `e7e057b6`); all rows `Not started`; `DEFER / NOT READY`; Gate 2 pending and unauthorized |
 
 ## File Naming
 
@@ -36,7 +36,7 @@ Sprints progress through defined lifecycle states:
 3. **Approved:** Ready for execution.
 4. **Completed / Closed:** Work is finished and accepted.
 
-R14c uses an additional operational gate: Gate 1 implementation and rehearsal are integrated and closed, and that approval does not authorize production execution. The real maintenance window requires a separate Product Owner go/no-go, prepared through Sprint 031's Gate 2 preflight documents.
+R14c uses an additional operational gate: Gate 1 implementation and rehearsal are integrated and closed, and that approval does not authorize production execution. The real maintenance window requires a separate Product Owner go/no-go, prepared through Sprint 031's integrated Gate 2 preflight documents.
 
 ## `active.md` Semantics
 
