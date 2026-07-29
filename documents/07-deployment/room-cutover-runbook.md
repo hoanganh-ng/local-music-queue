@@ -45,7 +45,30 @@ Never set the two halves independently. Flipping the value requires `docker comp
    docker image inspect "$frontend_img" --format '{{.Id}} {{join .RepoDigests ","}}'
    ```
 
-   Record both output lines as `<FALSE_PAIR_IMAGE_TAGS>` — these captured IDs/digests are the only approved rollback artifacts, and they must be written down before step 10 builds anything or any prune runs. Because the images are mode-qualified (`:false` vs `:true`), a later `true` build cannot overwrite this pair; the recorded immutable IDs let Rollback re-select the exact live pair even if the `:false` tag is later reassigned.
+   Record both output lines as `<FALSE_PAIR_IMAGE_TAGS>` — these captured IDs/digests are the only approved rollback identities, and they must be written down before step 10 builds anything or any prune runs. Because the images are mode-qualified (`:false` vs `:true`), a later `true` build cannot overwrite this pair; the recorded immutable IDs let Rollback re-select the exact live pair even if the `:false` tag is later reassigned.
+
+   Then **preserve** the captured images, still before any rebuild, replacement, or prune. A captured ID alone does not keep the image alive: once the `:false` tag is reassigned the old image becomes untagged/dangling and an image prune can garbage-collect it. Pin each captured image under a **protected rollback tag** and, as a durable second copy, archive both images to `<BACKUP_LOCATION>`:
+
+   ```bash
+   # Pin the exact captured IDs under dedicated rollback tags (never reused by any build).
+   docker tag "$backend_img"  local-music-queue-backend:rollback-r14c
+   docker tag "$frontend_img" local-music-queue-frontend:rollback-r14c
+
+   # Durable archives that survive any local image deletion or prune.
+   docker save -o <BACKUP_LOCATION>/rollback-backend-r14c.tar  local-music-queue-backend:rollback-r14c
+   docker save -o <BACKUP_LOCATION>/rollback-frontend-r14c.tar local-music-queue-frontend:rollback-r14c
+   chmod 0600 <BACKUP_LOCATION>/rollback-backend-r14c.tar <BACKUP_LOCATION>/rollback-frontend-r14c.tar
+   ```
+
+   **Verify** the preserved artifacts resolve to the exact captured IDs before proceeding:
+
+   ```bash
+   # Each must print the same {{.Id}} recorded in <FALSE_PAIR_IMAGE_TAGS>.
+   docker image inspect local-music-queue-backend:rollback-r14c  --format '{{.Id}}'
+   docker image inspect local-music-queue-frontend:rollback-r14c --format '{{.Id}}'
+   ```
+
+   If either archive is later needed, `docker load -i <archive>.tar` restores the image and `docker image inspect --format '{{.Id}}'` must again equal the captured ID. From this point **until the Product Owner closes the rollback window**, the rollback tags and archives must not be deleted: no `docker rmi` of the `rollback-r14c` tags or the captured IDs, no `docker image prune -a` (or any prune that removes tagged/unused images), and no deletion of the two `.tar` archives from `<BACKUP_LOCATION>`. A plain dangling-only `docker image prune` cannot remove the pinned tags, and even a mistaken forced removal remains recoverable from the archives.
 3. Create the durable evidence directory on the host with restrictive permissions (it must live outside the repository working tree and outside any web-served path):
 
    ```bash
@@ -60,17 +83,20 @@ Never set the two halves independently. Flipping the value requires `docker comp
    psql "<SNAPSHOT_DSN>" -tAc "SELECT EXISTS (SELECT 1 FROM users WHERE id = <HOST_USER_ID> AND id > 0);"
    ```
 
-6. Confirm the account represented by `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` resolves to that **same** `<HOST_USER_ID>`, as a secure operator-only comparison. Bind the real address through an environment variable so it never lands in a committed file, retained log, or shell history, and compare by boolean equality rather than printing the stored identity. Pass the address as a **quoted `psql` variable** (`-v` plus the `:'name'` interpolation), never by shell-interpolating it into the SQL string, so a value containing quotes or other SQL metacharacters cannot alter the query:
+6. Confirm the account represented by `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` resolves to that **same** `<HOST_USER_ID>`, as a secure operator-only comparison. Bind the real address through an environment variable so it never lands in a committed file, retained log, or shell history, and compare by boolean equality rather than printing the stored identity. Keep the address out of **process arguments** as well: hand it to `psql` through the environment and bind it inside the psql process with `\getenv` into a **quoted psql variable** (the `:'name'` interpolation), never on the command line and never by shell-interpolating it into the SQL string, so it is invisible to `ps`/`/proc/*/cmdline` and a value containing quotes or other SQL metacharacters cannot alter the query:
 
    ```bash
-   # Operator exports LIVE_EMAIL in their private shell; it is never written to a file.
-   read -rs LIVE_EMAIL   # paste the real allow-listed address; not echoed
-   psql "<SNAPSHOT_DSN>" -tA -v email="$LIVE_EMAIL" -c \
-     "SELECT (SELECT id FROM users WHERE lower(email) = lower(:'email')) = <HOST_USER_ID>;"
+   # Operator pastes the real allow-listed address into their private shell; not echoed,
+   # never written to a file, never placed on any command line.
+   read -rs LIVE_EMAIL
+   LIVE_EMAIL="$LIVE_EMAIL" psql "<SNAPSHOT_DSN>" -tA <<'SQL'
+   \getenv email LIVE_EMAIL
+   SELECT (SELECT id FROM users WHERE lower(email) = lower(:'email')) = <HOST_USER_ID>;
+   SQL
    unset LIVE_EMAIL
    ```
 
-   `:'email'` makes `psql` safely single-quote and escape the value on the server side, so it is treated strictly as data. The result must be `t`. Use `display_name` only if a human-readable disambiguation is genuinely required, and only in the operator's private session (again via a quoted `-v` variable) — never in a retained artifact.
+   The per-command `LIVE_EMAIL="$LIVE_EMAIL"` prefix scopes the variable to the single `psql` process without exporting it to the wider session; `\getenv` reads it inside psql (requires psql ≥ 15 — the deployment runs PostgreSQL 16, use a matching client), and `:'email'` makes psql safely single-quote and escape the value on the server side, so it is treated strictly as data. The quoted `<<'SQL'` heredoc prevents any shell expansion of the SQL text. The result must be `t`. Use `display_name` only if a human-readable disambiguation is genuinely required, and only in the operator's private session (again via `\getenv` into a quoted variable) — never in a retained artifact.
 7. Confirm the migrated room's sole host resolves to `<HOST_USER_ID>` after `up` (checked again in the smoke matrix): the target room's single host membership must be exactly this user id.
 8. Confirm login for `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` on the current (false) deployment. **Three backend conditions are separate — do not conflate them:**
    - **Login eligibility** decides whether a Google account may authenticate at all. It is enforced in the auth interactor (Google ID-token verification plus the hard-coded allowed email-domain check) and is **not** driven by `HOST_EMAILS` or `ADMIN_EMAILS`. An account that fails this gate cannot sign in regardless of any role configuration.
@@ -97,23 +123,23 @@ Never set the two halves independently. Flipping the value requires `docker comp
 11. Run a read-only plan against a **production snapshot** (never the live database at this stage), **through the packaged `:true` backend image** so the rehearsal exercises the same binary that will run the cutover. Bind-mount `<EVIDENCE_DIR>` into the one-off container so the report survives `--rm`, then confirm it landed on the host and lock it down:
 
     ```bash
-    docker compose run --rm --no-deps -v <EVIDENCE_DIR>:/evidence backend /app/room-cutover plan \
+    ROOM_CUTOVER_AUTHORITATIVE=true docker compose run --rm --no-deps -v <EVIDENCE_DIR>:/evidence backend /app/room-cutover plan \
       --room-slug <TARGET_ROOM_SLUG> --room-name "<TARGET_ROOM_NAME>" --host-user-id <HOST_USER_ID> \
       --postgres "<SNAPSHOT_DSN>" --report-file /evidence/plan-report.json
     test -f <EVIDENCE_DIR>/plan-report.json && chmod 0600 <EVIDENCE_DIR>/plan-report.json
     ```
 
-    Review the report; it must be PII-free and its counts must look plausible against known production volume. (Run this with `ROOM_CUTOVER_AUTHORITATIVE=true` so Compose selects the `:true` backend image built in step 10.)
+    Review the report; it must be PII-free and its counts must look plausible against known production volume. (The inline `ROOM_CUTOVER_AUTHORITATIVE=true` prefix makes Compose unambiguously select the prebuilt `local-music-queue-backend:true` image from step 10, regardless of what the deployment `.env` currently holds.)
 12. Run `room-cutover up --dry-run` against an **isolated copy** of the snapshot (`<ISOLATED_SNAPSHOT_DSN>`, never the live database or the shared snapshot), again **through the packaged backend image** with `<EVIDENCE_DIR>` bind-mounted, writing a **separate** durable report and locking it down. Confirm it reports the same evidence as the plan without writing:
 
     ```bash
-    docker compose run --rm --no-deps -v <EVIDENCE_DIR>:/evidence backend /app/room-cutover up --dry-run \
+    ROOM_CUTOVER_AUTHORITATIVE=true docker compose run --rm --no-deps -v <EVIDENCE_DIR>:/evidence backend /app/room-cutover up --dry-run \
       --room-slug <TARGET_ROOM_SLUG> --room-name "<TARGET_ROOM_NAME>" --host-user-id <HOST_USER_ID> \
       --postgres "<ISOLATED_SNAPSHOT_DSN>" --report-file /evidence/up-dry-run.json
     test -f <EVIDENCE_DIR>/up-dry-run.json && chmod 0600 <EVIDENCE_DIR>/up-dry-run.json
     ```
 
-    Confirm `<EVIDENCE_DIR>/up-dry-run.json` exists on the host and that its counts/hashes match `plan-report.json`; a missing report means the bind mount was omitted and the step must be re-run.
+    Confirm `<EVIDENCE_DIR>/up-dry-run.json` exists on the host and that its counts/hashes match `plan-report.json`; a missing report means the bind mount was omitted and the step must be re-run. (As in step 11, the inline `ROOM_CUTOVER_AUTHORITATIVE=true` prefix pins the rehearsal to the prebuilt `:true` backend image.)
 13. Confirm the isolated end-to-end rehearsal (Gate 1 evidence) is accepted.
 14. Confirm `<BACKUP_LOCATION>` is writable, verified, and retains dumps for at least 30 days.
 
@@ -179,7 +205,7 @@ Execute strictly in order inside `<MAINTENANCE_WINDOW>`. Any failure at any step
 Any failed mandatory check requires an immediate rollback:
 
 1. Stop the true pair: `docker compose stop frontend backend`.
-2. Set `ROOM_CUTOVER_AUTHORITATIVE=false` and explicitly restore the **exact** recorded false pair. Select the images by the immutable IDs/digests captured in pre-window step 2 (`<FALSE_PAIR_IMAGE_TAGS>`) — re-tag them back to `local-music-queue-backend:false` / `local-music-queue-frontend:false` if the tags were reassigned — then start them as one pair. The mode-qualified tags guarantee this false pair was never overwritten by the `true` build.
+2. Set `ROOM_CUTOVER_AUTHORITATIVE=false` and explicitly restore the **exact** recorded false pair. Select the images by the immutable IDs/digests captured in pre-window step 2 (`<FALSE_PAIR_IMAGE_TAGS>`) — the protected `local-music-queue-backend:rollback-r14c` / `local-music-queue-frontend:rollback-r14c` tags pin those IDs; re-tag them back to `local-music-queue-backend:false` / `local-music-queue-frontend:false` if the `:false` tags were reassigned (and `docker load` the archives from `<BACKUP_LOCATION>` first if the local images were ever removed) — then start them as one pair. Verify each restored image's `{{.Id}}` equals the captured ID before starting. The mode-qualified tags guarantee this false pair was never overwritten by the `true` build.
 3. **Do not** delete or edit `room_cutover_marker`.
 4. **Do not** use force/reset/hash-edit tooling of any kind.
 5. Retain `<DUMP_FILE>` and every report under `<EVIDENCE_DIR>`.
@@ -243,7 +269,7 @@ All evidence lives on the host under `<EVIDENCE_DIR>` (mode `0700`), never insid
 - `<EVIDENCE_DIR>/live-plan.json`, `<EVIDENCE_DIR>/live-up.json`, `<EVIDENCE_DIR>/live-verify.json` (redacted reports, mode `0600`), each confirmed present on the host after its `docker compose run --rm` exited.
 - `<EVIDENCE_DIR>/plan-report.json` and `<EVIDENCE_DIR>/up-dry-run.json` from the pre-window snapshot plan and isolated `up --dry-run` rehearsal (each mode `0600`, each written through the bind mount and confirmed present on the host).
 - Rendered `<EVIDENCE_DIR>/compose-false.yml` and `<EVIDENCE_DIR>/compose-true.yml`.
-- Recorded false-pair and true-pair image IDs/digests (`<FALSE_PAIR_IMAGE_TAGS>`, `<TRUE_PAIR_IMAGE_TAGS>`).
+- Recorded false-pair and true-pair image IDs/digests (`<FALSE_PAIR_IMAGE_TAGS>`, `<TRUE_PAIR_IMAGE_TAGS>`), the protected `rollback-r14c` tags pinning the false pair, and the two rollback image archives in `<BACKUP_LOCATION>` (mode `0600`, retained until the Product Owner closes the rollback window).
 - Completed smoke-matrix checklist with operator initials and timestamps.
 
 None of these files may be committed to the repository; they can contain real identities and must stay in the operator-controlled `<EVIDENCE_DIR>` only.

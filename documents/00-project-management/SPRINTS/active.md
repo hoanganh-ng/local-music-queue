@@ -4,7 +4,7 @@
 
 R14c was approved by the Product Owner and activated on 2026-07-28 on branch `sprint/r14c-coordinated-production-cutover`, cut from `dev` at approved base commit `13c09549fc89febac2c79085afcf7249a43f62a4`.
 
-Gate 1 implementation is open as **PR #26** (base `dev`, changed-file count per GitHub PR #26) with review-head sequence `1502c3a243b3350b6a18ff2454118981f4032357` (initial Gate 1) → `0daa8fbe22b896c6def5f2e75af129792ee41229` (first corrective pass, F1–F6) → the new corrective head from this pass (exact SHA posted to PR #26 at push). Architect review returned focused findings; the corrective changes are prepared for re-review and Gate 1 remains **pending re-review — not accepted**. The Builder does not commit, push, or advance the sprint.
+Gate 1 implementation is open as **PR #26** (base `dev`, changed-file count per GitHub PR #26) with review-head sequence `1502c3a243b3350b6a18ff2454118981f4032357` (initial Gate 1) → `0daa8fbe22b896c6def5f2e75af129792ee41229` (first corrective pass, F1–F6) → `328aba41db44ca1fc41e02ee052d2d6c2c63ca36` (second corrective pass, the reviewed head) → the final corrective head from this pass (exact SHA recorded only in the PR #26 lifecycle ledger). Architect review returned focused findings; the final documentation-only corrective pass is prepared for re-review and Gate 1 remains **pending re-review — not accepted**. The Builder does not merge or advance the sprint.
 
 Activation authorizes **Gate 1 only**: implementation, automated verification, Docker/Compose artifact pairing, packaging of the existing `room-cutover` CLI, an isolated production-like rehearsal, and completion of the redacted operational runbook.
 
