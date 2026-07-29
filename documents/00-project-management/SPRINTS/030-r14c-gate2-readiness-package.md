@@ -1,6 +1,6 @@
 # Sprint 030 — R14c Gate 2 Readiness Package
 
-**Status:** In progress — documentation-only; prepared as an unmerged PR awaiting Architect review and Product Owner approval  
+**Status:** Closed and accepted (2026-07-29) — documentation-only; PR #27 integrated into `dev` as `d27c56ff85a1c655e9c9a1bc38354f13fcfd7ccd`  
 **Branch:** `sprint/r14c-gate2-readiness`  
 **Base:** `dev` at `6d550ee0db3b64678147d69c9d04333587f20eb3`  
 **Parent epic:** Issue #17  
@@ -77,5 +77,6 @@ No Go, frontend, or Docker verification applies — no code or configuration fil
 - Delivered as PR #27 (head `f56d3276bb8b12d742612b530000b10467239dca`). The Architect review returned one Blocking documentation/security finding: snapshot `psql`, `--postgres`, and `pg_dump "$DATABASE_URL"` commands expanded real connection values into argv. A corrective pass on the same branch (documentation-only, unmerged, head `eb68393caebda64673666f00c39c58fce6047b46`) adopted the protected non-argv connection-supply model across the runbook, readiness package, and input template; no runtime, schema, Docker/Compose, frontend, or production change.
 - The Architect re-review of head `eb68393` resolved the argv finding but returned one further Blocking finding: retained `docker compose config` renders (`compose-false.yml` / `compose-true.yml`) interpolate deployment secrets (database credentials, `DATABASE_URL`, Google and DuckDNS values) despite being classified PII-free, and the `set -a` sourcing exported both snapshot DSNs to every child process contrary to the documented per-command scope. A second corrective pass on the same branch (documentation-only, unmerged) replaced the retained renders with allowlisted pairing evidence (`pairing-false.txt` / `pairing-true.txt`: image references and authoritative flags only, full render never written to disk) and switched `<CONNECTION_ENV_FILE>` to plain non-`export` assignments sourced privately, with artifact names, custody rules, preflight checks, and verification scans aligned.
 - No production system was accessed and no runbook step was executed in preparing this sprint or its corrective passes.
-- Gate 2 remains pending until a GO is recorded in the readiness package's decision block.
+- The Architect approved the second corrective pass (head `88efb0c6d92b2afb7fc304f80ac0555b3d4d962b`) as the final focused correction, and the Product Owner merged PR #27 into `dev` as `d27c56ff85a1c655e9c9a1bc38354f13fcfd7ccd` on 2026-07-29. Sprint 030 is **closed and accepted**; the readiness package, input template, and amended runbook are now authoritative on `dev`.
+- This closure record does **not** authorize the production cutover. Blockers B1–B7 remain unresolved; Gate 2 remains pending and unauthorized until a GO is recorded in the readiness package's decision block; production remains untouched.
 - R14e remains inactive. Room epic Issue #17 remains open.
