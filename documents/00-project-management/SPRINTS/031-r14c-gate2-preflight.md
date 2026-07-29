@@ -1,6 +1,6 @@
 # Sprint 031 — R14c Gate 2 Preflight and Go/No-Go Preparation
 
-**Status:** In progress — awaiting Architect review and Product Owner approval (documentation-only; unmerged PR submitted for review)
+**Status:** In progress — awaiting Architect review and Product Owner approval (documentation-only; unmerged PR #28 submitted for review)
 **Branch:** `sprint/r14c-gate2-preflight`
 **Base:** `dev` at `8ae823e8dc7b337a70bd6d420745595463680666`
 **Parent epic:** Issue #17
@@ -74,6 +74,7 @@ No Go, frontend, or Docker verification applies — no code or configuration fil
 ## Record
 
 - Prepared from `dev` at `8ae823e8dc7b337a70bd6d420745595463680666` on branch `sprint/r14c-gate2-preflight` as an unmerged PR for Architect review and Product Owner decision.
+- Delivered as PR #28 (head `bb4a29d564fa47bc11450ecd631d7e1f097e4b31`), base `dev`, open and non-draft; it must remain unmerged pending Architect review and Product Owner decision.
 - No production system, snapshot, deployment host, container, connection bundle, evidence directory, credential, or identity was accessed in preparing this sprint. No runbook step was executed. No operational item was marked resolved and no GO was declared.
 - This record does **not** authorize the production cutover. Blockers B1–B7 remain unresolved; Gate 2 remains pending and unauthorized until a GO is recorded in the readiness package's decision block against redacted human-Operator evidence; production remains untouched.
 - R14e remains inactive. Room epic Issue #17 remains open.
