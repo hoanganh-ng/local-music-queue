@@ -17,16 +17,36 @@ Whether to authorize the R14c production cutover maintenance window. GO authoriz
 3. [Operational discrepancy register](./room-cutover-gate2-discrepancy-register.md) — any discrepancies raised during preflight and their disposition.
 4. [Readiness package Section 9](./room-cutover-gate2-readiness.md) — the authoritative entry criteria and the decision block where the GO / NO-GO / DEFER is actually recorded and signed.
 
-## 3. Current state snapshot (at Sprint 031 creation)
+## 3. Current state snapshot (at the latest Sprint 031 documentation pass)
 
-| Group | Total | MET / Resolved | Remaining |
-|---|---|---|---|
-| Blockers B1–B6 | 6 | 0 | 6 |
-| Preflight PF-01…PF-15 | 15 | 0 | 15 |
-| Entry criteria E1–E10 | 10 | 0 | 10 |
-| Blocking/Important discrepancies | — | — | 0 recorded |
+Status terms follow the [ledger status model](./room-cutover-gate2-preflight-ledger.md): `Not started`, `In progress`, `Resolved`, `Failed`, `Blocked`, `Not applicable` (only where explicitly permitted).
 
-**Readiness: NOT READY.** E1 (Gate 1 integrated) is factually satisfied on `dev` and the Product Owner records its acceptance at review; every other item awaits accepted redacted human-Operator evidence. This snapshot is the state the Builder recorded; it will be superseded by the ledger as the Operator returns evidence.
+| Group | Total | Resolved | Failed | Blocked | Not started / In progress |
+|---|---|---|---|---|---|
+| Blockers B1–B6 | 6 | 0 | 0 | 0 | 6 |
+| Preflight PF-01…PF-15 | 15 | 0 | 0 | 0 | 15 |
+| Entry criteria E1–E10 | 10 | 0 | 0 | 0 | 10 |
+| Blocking/Important discrepancies | — | — | — | — | 0 recorded |
+
+**Readiness: NOT READY.** The E1 ledger row carries a factual repository note (PR #26's merge is recorded on `dev`), which is **not** Product Owner acceptance; E1, like every other row, awaits the Product Owner's acceptance at review. Every item awaits accepted redacted human-Operator evidence. This snapshot is the state the Builder recorded; it will be superseded by the ledger as the Operator returns evidence.
+
+### 3.1 Current summaries (all as of the latest documentation pass — no operational step has run)
+
+| Summary area | Current state |
+|---|---|
+| Blockers B1–B6 | All six `Not started`. No role assignment, input approval, window agreement, backup verification, snapshot provisioning, or host-commit declaration has occurred. |
+| Entry criteria E1–E10 | All ten `Not started`. E1 carries the factual repository note only; no criterion has Product Owner acceptance. |
+| Failed items | None. No item has been worked, so no substantive condition has failed. |
+| Blocked items | None recorded. No dependency has been tested for availability; absence of `Blocked` rows reflects that work has not started, not that dependencies are confirmed available. |
+| Operator evidence completeness | 0 of 31 tracked rows (B1–B6, PF-01…PF-15, E1–E10) have any returned evidence. No evidence-return has been submitted. |
+| Proposed-window readiness | No `<MAINTENANCE_WINDOW>` has been proposed or agreed (B3/E4 `Not started`); no announcement channels identified. |
+| Rollback readiness | Not demonstrated. Rollback pair capture/custody (PF-02), backup posture (B4/PF-12/E5), and custody acknowledgement (E6) are all `Not started`. |
+| Snapshot-rehearsal conclusion | No conclusion. Snapshot infrastructure is not provisioned (B5) and no `plan` / isolated `up --dry-run` rehearsal has been run under Gate 2 preflight (PF-10 `Not started`); PF-11 acceptance of Gate 1 rehearsal evidence is pending the Product Owner. |
+| Discrepancy state | Register empty: 0 open, 0 in progress, 0 resolved/accepted/deferred. Reflects that no operational step has run. |
+
+### 3.2 Recommended decision (unsigned)
+
+**`DEFER / NOT READY`** — every tracked row is `Not started`; no blocker is resolved and no entry criterion has accepted evidence. This recommendation is unsigned, is not a decision, and binds no one; the Product Owner alone records the authoritative GO / NO-GO / DEFER in the readiness package Section 9 (see Section 7 below).
 
 ## 4. Separation of duties (readiness §3)
 
@@ -37,15 +57,18 @@ Whether to authorize the R14c production cutover maintenance window. GO authoriz
 
 ## 5. Decision rule (restated from readiness §9)
 
-- **GO** — all of E1–E10 met against accepted redacted evidence, and no open Blocking or unaccepted Important discrepancy remains. Record date, window, and signatures in the readiness package Section 9; the Operator may then execute the runbook inside `<MAINTENANCE_WINDOW>` only.
-- **NO-GO** — any criterion fails on substance (rehearsal reports inconsistent, backup unverifiable, rollback custody rejected, an open Blocking discrepancy). Record the failed criteria; Gate 2 stays closed; remediation is planned outside the window.
-- **DEFER** — criteria are unmet only for scheduling/assignment reasons (inputs pending, window not agreed, personnel unavailable). Record what is pending and the revisit date; no production action of any kind meanwhile.
+- **GO** — all of E1–E10 `Resolved` against accepted redacted evidence, no ledger row `Failed` or `Blocked`, and no open Blocking or unaccepted Important discrepancy remains. Record date, window, and signatures in the readiness package Section 9; the Operator may then execute the runbook inside `<MAINTENANCE_WINDOW>` only.
+- **NO-GO** — any criterion `Failed` on substance (rehearsal reports inconsistent, backup unverifiable, rollback custody rejected, an open Blocking discrepancy). Record the failed criteria; Gate 2 stays closed; remediation is planned outside the window.
+- **DEFER** — criteria are unmet only because rows are `Not started`, `In progress`, or `Blocked` for scheduling/assignment/availability reasons (inputs pending, window not agreed, personnel unavailable). Record what is pending and the revisit date; no production action of any kind meanwhile.
+
+A discrepancy contradicting a procedure, isolation guarantee, credential rule, production-safety rule, or the accepted runbook cannot be accepted as Product Owner-only risk; per the [discrepancy register classification rule](./room-cutover-gate2-discrepancy-register.md), work remains stopped until the Architect and the Product Owner explicitly classify it.
 
 ## 6. Pre-decision confirmations (Product Owner ticks these at review, not before)
 
-- [ ] Ledger reviewed; every B1–B6 resolved with accepted redacted evidence, or the gap is understood.
-- [ ] Every PF-01…PF-15 answerable "yes, with evidence" per the evidence-return.
-- [ ] Discrepancy register reviewed; no open Blocking discrepancy; every Important one resolved or explicitly ACCEPTED-RISK.
+- [ ] Ledger reviewed; every B1–B6 `Resolved` with accepted redacted evidence, or the gap is understood.
+- [ ] Every PF-01…PF-15 `Resolved` against accepted redacted evidence per the evidence-return.
+- [ ] No ledger row is `Failed` or `Blocked`, or each such row is understood and reflected in the decision.
+- [ ] Discrepancy register reviewed; no open Blocking discrepancy; every Important one resolved or explicitly ACCEPTED-RISK per the classification rule (Architect + Product Owner for the reserved classes).
 - [ ] Roles assigned; Operator ≠ Product Owner (E3).
 - [ ] `<MAINTENANCE_WINDOW>` scheduled with closure/reopen announcement plan (E4).
 - [ ] Backup posture verified (E5); rollback capture/custody rules acknowledged (E6).

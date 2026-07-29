@@ -2,74 +2,94 @@
 
 **Sprint:** 031 (R14c Gate 2 Preflight and Go/No-Go Preparation) — `documents/00-project-management/SPRINTS/031-r14c-gate2-preflight.md`
 **Overlays:** the accepted readiness package [`room-cutover-gate2-readiness.md`](./room-cutover-gate2-readiness.md) and runbook [`room-cutover-runbook.md`](./room-cutover-runbook.md); it tracks their status but changes neither.
-**Status:** Tracking document. **Nothing here is executed and nothing is resolved.** Every blocker, preflight check, and entry criterion below is initialized OPEN / NOT MET. Gate 2 production execution remains explicitly pending and unauthorized; a row moves off OPEN / NOT MET only when a redacted human-Operator evidence reference is recorded and the Product Owner accepts it — never by the Builder.
+**Status:** Tracking document. **Nothing here is executed and nothing is resolved.** Every blocker, preflight check, and entry criterion below is initialized `Not started`. Gate 2 production execution remains explicitly pending and unauthorized; a row moves to `Resolved` only when a redacted human-Operator evidence reference is recorded and the Product Owner accepts it — never by the Builder.
 
 ## How to use this ledger
 
-- This is the live status surface the Product Owner and Operator consult when preparing the Gate 2 go/no-go review. It restates each tracked item from the readiness package and runbook and adds status, owner, evidence-reference, and updated-on columns.
-- **Redaction rule (mandatory).** The `Evidence reference` column holds **only** a redacted pointer to where the human Operator recorded the evidence (e.g. "evidence-return §PF-05, attested t, 2026-__-__") plus a boolean/attestation outcome. It must **never** contain a raw value, DSN, password, hostname, file path on the deployment host, image ID/digest, commit SHA, the target slug, the host user id, or the live Google account address. All such values live only in the operator-local input file and the protected connection bundle, off-repository.
-- **Status vocabulary.** `OPEN` / `NOT MET` (default), `IN PROGRESS` (Operator working it, no accepted evidence yet), `EVIDENCE RETURNED` (redacted evidence submitted, awaiting Product Owner acceptance), `MET` (Product Owner accepted the redacted evidence). The Builder may only ever record `OPEN` / `NOT MET`.
-- **No self-clearing.** No item is marked `MET` without a redacted human-Operator evidence reference accepted by the Product Owner. The Builder does not mark any item resolved and does not declare GO.
+- This is the live status surface the Product Owner and Operator consult when preparing the Gate 2 go/no-go review. It restates each tracked item from the readiness package and runbook and adds pass-condition, owner, status, evidence-reference, consequence, and checked/updated columns.
+- **Redaction rule (mandatory).** The `Evidence reference` column holds **only** a redacted protected-reference identifier pointing to where the human Operator recorded the evidence (e.g. "evidence-return §PF-05, attested t, ref `EVID-REF-05`") plus a boolean/attestation outcome. It must **never** contain a raw value, DSN, password, hostname, file path on the deployment host, image ID/digest, commit SHA, the target slug, the host user id, or the live Google account address. All such values live only in the operator-local input file and the protected connection bundle, off-repository.
+- The `Checked / updated` column holds a **safe date only** (YYYY-MM-DD, plus who checked, by role) — never a timestamp, timezone, or scheduling detail that reveals the maintenance window before it is announced.
 - Any discrepancy found while working an item is logged in the [operational discrepancy register](./room-cutover-gate2-discrepancy-register.md) and cross-referenced here.
+
+## Status vocabulary (authoritative for this ledger)
+
+| Status | Meaning |
+|---|---|
+| `Not started` | Default. No work has begun and no evidence exists. Every row below is initialized `Not started`. The Builder may only ever record `Not started`. |
+| `In progress` | The owning role is actively working the item; no accepted evidence yet. |
+| `Resolved` | The Product Owner has **accepted** a redacted human-Operator evidence reference recorded in the row. Nothing else produces `Resolved`. |
+| `Failed` | A substantive condition failed on its merits (not merely pending). A discrepancy-register entry is required. |
+| `Blocked` | A required person, input, environment, or dependency is unavailable. The row records what is unavailable. |
+| `Not applicable` | Permitted **only where a row explicitly allows it**. No B1–B6, PF-01…PF-15, or E1–E10 row currently permits `Not applicable`; it may be used only if the Product Owner later permits it in writing for a named row. |
+
+## Deterministic status transitions
+
+- `Not started` → `In progress`: the owning role begins work on the item.
+- `In progress` → `Resolved`: **only** after redacted evidence is returned through the [evidence-return](./room-cutover-gate2-evidence-return.template.md) and the Product Owner accepts it; the accepted redacted reference and a safe date are recorded in the row.
+- `In progress` → `Failed`: a substantive condition failed (e.g. host HEAD mismatch, backup unverifiable, rehearsal counts inconsistent); a discrepancy-register entry is raised and cross-referenced.
+- Any status → `Blocked`: a required person, input, environment, or dependency is unavailable; the row notes the missing dependency and the safe date.
+- `Failed` → `In progress`: remediation begins only after the discrepancy's required classification (Product Owner — and Architect, for the classes reserved in the discrepancy register) is recorded.
+- `Blocked` → `In progress`: the missing person, input, environment, or dependency becomes available.
+- No other transitions exist. No row skips to `Resolved` without accepted redacted evidence. The Builder records only `Not started` and never changes a status.
 
 ## 1. Blockers — B1–B6
 
 Source: readiness package Section 5. B7 (GO record absent) is the review outcome itself and is tracked in the [go/no-go packet](./room-cutover-gate2-go-no-go-packet.md), not here. Resolving B1–B6 is the precondition for convening the GO / NO-GO review.
 
-| ID | Blocker (readiness §5) | Status | Owner | Evidence reference (redacted only) | Updated |
-|---|---|---|---|---|---|
-| B1 | Roles unassigned — no named Operator or Product Owner-of-record; Scribe optional/unassigned | OPEN | Product Owner | *(none)* | — |
-| B2 | Operator inputs unapproved — none of the six Section 2.1 inputs has an approved value; live account holder availability unconfirmed | OPEN | Product Owner | *(none)* | — |
-| B3 | Window not scheduled — `<MAINTENANCE_WINDOW>` not agreed; closure/announcement channels not identified | OPEN | Product Owner | *(none)* | — |
-| B4 | Backup posture unverified — `<BACKUP_LOCATION>` writability, ≥ 30-day retention, restore-readability not demonstrated | OPEN | Operator | *(none)* | — |
-| B5 | Snapshot infrastructure not provisioned — snapshot + isolated DSNs and the protected connection bundle do not exist | OPEN | Operator | *(none)* | — |
-| B6 | Deployment-host commit not confirmed — `<REVIEWED_COMMIT_SHA>` not declared or verified on `<PROD_HOST>` | OPEN | Operator (verifies), Product Owner (declares) | *(none)* | — |
+| ID | Blocker (readiness §5) | Pass condition | Owner | Status | Evidence reference (redacted only) | Failure / blocking consequence | Checked / updated |
+|---|---|---|---|---|---|---|---|
+| B1 | Roles unassigned — no named Operator or Product Owner-of-record; Scribe optional/unassigned | Named Operator and Product Owner-of-record recorded; Operator ≠ Product Owner | Product Owner | Not started | *(none)* | `Failed` (separation of duties unmet) → NO-GO input; `Blocked` (personnel unavailable) → DEFER input | 2026-07-29 (initialized) |
+| B2 | Operator inputs unapproved — none of the six Section 2.1 inputs has an approved value; live account holder availability unconfirmed | All six §2.1 inputs approved and recorded in the operator-local input file; live account holder availability confirmed | Product Owner | Not started | *(none)* | `Failed` (an input rejected on substance) → NO-GO input; `Blocked` (input or account holder unavailable) → DEFER input | 2026-07-29 (initialized) |
+| B3 | Window not scheduled — `<MAINTENANCE_WINDOW>` not agreed; closure/announcement channels not identified | `<MAINTENANCE_WINDOW>` agreed with closure/reopen announcement channels identified | Product Owner | Not started | *(none)* | `Blocked` (window not agreeable) → DEFER input | 2026-07-29 (initialized) |
+| B4 | Backup posture unverified — `<BACKUP_LOCATION>` writability, ≥ 30-day retention, restore-readability not demonstrated | Writability, ≥ 30-day retention, and restore-readability demonstrated with redacted evidence | Operator | Not started | *(none)* | `Failed` (backup unverifiable) → NO-GO input; `Blocked` (destination unavailable) → DEFER input | 2026-07-29 (initialized) |
+| B5 | Snapshot infrastructure not provisioned — snapshot + isolated DSNs and the protected connection bundle do not exist | Snapshot and isolated instances provisioned; protected connection bundle in place per readiness §2.4, attested with redacted evidence | Operator | Not started | *(none)* | `Failed` (cannot be provisioned to §2.4 rules) → NO-GO input; `Blocked` (infrastructure unavailable) → DEFER input | 2026-07-29 (initialized) |
+| B6 | Deployment-host commit not confirmed — `<REVIEWED_COMMIT_SHA>` not declared or verified on `<PROD_HOST>` | Product Owner declares `<REVIEWED_COMMIT_SHA>`; Operator attests boolean host-HEAD equality | Operator (verifies), Product Owner (declares) | Not started | *(none)* | `Failed` (host HEAD ≠ declared commit) → Blocking discrepancy; NO-GO input until reconciled; `Blocked` (host access unavailable) → DEFER input | 2026-07-29 (initialized) |
 
-## 2. Preflight checks — 1–15
+## 2. Preflight checks — PF-01…PF-15
 
-Source: readiness package Section 6 (the Product Owner verification view) mapped to the runbook pre-window checklist steps 1–14. Every line must be answerable "yes, with evidence" before the window opens. All rows default NOT MET.
+Source: readiness package Section 6 (the Product Owner verification view) mapped to the runbook pre-window checklist steps 1–14. Every line must reach `Resolved` against accepted redacted evidence before the window opens. All rows are initialized `Not started`.
 
-| # | Preflight check (readiness §6) | Runbook step | Status | Owner | Evidence reference (redacted only) | Updated |
-|---|---|---|---|---|---|---|
-| PF-01 | Deployment host `git rev-parse HEAD` equals `<REVIEWED_COMMIT_SHA>` | 1 | NOT MET | Operator | *(none)* | — |
-| PF-02 | False/false rollback pair captured from running containers by immutable ID+digest, pinned under `rollback-r14c` tags, archived, re-verified — before any rebuild/prune | 2 | NOT MET | Operator | *(none)* | — |
-| PF-03 | `<EVIDENCE_DIR>` exists, mode `0700`, outside repo and web-served paths | 3 | NOT MET | Operator | *(none)* | — |
-| PF-04 | `<TARGET_ROOM_SLUG>` verified unused and non-reserved | 4 | NOT MET | Operator | *(none)* | — |
-| PF-05 | `<HOST_USER_ID>` existence check returns exactly one row, boolean output only, via `PGSERVICE=r14c-snapshot` — no DSN in argv | 5 | NOT MET | Operator | *(none)* | — |
-| PF-06 | `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` → `<HOST_USER_ID>` equality confirmed via `read -rs`/`\getenv`/`:'email'`; result `t`; neither address nor DSN on any command line or file | 6 | NOT MET | Operator | *(none)* | — |
-| PF-07 | Login for the live account confirmed on the current false deployment, distinguishing login eligibility, account-level `users.role`, and room-host membership | 8 | NOT MET | Operator | *(none)* | — |
-| PF-08 | Allowlisted pairing evidence (`pairing-false.txt` / `pairing-true.txt`) extracted and reviewed; each extract pairs backend+frontend in the same mode; only image-reference and authoritative-flag lines — no env block, credential, or full render | 9 | NOT MET | Operator | *(none)* | — |
-| PF-09 | Both artifact pairs built from `<REVIEWED_COMMIT_SHA>`; backend image contains `/app/server` and `/app/room-cutover`; `:true` pair IDs recorded | 10 | NOT MET | Operator | *(none)* | — |
-| PF-10 | Snapshot `plan` and isolated `up --dry-run` rehearsals completed through the packaged `:true` backend image with the inline `ROOM_CUTOVER_AUTHORITATIVE=true` prefix, DSNs supplied per readiness §2.4 (per-command `DATABASE_URL`, name-only `-e DATABASE_URL`, `--postgres` never used); reports durable, `0600`, PII-free, counts plausible and mutually consistent; R14b first-cutover readiness proven (target slug absent, `room_activities` empty, exactly one `queue_state` row `id=1` and one `auto_queue_config` row `id=1`, missing singleton fails up front) | 11–12 | NOT MET | Operator | *(none)* | — |
-| PF-11 | Gate 1 isolated end-to-end rehearsal evidence accepted | 13 | NOT MET | Operator | *(none)* | — |
-| PF-12 | `<BACKUP_LOCATION>` writable, verified, ≥ 30-day retention | 14 | NOT MET | Operator | *(none)* | — |
-| PF-13 | PostgreSQL migration state clean and schema version exactly 9; identity-check client supports `\getenv` (psql ≥ 15; deployment runs PostgreSQL 16) | — | NOT MET | Operator | *(none)* | — |
-| PF-14 | Rollback and abort rules (readiness §8; runbook Rollback) read aloud and acknowledged by Operator and Product Owner | — | NOT MET | Operator + Product Owner | *(none)* | — |
-| PF-15 | Protected connection bundle in place (`<PGSERVICE_FILE>`, `<PGPASS_FILE>`, `<CONNECTION_ENV_FILE>`, each `0600`, outside repo/web paths); `<CONNECTION_ENV_FILE>` holds plain non-`export` assignments only; spot-check confirms no planned command carries a DSN/credential in argv (`--postgres` unused everywhere) | 5–12 | NOT MET | Operator | *(none)* | — |
+| # | Preflight check (readiness §6) = pass condition | Runbook step | Owner | Status | Evidence reference (redacted only) | Failure / blocking consequence | Checked / updated |
+|---|---|---|---|---|---|---|---|
+| PF-01 | Deployment host `git rev-parse HEAD` equals `<REVIEWED_COMMIT_SHA>` (boolean equality attested) | 1 | Operator | Not started | *(none)* | `Failed` (mismatch) → Blocking discrepancy; NO-GO input until reconciled; `Blocked` (host unavailable) → DEFER input | 2026-07-29 (initialized) |
+| PF-02 | False/false rollback pair captured from running containers by immutable ID+digest, pinned under `rollback-r14c` tags, archived, re-verified — before any rebuild/prune | 2 | Operator | Not started | *(none)* | `Failed` (rollback custody unproven) → NO-GO input (rollback readiness lost); `Blocked` (registry/host unavailable) → DEFER input | 2026-07-29 (initialized) |
+| PF-03 | `<EVIDENCE_DIR>` exists, mode `0700`, outside repo and web-served paths | 3 | Operator | Not started | *(none)* | `Failed` (custody/permission anomaly) → discrepancy; remediate before any report is written; `Blocked` → DEFER input | 2026-07-29 (initialized) |
+| PF-04 | `<TARGET_ROOM_SLUG>` verified unused and non-reserved | 4 | Operator | Not started | *(none)* | `Failed` (slug in use/reserved) → Blocking discrepancy; NO-GO input until a new slug is approved | 2026-07-29 (initialized) |
+| PF-05 | `<HOST_USER_ID>` existence check returns exactly one row, boolean output only, via `PGSERVICE=r14c-snapshot` — no DSN in argv | 5 | Operator | Not started | *(none)* | `Failed` (≠ exactly one row) → Blocking discrepancy; NO-GO input; argv deviation → credential-class discrepancy (work stops; Architect + Product Owner classification) | 2026-07-29 (initialized) |
+| PF-06 | `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` → `<HOST_USER_ID>` equality confirmed via `read -rs`/`\getenv`/`:'email'`; result `t`; neither address nor DSN on any command line or file | 6 | Operator | Not started | *(none)* | `Failed` (identity mismatch) → Blocking discrepancy; NO-GO input; exposure deviation → credential-class discrepancy (work stops; Architect + Product Owner classification) | 2026-07-29 (initialized) |
+| PF-07 | Login for the live account confirmed on the current false deployment, distinguishing login eligibility, account-level `users.role`, and room-host membership | 8 | Operator | Not started | *(none)* | `Failed` (login unconfirmed/ambiguous) → NO-GO input; `Blocked` (account holder unavailable) → DEFER input | 2026-07-29 (initialized) |
+| PF-08 | Allowlisted pairing evidence (`pairing-false.txt` / `pairing-true.txt`) extracted and reviewed; each extract pairs backend+frontend in the same mode; only image-reference and authoritative-flag lines — no env block, credential, or full render | 9 | Operator | Not started | *(none)* | `Failed` (mode-mixed pairing) → Blocking discrepancy; leaked env block/credential/full render → isolation/credential-class discrepancy (work stops; Architect + Product Owner classification) | 2026-07-29 (initialized) |
+| PF-09 | Both artifact pairs built from `<REVIEWED_COMMIT_SHA>`; backend image contains `/app/server` and `/app/room-cutover`; `:true` pair IDs recorded | 10 | Operator | Not started | *(none)* | `Failed` (artifacts not from reviewed commit, or CLI missing) → NO-GO input until rebuilt and re-attested | 2026-07-29 (initialized) |
+| PF-10 | Snapshot `plan` and isolated `up --dry-run` rehearsals completed through the packaged `:true` backend image with the inline `ROOM_CUTOVER_AUTHORITATIVE=true` prefix, DSNs supplied per readiness §2.4 (per-command `DATABASE_URL`, name-only `-e DATABASE_URL`, `--postgres` never used); reports durable, `0600`, PII-free, counts plausible and mutually consistent; R14b first-cutover readiness proven (target slug absent, `room_activities` empty, exactly one `queue_state` row `id=1` and one `auto_queue_config` row `id=1`, missing singleton fails up front) | 11–12 | Operator | Not started | *(none)* | `Failed` (reports inconsistent/implausible, singleton violated) → NO-GO input; §2.4 deviation → credential-class discrepancy (work stops; Architect + Product Owner classification); `Blocked` (snapshot infra unavailable) → DEFER input | 2026-07-29 (initialized) |
+| PF-11 | Gate 1 isolated end-to-end rehearsal evidence accepted | 13 | Product Owner (acceptance); Operator supplies or references the redacted evidence | Not started | *(none)* | `Failed` (evidence rejected on substance) → NO-GO input; `Blocked` (evidence unavailable) → DEFER input | 2026-07-29 (initialized) |
+| PF-12 | `<BACKUP_LOCATION>` writable, verified, ≥ 30-day retention | 14 | Operator | Not started | *(none)* | `Failed` (backup unverifiable) → NO-GO input; `Blocked` (destination unavailable) → DEFER input | 2026-07-29 (initialized) |
+| PF-13 | PostgreSQL migration state clean and schema version exactly 9; identity-check client supports `\getenv` (psql ≥ 15; deployment runs PostgreSQL 16) | — | Operator | Not started | *(none)* | `Failed` (state unclean or version ≠ 9) → Blocking discrepancy; NO-GO input; `Blocked` (client lacks `\getenv`) → DEFER input until a compliant client is available | 2026-07-29 (initialized) |
+| PF-14 | Rollback and abort rules (readiness §8; runbook Rollback) read aloud and acknowledged by Operator and Product Owner | — | Operator + Product Owner | Not started | *(none)* | Not acknowledged → cannot proceed; `Blocked` (either person unavailable) → DEFER input | 2026-07-29 (initialized) |
+| PF-15 | Protected connection bundle in place (`<PGSERVICE_FILE>`, `<PGPASS_FILE>`, `<CONNECTION_ENV_FILE>`, each `0600`, outside repo/web paths); `<CONNECTION_ENV_FILE>` holds plain non-`export` assignments only; spot-check confirms no planned command carries a DSN/credential in argv (`--postgres` unused everywhere) | 5–12 | Operator | Not started | *(none)* | `Failed` (bundle/argv rule violated) → credential-class discrepancy (work stops; Architect + Product Owner classification); `Blocked` → DEFER input | 2026-07-29 (initialized) |
 
 ## 3. Entry criteria — E1–E10
 
-Source: readiness package Section 9. These are the Product Owner GO / NO-GO / DEFER checklist criteria; every one must be met before Gate 2 may be entered. All rows default NOT MET. The decision itself is recorded in the readiness package Section 9 and mirrored in the [go/no-go packet](./room-cutover-gate2-go-no-go-packet.md).
+Source: readiness package Section 9. These are the Product Owner GO / NO-GO / DEFER checklist criteria; every one must reach `Resolved` before Gate 2 may be entered. All rows are initialized `Not started`. The decision itself is recorded in the readiness package Section 9 and mirrored in the [go/no-go packet](./room-cutover-gate2-go-no-go-packet.md).
 
-| # | Entry criterion (readiness §9) | Depends on | Status | Evidence reference (redacted only) | Updated |
-|---|---|---|---|---|---|
-| E1 | Gate 1 integrated: PR #26 squash-merged into `dev` as `c8ab4af029d10dda889d1165464e16068a5be573`; runbook accepted | (satisfied on `dev`) | NOT MET | Confirmed on `dev` per PROJECT_STATE.md; Product Owner records acceptance at review | — |
-| E2 | All six operator inputs approved, supplied securely, recorded in the operator-local input file; protected connection bundle in place; no command supplies a DSN/credential via argv | B2, B5, PF-15 | NOT MET | *(none)* | — |
-| E3 | Roles assigned: named Operator and Product Owner-of-record; Operator ≠ Product Owner | B1 | NOT MET | *(none)* | — |
-| E4 | `<MAINTENANCE_WINDOW>` scheduled with announcement plan for closing and reopening traffic | B3 | NOT MET | *(none)* | — |
-| E5 | Backup posture verified: writable, ≥ 30-day retention, restore-readability demonstrated | B4, PF-12 | NOT MET | *(none)* | — |
-| E6 | Rollback pair capture-and-preserve plan understood; protected-tag / no-prune custody rules acknowledged | PF-02, PF-14 | NOT MET | *(none)* | — |
-| E7 | All Section 6 preflight lines answerable "yes, with evidence" (snapshot rehearsal reports reviewed) | PF-01…PF-15 | NOT MET | *(none)* | — |
-| E8 | Smoke matrix reviewed; live account holder available during the window | B2, PF-07 | NOT MET | *(none)* | — |
-| E9 | Abort rules acknowledged by Operator and Product Owner | PF-14 | NOT MET | *(none)* | — |
-| E10 | Confirmed out of scope: no R14e action, no migration 0010, no legacy-table deletion, no marker edits | — | NOT MET | *(none)* | — |
+| # | Entry criterion (readiness §9) = pass condition | Depends on | Owner | Status | Evidence reference (redacted only) | Failure / blocking consequence | Checked / updated |
+|---|---|---|---|---|---|---|---|
+| E1 | Gate 1 integrated: PR #26 squash-merged into `dev` as `c8ab4af029d10dda889d1165464e16068a5be573`; runbook accepted | — | Product Owner | Not started | Factual repository note: the merge is recorded on `dev` per PROJECT_STATE.md. This is a repository fact only — it is **not** Product Owner acceptance; the Product Owner records acceptance of this criterion at the review | `Failed` (integration state contradicted) → Blocking discrepancy; NO-GO input | 2026-07-29 (initialized) |
+| E2 | All six operator inputs approved, supplied securely, recorded in the operator-local input file; protected connection bundle in place; no command supplies a DSN/credential via argv | B2, B5, PF-15 | Product Owner (approval); Operator (secure supply, bundle) | Not started | *(none)* | `Failed` (argv/bundle rule violated) → credential-class discrepancy (work stops; Architect + Product Owner classification); `Blocked` → DEFER input | 2026-07-29 (initialized) |
+| E3 | Roles assigned: named Operator and Product Owner-of-record; Operator ≠ Product Owner | B1 | Product Owner | Not started | *(none)* | `Failed` (separation of duties unmet) → NO-GO input; `Blocked` (personnel unavailable) → DEFER input | 2026-07-29 (initialized) |
+| E4 | `<MAINTENANCE_WINDOW>` scheduled with announcement plan for closing and reopening traffic | B3 | Product Owner | Not started | *(none)* | `Blocked` (window not agreed) → DEFER input | 2026-07-29 (initialized) |
+| E5 | Backup posture verified: writable, ≥ 30-day retention, restore-readability demonstrated | B4, PF-12 | Operator | Not started | *(none)* | `Failed` (backup unverifiable) → NO-GO input; `Blocked` → DEFER input | 2026-07-29 (initialized) |
+| E6 | Rollback pair capture-and-preserve plan understood; protected-tag / no-prune custody rules acknowledged | PF-02, PF-14 | Operator + Product Owner | Not started | *(none)* | `Failed` (custody rejected) → NO-GO input; `Blocked` → DEFER input | 2026-07-29 (initialized) |
+| E7 | All Section 6 preflight lines `Resolved` against accepted redacted evidence (snapshot rehearsal reports reviewed) | PF-01…PF-15 | Operator (evidence); Product Owner (acceptance) | Not started | *(none)* | Any PF row `Failed` → NO-GO input; any PF row `Blocked` → DEFER input | 2026-07-29 (initialized) |
+| E8 | Smoke matrix reviewed; live account holder available during the window | B2, PF-07 | Product Owner (review); Operator (confirms account-holder availability) | Not started | *(none)* | `Blocked` (account holder unavailable) → DEFER input | 2026-07-29 (initialized) |
+| E9 | Abort rules acknowledged by Operator and Product Owner | PF-14 | Operator + Product Owner | Not started | *(none)* | Not acknowledged → cannot proceed; `Blocked` (either person unavailable) → DEFER input | 2026-07-29 (initialized) |
+| E10 | Confirmed out of scope: no R14e action, no migration 0010, no legacy-table deletion, no marker edits | — | Product Owner | Not started | *(none)* | `Failed` (scope contradiction found) → production-safety-class discrepancy (work stops; Architect + Product Owner classification) | 2026-07-29 (initialized) |
 
 ## 4. Roll-up
 
-| Group | Total | MET | Remaining |
-|---|---|---|---|
-| Blockers B1–B6 | 6 | 0 | 6 |
-| Preflight PF-01…PF-15 | 15 | 0 | 15 |
-| Entry criteria E1–E10 | 10 | 0 | 10 |
+| Group | Total | Resolved | Failed | Blocked | Not started / In progress |
+|---|---|---|---|---|---|
+| Blockers B1–B6 | 6 | 0 | 0 | 0 | 6 |
+| Preflight PF-01…PF-15 | 15 | 0 | 0 | 0 | 15 |
+| Entry criteria E1–E10 | 10 | 0 | 0 | 0 | 10 |
 
-**Gate 2 readiness: NOT READY.** No blocker is resolved, no preflight check is met, and no entry criterion is met. No GO may be recorded until B1–B6 are resolved, PF-01…PF-15 are each answerable "yes, with evidence," and E1–E10 are all met against accepted redacted human-Operator evidence. The Builder recorded only the default statuses above and performed no operational action.
+**Gate 2 readiness: NOT READY.** Every row is `Not started`: no blocker is resolved, no preflight check is resolved, and no entry criterion is resolved. No GO may be recorded until B1–B6, PF-01…PF-15, and E1–E10 are each `Resolved` against accepted redacted human-Operator evidence, with no row `Failed` or `Blocked`. The Builder recorded only the initialized `Not started` statuses above and performed no operational action.
