@@ -1,6 +1,8 @@
 # Active Sprint
 
-**Active sprint: R14c — Coordinated authoritative room cutover** ([`029-coordinated-authoritative-room-cutover.md`](./029-coordinated-authoritative-room-cutover.md)) — **Gate 1 integrated; Gate 2 production execution pending.**
+**Active sprint: Sprint 030 — R14c Gate 2 Readiness Package** ([`030-r14c-gate2-readiness-package.md`](./030-r14c-gate2-readiness-package.md)) — **documentation-only**, prepared on branch `sprint/r14c-gate2-readiness` from `dev` at `6d550ee0db3b64678147d69c9d04333587f20eb3` as an unmerged PR awaiting Architect review and Product Owner approval. It delivers the authoritative Gate 2 readiness package (`documents/07-deployment/room-cutover-gate2-readiness.md`) and the placeholder-only operator-local input template overlaying — without modifying — the accepted runbook. Sprint 030 authorizes no production action of any kind.
+
+The underlying R14c operational state is unchanged: **Gate 1 integrated; Gate 2 production execution pending** ([`029-coordinated-authoritative-room-cutover.md`](./029-coordinated-authoritative-room-cutover.md)).
 
 R14c was approved by the Product Owner and activated on 2026-07-28 on branch `sprint/r14c-coordinated-production-cutover`, cut from `dev` at approved base commit `13c09549fc89febac2c79085afcf7249a43f62a4`.
 

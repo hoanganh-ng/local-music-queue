@@ -20,6 +20,7 @@ This directory contains documentation for active and past sprints.
 | 027    | Room activity runtime parity / R09i                  | Closed and accepted (2026-07-28; PR #24; merge `c112000d`)         |
 | 028    | Frontend global-path retirement / R14d               | Closed and accepted (2026-07-28; PR #25; merge `67bd57a8`)         |
 | 029    | Coordinated authoritative room cutover / R14c        | Gate 1 integrated (PR #26 squash-merged into `dev` as `c8ab4af0` 2026-07-29); Gate 2 production execution pending |
+| 030    | R14c Gate 2 Readiness Package                        | In progress — documentation-only; unmerged PR awaiting Architect review and Product Owner approval |
 
 ## File Naming
 

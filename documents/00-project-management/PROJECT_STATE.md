@@ -2,7 +2,7 @@
 
 **Last refreshed:** 2026-07-29  
 **Branch:** `dev`  
-**Current active sprint:** R14c — Coordinated authoritative room cutover ([`SPRINTS/029-coordinated-authoritative-room-cutover.md`](./SPRINTS/029-coordinated-authoritative-room-cutover.md)) — Gate 1 integrated; Gate 2 pending
+**Current active sprint:** Sprint 030 — R14c Gate 2 Readiness Package ([`SPRINTS/030-r14c-gate2-readiness-package.md`](./SPRINTS/030-r14c-gate2-readiness-package.md)) — documentation-only, unmerged PR awaiting review. R14c ([`SPRINTS/029-coordinated-authoritative-room-cutover.md`](./SPRINTS/029-coordinated-authoritative-room-cutover.md)) remains Gate 1 integrated; Gate 2 pending
 
 ## Current state
 
@@ -13,6 +13,8 @@ R14c activation authorizes **Gate 1 only**: implementation, automated verificati
 R14c **Gate 1 is integrated**. The Product Owner accepted the re-review and squash-merged **PR #26** (base `dev` `13c09549fc89febac2c79085afcf7249a43f62a4`) into `dev` as commit `c8ab4af029d10dda889d1165464e16068a5be573` on 2026-07-29. The review-head sequence was `1502c3a243b3350b6a18ff2454118981f4032357` (initial Gate 1) → `0daa8fbe22b896c6def5f2e75af129792ee41229` (first corrective pass, findings F1–F6) → `328aba41db44ca1fc41e02ee052d2d6c2c63ca36` (second corrective pass, the reviewed head) → the final documentation-only corrective head, whose exact SHA remains recorded only in the PR #26 lifecycle ledger. R14c's **implementation lifecycle is closed** — no further Gate 1 work is authorized. **Gate 2 — production execution — remains explicitly pending**: the merge does not authorize it; it requires a separate Product Owner go/no-go against the merged runbook.
 
 Production cutover has not been executed. The true server mode and R14d true frontend bundle have not been deployed. The existing false frontend artifact and current legacy-global server behavior remain the authoritative pre-cutover and rollback-compatible state.
+
+Sprint 030 — **R14c Gate 2 Readiness Package** — is the documentation-only sprint preparing the Gate 2 go/no-go decision. It was cut from `dev` at `6d550ee0db3b64678147d69c9d04333587f20eb3` on branch `sprint/r14c-gate2-readiness` and is delivered as an unmerged PR. It adds the authoritative readiness overlay [`documents/07-deployment/room-cutover-gate2-readiness.md`](../07-deployment/room-cutover-gate2-readiness.md) (placeholder/input inventory with owners and secure supply methods, maintenance roles, artifact custody, blockers B1–B7, preflight checks, abort rules, entry criteria E1–E10, and the Product Owner GO / NO-GO / DEFER checklist) plus the placeholder-only operator-local input template [`documents/07-deployment/room-cutover-gate2-inputs.template.md`](../07-deployment/room-cutover-gate2-inputs.template.md). The accepted runbook is unchanged. Sprint 030 executed no production action: no production SQL, lookup, backup, migration, deployment, traffic control, true-mode start, rollback, or R14e action.
 
 R14c owns:
 
@@ -65,6 +67,9 @@ The Room epic remains approximately **85% accepted**. This is an implementation-
 
 ## Authoritative references
 
+- [`SPRINTS/030-r14c-gate2-readiness-package.md`](./SPRINTS/030-r14c-gate2-readiness-package.md)
+- [`../07-deployment/room-cutover-gate2-readiness.md`](../07-deployment/room-cutover-gate2-readiness.md)
+- [`../07-deployment/room-cutover-runbook.md`](../07-deployment/room-cutover-runbook.md)
 - [`SPRINTS/029-coordinated-authoritative-room-cutover.md`](./SPRINTS/029-coordinated-authoritative-room-cutover.md)
 - [`SPRINTS/active.md`](./SPRINTS/active.md)
 - [`SPRINTS/028-frontend-global-path-retirement.md`](./SPRINTS/028-frontend-global-path-retirement.md)
