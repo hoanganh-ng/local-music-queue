@@ -1,8 +1,8 @@
 # Project State Baseline
 
-**Last refreshed:** 2026-07-28  
-**Branch:** `sprint/r14c-coordinated-production-cutover`  
-**Current active sprint:** R14c — Coordinated authoritative room cutover ([`SPRINTS/029-coordinated-authoritative-room-cutover.md`](./SPRINTS/029-coordinated-authoritative-room-cutover.md))
+**Last refreshed:** 2026-07-29  
+**Branch:** `dev`  
+**Current active sprint:** R14c — Coordinated authoritative room cutover ([`SPRINTS/029-coordinated-authoritative-room-cutover.md`](./SPRINTS/029-coordinated-authoritative-room-cutover.md)) — Gate 1 integrated; Gate 2 pending
 
 ## Current state
 
@@ -10,7 +10,7 @@ R14c was approved by the Product Owner and activated on 2026-07-28 from `dev` co
 
 R14c activation authorizes **Gate 1 only**: implementation, automated verification, packaging/deployment pairing, an isolated production-like rehearsal, and completion of the operational cutover/rollback runbook. Production execution is a separate Gate 2 and requires another Product Owner go/no-go after Architect review and Gate 1 acceptance.
 
-Gate 1 implementation is open as **PR #26** (base `dev` `13c09549fc89febac2c79085afcf7249a43f62a4`; changed-file count per GitHub PR #26). Its review-head sequence is `1502c3a243b3350b6a18ff2454118981f4032357` (initial Gate 1) → `0daa8fbe22b896c6def5f2e75af129792ee41229` (first corrective pass, findings F1–F6) → `328aba41db44ca1fc41e02ee052d2d6c2c63ca36` (second corrective pass, the reviewed head) → the final corrective head from this pass, whose exact SHA is recorded only in the PR #26 lifecycle ledger (a commit cannot embed its own hash). The Architect returned focused findings and Gate 1 is **pending re-review — not accepted**. The final corrective pass is runbook/tracker documentation only (protected rollback tags and durable archives for the captured false-pair images with a no-delete/no-prune window, inline `ROOM_CUTOVER_AUTHORITATIVE=true` prefixes on both pre-window rehearsal commands, live email passed to `psql` via `\getenv` so it never appears in process arguments, accurate review-head history) and preserves the accepted runtime flag, startup guard, activity-writer selection, and tombstone handler. The Builder does not merge or advance the sprint.
+R14c **Gate 1 is integrated**. The Product Owner accepted the re-review and squash-merged **PR #26** (base `dev` `13c09549fc89febac2c79085afcf7249a43f62a4`) into `dev` as commit `c8ab4af029d10dda889d1165464e16068a5be573` on 2026-07-29. The review-head sequence was `1502c3a243b3350b6a18ff2454118981f4032357` (initial Gate 1) → `0daa8fbe22b896c6def5f2e75af129792ee41229` (first corrective pass, findings F1–F6) → `328aba41db44ca1fc41e02ee052d2d6c2c63ca36` (second corrective pass, the reviewed head) → the final documentation-only corrective head, whose exact SHA remains recorded only in the PR #26 lifecycle ledger. R14c's **implementation lifecycle is closed** — no further Gate 1 work is authorized. **Gate 2 — production execution — remains explicitly pending**: the merge does not authorize it; it requires a separate Product Owner go/no-go against the merged runbook.
 
 Production cutover has not been executed. The true server mode and R14d true frontend bundle have not been deployed. The existing false frontend artifact and current legacy-global server behavior remain the authoritative pre-cutover and rollback-compatible state.
 

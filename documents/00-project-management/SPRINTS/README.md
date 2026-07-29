@@ -19,7 +19,7 @@ This directory contains documentation for active and past sprints.
 | 020    | Allowed Origins and WebSocket Origin Policy / A01    | Closed (2026-06-26) — pending Product Owner acceptance             |
 | 027    | Room activity runtime parity / R09i                  | Closed and accepted (2026-07-28; PR #24; merge `c112000d`)         |
 | 028    | Frontend global-path retirement / R14d               | Closed and accepted (2026-07-28; PR #25; merge `67bd57a8`)         |
-| 029    | Coordinated authoritative room cutover / R14c        | Active — Gate 1 implementation and isolated rehearsal only         |
+| 029    | Coordinated authoritative room cutover / R14c        | Gate 1 integrated (PR #26 squash-merged into `dev` as `c8ab4af0` 2026-07-29); Gate 2 production execution pending |
 
 ## File Naming
 
