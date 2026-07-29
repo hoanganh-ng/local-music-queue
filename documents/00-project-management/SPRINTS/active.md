@@ -4,6 +4,8 @@
 
 R14c was approved by the Product Owner and activated on 2026-07-28 on branch `sprint/r14c-coordinated-production-cutover`, cut from `dev` at approved base commit `13c09549fc89febac2c79085afcf7249a43f62a4`.
 
+Gate 1 implementation is open as **PR #26** (base `dev`, head `1502c3a243b3350b6a18ff2454118981f4032357`, changed-file count per GitHub PR #26). Architect review returned focused findings; the corrective changes are prepared for re-review and Gate 1 remains **pending re-review — not accepted**. The exact new corrective head is assigned by the Product Owner at commit time (the Builder does not commit, push, or advance the sprint).
+
 Activation authorizes **Gate 1 only**: implementation, automated verification, Docker/Compose artifact pairing, packaging of the existing `room-cutover` CLI, an isolated production-like rehearsal, and completion of the redacted operational runbook.
 
 Activation does **not** authorize Gate 2. The Builder must not execute production migration commands, deploy the `true` server/SPA pair, close or reopen public traffic, modify production data or secrets, or perform the live maintenance window. Production execution requires a separate Product Owner go/no-go after Architect review and Gate 1 acceptance.

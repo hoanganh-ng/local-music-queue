@@ -442,4 +442,16 @@ Return:
 - completed but unexecuted production runbook;
 - confirmation that no production data/deployment, R14e migration, frontend behavior, or authentication architecture was changed.
 
+## Gate 1 implementation record
+
+Gate 1 implementation is under Architect review; it is **not** accepted and R14c is **not** closed.
+
+- **PR:** #26 — base `dev` (`13c09549fc89febac2c79085afcf7249a43f62a4`), branch `sprint/r14c-coordinated-production-cutover`.
+- **Reviewed head:** `1502c3a243b3350b6a18ff2454118981f4032357`. The actual changed-file count is the GitHub PR #26 file count for this head.
+- **Status:** Gate 1 implementation **pending re-review**. The Architect returned focused findings (mode-qualified Compose image pairing, durable evidence directory, host-identity precheck wording, epic-sequence fragments, live-route test); the corrective changes address them without altering the accepted runtime flag, startup guard, activity-writer selection, or tombstone handler.
+- **Corrective head:** assigned by the Product Owner at commit time. The Builder does not commit, push, merge, or advance the sprint.
+- **Verification evidence:** recorded from this Gate 1 branch — `go test` and `go vet` across the cutover packages; frontend unit suites and builds in both `VITE_ROOM_CUTOVER_AUTHORITATIVE=false` and `=true`; `docker compose config` and `docker compose build backend frontend` in both modes; the mode-qualified false/true image references and their local selectability; the isolated rollback-pair rehearsal; `git diff --check`, `git diff --name-only`, `git status --short`. Exact outputs and any environmental skips are reported in the handoff, never claimed without evidence.
+- **Not executed:** Gate 2 production execution is not authorized; the `true` pair is not deployed; no production migration command was run; no production data or secrets were touched.
+- **R14e** remains inactive (migration 0010, schema version 10, and legacy-table deletion are not authorized).
+
 Do not commit, push, merge, open/close pull requests, execute production commands, close the sprint, activate R14e, or advance the epic.

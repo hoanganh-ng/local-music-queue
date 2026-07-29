@@ -16,50 +16,90 @@ This runbook uses **placeholders only**. No production hostname, credential, DSN
 | `<BACKUP_LOCATION>` | Verified destination for the pre-cutover `pg_dump` | ≥ 30-day retention |
 | `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` | Real allow-listed Google account for the smoke matrix | Mandatory (R14d's isolated review could not exercise real login) |
 
-Supporting placeholders used below: `<REVIEWED_COMMIT_SHA>`, `<FALSE_PAIR_IMAGE_TAGS>`, `<TRUE_PAIR_IMAGE_TAGS>`, `<PROD_HOST>`, `<DUMP_FILE>`.
+Supporting placeholders used below: `<REVIEWED_COMMIT_SHA>`, `<FALSE_PAIR_IMAGE_TAGS>`, `<TRUE_PAIR_IMAGE_TAGS>`, `<PROD_HOST>`, `<DUMP_FILE>`, `<EVIDENCE_DIR>`.
+
+`<EVIDENCE_DIR>` is an operator-controlled host directory (outside the repository working tree and outside any web-served path) that holds every cutover report and rendered configuration. Reports are written *through a bind mount* so they survive `docker compose run --rm`. Create it before the window with mode `0700` and set every report file to `0600` (see the pre-window checklist). Never commit real reports or identities from `<EVIDENCE_DIR>` to the repository.
 
 ## The single pairing input
 
 `ROOM_CUTOVER_AUTHORITATIVE` in the deployment `.env` is the only cutover switch:
 
 - backend receives `--room-cutover-authoritative=${ROOM_CUTOVER_AUTHORITATIVE:-false}` via the Compose `command`;
-- frontend is **rebuilt** with build arg `VITE_ROOM_CUTOVER_AUTHORITATIVE=${ROOM_CUTOVER_AUTHORITATIVE:-false}`.
+- frontend is **rebuilt** with build arg `VITE_ROOM_CUTOVER_AUTHORITATIVE=${ROOM_CUTOVER_AUTHORITATIVE:-false}`;
+- both services are **mode-qualified images** — `local-music-queue-backend:${ROOM_CUTOVER_AUTHORITATIVE:-false}` and `local-music-queue-frontend:${ROOM_CUTOVER_AUTHORITATIVE:-false}` — so the false and true artifacts are distinct and independently selectable. Building the true pair never overwrites the false pair, and Compose always selects a backend and frontend that carry the **same** mode; no command can produce a true server with a false SPA.
 
 Never set the two halves independently. Flipping the value requires `docker compose build backend frontend` (the frontend value is baked at build time) followed by redeploying **both** containers as one pair.
 
 ## Pre-window checklist (all items before `<MAINTENANCE_WINDOW>` opens)
 
 1. Confirm the reviewed commit: `git rev-parse HEAD` on the deployment host equals `<REVIEWED_COMMIT_SHA>` (the accepted R14c review commit).
-2. Record the exact **false/false rollback pair**: image IDs/tags of the currently-live backend and frontend (`<FALSE_PAIR_IMAGE_TAGS>`). These are the only approved rollback artifacts.
-3. Confirm `<TARGET_ROOM_SLUG>` is unused: authenticated `GET /api/rooms` and a direct slug lookup must show no existing room with that slug; the slug must not be reserved.
-4. Validate `<HOST_USER_ID>`: positive integer that exists in the canonical PostgreSQL `users` table (`SELECT id, name FROM users WHERE id = <HOST_USER_ID>;`).
-5. Confirm `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` is present in the deployed `HOST_EMAILS`/allow-list configuration and can log in on the current (false) deployment.
-6. Render and review **both** Compose configurations, confirming the backend flag and frontend build arg always agree:
+2. Record the exact **false/false rollback pair** as immutable identifiers: capture the image ID *and* the repo digest of the currently-live backend and frontend, not just the mutable `:false` tag:
 
    ```bash
-   ROOM_CUTOVER_AUTHORITATIVE=false docker compose config > /tmp/compose-false.yml
-   ROOM_CUTOVER_AUTHORITATIVE=true  docker compose config > /tmp/compose-true.yml
+   docker image inspect local-music-queue-backend:false  --format '{{.Id}} {{join .RepoDigests ","}}'
+   docker image inspect local-music-queue-frontend:false --format '{{.Id}} {{join .RepoDigests ","}}'
    ```
 
-7. Build and tag both artifact pairs from `<REVIEWED_COMMIT_SHA>`:
+   Record both lines as `<FALSE_PAIR_IMAGE_TAGS>`. Because the images are mode-qualified (`:false` vs `:true`), a later `true` build cannot overwrite this pair; these recorded IDs/digests are the only approved rollback artifacts.
+3. Create the durable evidence directory on the host with restrictive permissions (it must live outside the repository working tree and outside any web-served path):
 
    ```bash
-   ROOM_CUTOVER_AUTHORITATIVE=false docker compose build backend frontend   # tag as <FALSE_PAIR_IMAGE_TAGS>
-   ROOM_CUTOVER_AUTHORITATIVE=true  docker compose build backend frontend   # tag as <TRUE_PAIR_IMAGE_TAGS>
+   mkdir -p <EVIDENCE_DIR> && chmod 0700 <EVIDENCE_DIR>
    ```
 
-   Confirm the backend image contains both `/app/server` and `/app/room-cutover`.
-8. Run a read-only plan against a **production snapshot** (never the live database at this stage):
+4. Confirm `<TARGET_ROOM_SLUG>` is unused: authenticated `GET /api/rooms` and a direct slug lookup must show no existing room with that slug; the slug must not be reserved.
+5. Validate `<HOST_USER_ID>` as a boolean/existence check (do not print the row into any retained log): the query must return exactly one row for a positive integer id.
 
    ```bash
-   /app/room-cutover plan --room-slug <TARGET_ROOM_SLUG> --room-name "<TARGET_ROOM_NAME>" \
-     --host-user-id <HOST_USER_ID> --postgres "<SNAPSHOT_DSN>" --report-file /tmp/plan-report.json
+   # Prints 't' iff a users row with this positive id exists. No PII in output.
+   psql "<SNAPSHOT_DSN>" -tAc "SELECT EXISTS (SELECT 1 FROM users WHERE id = <HOST_USER_ID> AND id > 0);"
    ```
 
-   Review the report; it must be PII-free and its counts must look plausible against known production volume.
-9. Run `room-cutover up --dry-run` against an **isolated copy** of the snapshot and confirm it reports the same evidence without writing.
-10. Confirm the isolated end-to-end rehearsal (Gate 1 evidence) is accepted.
-11. Confirm `<BACKUP_LOCATION>` is writable, verified, and retains dumps for at least 30 days.
+6. Confirm the account represented by `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` resolves to that **same** `<HOST_USER_ID>`, as a secure operator-only comparison. Bind the real address through an environment variable so it never lands in a committed file, retained log, or shell history, and compare by boolean equality rather than printing the stored identity:
+
+   ```bash
+   # Operator exports LIVE_EMAIL in their private shell; it is never written to a file.
+   read -rs LIVE_EMAIL   # paste the real allow-listed address; not echoed
+   psql "<SNAPSHOT_DSN>" -tAc \
+     "SELECT (SELECT id FROM users WHERE lower(email) = lower('$LIVE_EMAIL')) = <HOST_USER_ID>;"
+   unset LIVE_EMAIL
+   ```
+
+   The result must be `t`. Use `display_name` only if a human-readable disambiguation is genuinely required, and only in the operator's private session — never in a retained artifact.
+7. Confirm the migrated room's sole host resolves to `<HOST_USER_ID>` after `up` (checked again in the smoke matrix): the target room's single host membership must be exactly this user id.
+8. Confirm login for `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` on the current (false) deployment. **Login permission and host-role assignment are distinct backend conditions — do not conflate them:**
+   - the backend's *login allow condition* decides whether a Google account may authenticate at all; it is enforced in the auth interactor and is **not** driven by `HOST_EMAILS`;
+   - `HOST_EMAILS` only decides which already-allowed accounts are additionally granted the host role;
+   - therefore `<LIVE_ALLOWED_GOOGLE_ACCOUNT>` must satisfy the login allow condition to sign in, and separately must be configured so it receives the host role for the migrated room. Verify the account can actually log in on the false deployment rather than inferring it from `HOST_EMAILS` membership alone.
+9. Render and review **both** Compose configurations into the evidence directory, confirming the backend flag, the frontend build arg, and the mode-qualified image references all agree:
+
+   ```bash
+   ROOM_CUTOVER_AUTHORITATIVE=false docker compose config > <EVIDENCE_DIR>/compose-false.yml
+   ROOM_CUTOVER_AUTHORITATIVE=true  docker compose config > <EVIDENCE_DIR>/compose-true.yml
+   chmod 0600 <EVIDENCE_DIR>/compose-false.yml <EVIDENCE_DIR>/compose-true.yml
+   ```
+
+   The false render must reference `local-music-queue-backend:false` + `local-music-queue-frontend:false`; the true render must reference the `:true` pair; backend and frontend must carry the same mode in each render.
+10. Build both artifact pairs from `<REVIEWED_COMMIT_SHA>`; because the image references are mode-qualified, the two builds produce distinct, independently selectable pairs and the `true` build never overwrites the `false` rollback pair:
+
+    ```bash
+    ROOM_CUTOVER_AUTHORITATIVE=false docker compose build backend frontend   # -> :false pair
+    ROOM_CUTOVER_AUTHORITATIVE=true  docker compose build backend frontend   # -> :true pair
+    ```
+
+    Confirm the backend image contains both `/app/server` and `/app/room-cutover`, and record the `:true` pair IDs/digests as `<TRUE_PAIR_IMAGE_TAGS>` the same way as step 2.
+11. Run a read-only plan against a **production snapshot** (never the live database at this stage), writing the report into the durable evidence directory and locking it down:
+
+    ```bash
+    /app/room-cutover plan --room-slug <TARGET_ROOM_SLUG> --room-name "<TARGET_ROOM_NAME>" \
+      --host-user-id <HOST_USER_ID> --postgres "<SNAPSHOT_DSN>" --report-file <EVIDENCE_DIR>/plan-report.json
+    chmod 0600 <EVIDENCE_DIR>/plan-report.json
+    ```
+
+    Review the report; it must be PII-free and its counts must look plausible against known production volume.
+12. Run `room-cutover up --dry-run` against an **isolated copy** of the snapshot and confirm it reports the same evidence without writing.
+13. Confirm the isolated end-to-end rehearsal (Gate 1 evidence) is accepted.
+14. Confirm `<BACKUP_LOCATION>` is writable, verified, and retains dumps for at least 30 days.
 
 ## Maintenance window procedure
 
@@ -80,31 +120,35 @@ Execute strictly in order inside `<MAINTENANCE_WINDOW>`. Any failure at any step
    docker compose stop frontend backend
    ```
 
-4. **Plan against the live database** (read-only):
+4. **Plan against the live database** (read-only). Bind-mount `<EVIDENCE_DIR>` into the one-off container so the report survives `--rm`, then confirm it landed on the host and lock it down:
 
    ```bash
-   docker compose run --rm --no-deps backend /app/room-cutover plan \
+   docker compose run --rm --no-deps -v <EVIDENCE_DIR>:/evidence backend /app/room-cutover plan \
      --room-slug <TARGET_ROOM_SLUG> --room-name "<TARGET_ROOM_NAME>" --host-user-id <HOST_USER_ID> \
-     --report-file /tmp/live-plan.json
+     --report-file /evidence/live-plan.json
+   test -f <EVIDENCE_DIR>/live-plan.json && chmod 0600 <EVIDENCE_DIR>/live-plan.json
    ```
 
    Review the report. Abort on any readiness failure.
-5. **Execute the cutover** with the approved identity values:
+5. **Execute the cutover** with the approved identity values, again writing through the bind mount and verifying the report on the host:
 
    ```bash
-   docker compose run --rm --no-deps backend /app/room-cutover up \
+   docker compose run --rm --no-deps -v <EVIDENCE_DIR>:/evidence backend /app/room-cutover up \
      --room-slug <TARGET_ROOM_SLUG> --room-name "<TARGET_ROOM_NAME>" --host-user-id <HOST_USER_ID> \
-     --report-file /tmp/live-up.json
+     --report-file /evidence/live-up.json
+   test -f <EVIDENCE_DIR>/live-up.json && chmod 0600 <EVIDENCE_DIR>/live-up.json
    ```
 
 6. **Verify before any room write:**
 
    ```bash
-   docker compose run --rm --no-deps backend /app/room-cutover verify --report-file /tmp/live-verify.json
+   docker compose run --rm --no-deps -v <EVIDENCE_DIR>:/evidence backend /app/room-cutover verify \
+     --report-file /evidence/live-verify.json
+   test -f <EVIDENCE_DIR>/live-verify.json && chmod 0600 <EVIDENCE_DIR>/live-verify.json
    ```
 
-   Must exit 0. No room mutation may happen before this succeeds.
-7. **Deploy the true pair as one unit:** set `ROOM_CUTOVER_AUTHORITATIVE=true` in the deployment `.env`, then start the pre-built `<TRUE_PAIR_IMAGE_TAGS>`:
+   Must exit 0. No room mutation may happen before this succeeds. Confirm all three reports (`live-plan.json`, `live-up.json`, `live-verify.json`) now exist on the host under `<EVIDENCE_DIR>`; a missing report means the bind mount was omitted and the step must be re-run before proceeding.
+7. **Deploy the true pair as one unit:** set `ROOM_CUTOVER_AUTHORITATIVE=true` in the deployment `.env`, then start the pre-built `:true` pair recorded as `<TRUE_PAIR_IMAGE_TAGS>` (Compose selects `local-music-queue-backend:true` + `local-music-queue-frontend:true`):
 
    ```bash
    docker compose up -d backend frontend
@@ -119,10 +163,10 @@ Execute strictly in order inside `<MAINTENANCE_WINDOW>`. Any failure at any step
 Any failed mandatory check requires an immediate rollback:
 
 1. Stop the true pair: `docker compose stop frontend backend`.
-2. Set `ROOM_CUTOVER_AUTHORITATIVE=false` and restore the **exact** recorded `<FALSE_PAIR_IMAGE_TAGS>`; start them as one pair.
+2. Set `ROOM_CUTOVER_AUTHORITATIVE=false` and explicitly restore the **exact** recorded false pair. Select the images by the immutable IDs/digests captured in pre-window step 2 (`<FALSE_PAIR_IMAGE_TAGS>`) — re-tag them back to `local-music-queue-backend:false` / `local-music-queue-frontend:false` if the tags were reassigned — then start them as one pair. The mode-qualified tags guarantee this false pair was never overwritten by the `true` build.
 3. **Do not** delete or edit `room_cutover_marker`.
 4. **Do not** use force/reset/hash-edit tooling of any kind.
-5. Retain `<DUMP_FILE>` and all redacted `--report-file` outputs.
+5. Retain `<DUMP_FILE>` and every report under `<EVIDENCE_DIR>`.
 6. Record any true-mode room writes made during smoke testing (they exist only in room tables).
 7. Defer the choice between forward recovery and database restoration to a separate Product Owner decision.
 
@@ -177,7 +221,13 @@ Rollback is **not** deleting the migrated room and is **not** rerunning the cuto
 
 ## Evidence to retain
 
+All evidence lives on the host under `<EVIDENCE_DIR>` (mode `0700`), never inside an image or a web-served path:
+
 - Timestamped `<DUMP_FILE>` in `<BACKUP_LOCATION>` (≥ 30 days).
-- `/tmp/live-plan.json`, `/tmp/live-up.json`, `/tmp/live-verify.json` (redacted reports, mode 0600).
-- Rendered `/tmp/compose-false.yml` and `/tmp/compose-true.yml`.
+- `<EVIDENCE_DIR>/live-plan.json`, `<EVIDENCE_DIR>/live-up.json`, `<EVIDENCE_DIR>/live-verify.json` (redacted reports, mode `0600`), each confirmed present on the host after its `docker compose run --rm` exited.
+- `<EVIDENCE_DIR>/plan-report.json` from the pre-window snapshot plan (mode `0600`).
+- Rendered `<EVIDENCE_DIR>/compose-false.yml` and `<EVIDENCE_DIR>/compose-true.yml`.
+- Recorded false-pair and true-pair image IDs/digests (`<FALSE_PAIR_IMAGE_TAGS>`, `<TRUE_PAIR_IMAGE_TAGS>`).
 - Completed smoke-matrix checklist with operator initials and timestamps.
+
+None of these files may be committed to the repository; they can contain real identities and must stay in the operator-controlled `<EVIDENCE_DIR>` only.

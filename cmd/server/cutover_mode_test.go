@@ -159,7 +159,11 @@ func TestSetupApp_AuthoritativeMode_TombstonesRetiredContracts(t *testing.T) {
 
 // TestSetupApp_AuthoritativeMode_LiveContractsStayLive proves the
 // retirement is scoped: auth, priority-balance, YouTube search, room,
-// invite, and per-room WS routes never answer 410 in authoritative mode.
+// invite, and per-room WS routes stay live in authoritative mode. Each
+// probe asserts the exact status the real registered route returns for
+// an unauthenticated, empty request, not merely that it is not 410 — a
+// 404 from a mistyped path would also satisfy "!= 410" and hide a route
+// that was silently retired or never registered.
 func TestSetupApp_AuthoritativeMode_LiveContractsStayLive(t *testing.T) {
 	scopedDSN := setupPostgresForTest(t)
 	insertCutoverMarkerForTest(t, scopedDSN)
@@ -171,20 +175,38 @@ func TestSetupApp_AuthoritativeMode_LiveContractsStayLive(t *testing.T) {
 	}
 	t.Cleanup(cleanup)
 
-	livePatterns := []string{
-		"POST /api/auth/google",
-		"POST /api/auth",
-		"GET /api/user/priority-balance",
-		"GET /api/youtube/search",
-		"POST /api/rooms",
-		"GET /api/rooms/some-slug",
-		"POST /api/invites/some-token/accept",
-		"GET /ws/rooms/some-slug",
+	// Expected unauthenticated/empty-request status for each surviving
+	// contract as wired in setupAppWithActivityObserver:
+	//   - the four open utility routes reject a missing body/param with
+	//     400 (their handlers run before any auth);
+	//   - the roomAuth-wrapped room and invite-redeem routes reject a
+	//     missing bearer token with 401;
+	//   - /ws/rooms/{slug} rejects a missing session_token with 401
+	//     (pinned independently by TestSetupApp_RegistersRoomWSRoute).
+	// The invite route is the REAL registered pattern .../redeem; the
+	// previous test probed a nonexistent .../accept path, which only
+	// ever returned 404 and proved nothing.
+	liveProbes := []struct {
+		pattern string
+		want    int
+	}{
+		{"POST /api/auth/google", http.StatusBadRequest},
+		{"POST /api/auth", http.StatusBadRequest},
+		{"GET /api/user/priority-balance", http.StatusBadRequest},
+		{"GET /api/youtube/search", http.StatusBadRequest},
+		{"POST /api/rooms", http.StatusUnauthorized},
+		{"GET /api/rooms/some-slug", http.StatusUnauthorized},
+		{"POST /api/invites/some-token/redeem", http.StatusUnauthorized},
+		{"GET /ws/rooms/some-slug", http.StatusUnauthorized},
 	}
-	for _, pattern := range livePatterns {
-		rr := requestPattern(t, mux, pattern)
+	for _, probe := range liveProbes {
+		rr := requestPattern(t, mux, probe.pattern)
 		if rr.Code == http.StatusGone {
-			t.Errorf("%s: live contract must not be tombstoned (got 410)", pattern)
+			t.Errorf("%s: live contract must not be tombstoned (got 410)", probe.pattern)
+			continue
+		}
+		if rr.Code != probe.want {
+			t.Errorf("%s: got status %d, want %d (registered live route)", probe.pattern, rr.Code, probe.want)
 		}
 	}
 }

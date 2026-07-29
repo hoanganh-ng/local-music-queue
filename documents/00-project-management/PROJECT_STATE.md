@@ -10,6 +10,8 @@ R14c was approved by the Product Owner and activated on 2026-07-28 from `dev` co
 
 R14c activation authorizes **Gate 1 only**: implementation, automated verification, packaging/deployment pairing, an isolated production-like rehearsal, and completion of the operational cutover/rollback runbook. Production execution is a separate Gate 2 and requires another Product Owner go/no-go after Architect review and Gate 1 acceptance.
 
+Gate 1 implementation is open as **PR #26** (base `dev` `13c09549fc89febac2c79085afcf7249a43f62a4`, reviewed head `1502c3a243b3350b6a18ff2454118981f4032357`; changed-file count per GitHub PR #26). The Architect returned focused findings and Gate 1 is **pending re-review — not accepted**. The corrective changes (mode-qualified Compose image pairing, durable evidence directory, host-identity precheck wording, epic-sequence fragments, live-route test) preserve the accepted runtime flag, startup guard, activity-writer selection, and tombstone handler. The new corrective head is assigned by the Product Owner at commit time; the Builder does not commit, push, merge, or advance the sprint.
+
 Production cutover has not been executed. The true server mode and R14d true frontend bundle have not been deployed. The existing false frontend artifact and current legacy-global server behavior remain the authoritative pre-cutover and rollback-compatible state.
 
 R14c owns:
