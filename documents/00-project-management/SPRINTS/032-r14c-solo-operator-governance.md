@@ -64,8 +64,8 @@ At the approved base (`dev` at `c2ca389475174ad165391085a4e98b65d70f3455`):
 Documentation-only change set; the relevant checks are documentation-integrity checks:
 
 ```bash
-git diff --check                 # no whitespace errors
-git diff --name-only dev         # exactly the nine documentation files
+git diff --check dev...HEAD      # no whitespace errors in the committed PR range
+git diff --name-only dev...HEAD  # exactly the nine documentation files
 git status --short
 # no contradictory unconditional separation requirement remains on the Gate 2 decision surfaces
 grep -RIn "Operator ≠ Product Owner" documents/07-deployment/
