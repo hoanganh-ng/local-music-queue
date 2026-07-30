@@ -27,6 +27,23 @@ sprint is currently active on `dev`; `R09i`, `R14d`, `R14c`, and `R14e`
 remain planned and NOT active. See § R14b closure record at the end of
 this document.
 
+> **Direction amendment — discard-and-retire (ADR 004, Sprint 034, 2026-07-30).**
+> This sprint record is preserved as the historical record of the
+> accepted R14b work, which remains on `dev` and is not reverted.
+> However, the Product Owner has replaced the migrate-and-retire cutover
+> contract with the **discard-and-retire** contract (Issue #17 comment
+> #5128855220; ADR 004): at the revised production cutover there will be
+> **no migrated room and no copy** of the legacy global `queue_state`,
+> `activities`, `auto_queue_config`, or `play_history`. The
+> `cmd/room-cutover` copy mechanism this sprint delivered is therefore
+> **unsuitable for the revised production cutover** and must not be
+> executed against production. The `room_cutover_marker` activation
+> proof it writes proves a migrated-room copy that will no longer
+> happen; a revised activation proof is explicitly unresolved and
+> belongs to the implementation-correction sprint identified in ADR 004
+> Section 6. Legacy global tables remain untouched throughout the
+> rollback window; no R14e cleanup is authorized.
+
 **Sprint name:** Room-cutover schema and offline migration mechanism
 
 ## Goal

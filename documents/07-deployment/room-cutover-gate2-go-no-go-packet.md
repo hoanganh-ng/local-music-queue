@@ -1,5 +1,7 @@
 # R14c Gate 2 — Product Owner Go/No-Go Review Packet
 
+> **NON-EXECUTABLE — direction amendment (ADR 004, Sprint 034, 2026-07-30).** The Product Owner replaced the migrate-and-retire cutover contract with the **discard-and-retire** contract (Issue #17 comment #5128855220; `documents/00-project-management/ADRS/004-discard-legacy-global-state-at-room-cutover.md`). This packet prepares a go/no-go decision for a Gate 2 whose migrate-and-retire production assumptions are superseded. **This packet is non-executable**: no GO / NO-GO / DEFER review may be convened and no decision block may be signed under it until the implementation-correction sprint (ADR 004 Section 6) is accepted and integrated and the Product Owner authorizes a revised Gate 2. Sprint 031 is paused. Preserved unchanged below as historical record; all decision fields remain unsigned and the recommendation remains `DEFER / NOT READY`.
+
 **Sprint:** 031 (R14c Gate 2 Preflight and Go/No-Go Preparation) — `documents/00-project-management/SPRINTS/031-r14c-gate2-preflight.md`
 **Overlays:** the authoritative readiness package [`room-cutover-gate2-readiness.md`](./room-cutover-gate2-readiness.md) and runbook [`room-cutover-runbook.md`](./room-cutover-runbook.md).
 **Amended by:** Sprint 032 — R14c Solo-Operator Governance Amendment (`documents/00-project-management/SPRINTS/032-r14c-solo-operator-governance.md`) — role governance and decision sequencing only (Sections 4–7); no readiness status, evidence entry, recommendation, or runbook procedure changed.

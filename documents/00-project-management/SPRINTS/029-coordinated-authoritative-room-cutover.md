@@ -7,6 +7,8 @@
 **Risk:** Extra high  
 **Scope:** Backend runtime composition, legacy-contract tombstones, deployment pairing, packaging, tests, isolated rehearsal, and production runbook. No production execution is authorized by activation.
 
+> **Direction amendment — discard-and-retire (ADR 004, Sprint 034, 2026-07-30).** This sprint record is preserved as the historical record of the accepted R14c Gate 1 work, which remains integrated on `dev` and is not reverted. However, the Product Owner has replaced the migrate-and-retire cutover contract with the **discard-and-retire** contract (Issue #17 comment #5128855220; ADR 004): the Gate 2 **production assumptions in this document are superseded** — no `cmd/room-cutover up` production copy will run, no migrated room will be created, and the maintenance-window sequence below must not be executed. The current activation proof is explicitly unresolved: the fail-closed startup guard depends on `room_cutover_marker`, which proves a migrated-room copy that will no longer happen (ADR 004 Section 5). The runbook and all Gate 2 documents are marked non-executable, and Sprint 031 (Gate 2 preflight) is paused, until the implementation-correction sprint (ADR 004 Section 6) is accepted and integrated. The runtime flag, fail-closed startup behavior, tombstone retirement intent, mandatory backups, false/false rollback pair, paired server/SPA deployment, and Sprint 032 governance sequence remain in force.
+
 ## Goal
 
 Deliver a fail-closed transition from the legacy global runtime to the room-authoritative runtime through one runtime server flag, the accepted R14d frontend build gate, repository-free retirement handlers, and a reviewed operational runbook.
