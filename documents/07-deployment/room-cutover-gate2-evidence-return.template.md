@@ -4,6 +4,8 @@
 
 This template is how the human **Operator** returns *redacted* attestations of preflight and blocker work back to the **Product Owner** for the Gate 2 go/no-go review. It feeds the [preflight status ledger](./room-cutover-gate2-preflight-ledger.md); the Product Owner accepts a returned attestation before any ledger row moves to `Resolved`.
 
+Per Sprint 032 — R14c Solo-Operator Governance Amendment (`documents/00-project-management/SPRINTS/032-r14c-solo-operator-governance.md`), this return is **pass 1 (Operator evidence pass)** of the mandatory three-pass Gate 2 sequence: the completed return goes to **pass 2 (Architect review pass** — outcome limited to `READY FOR PO DECISION`, `DEFER — EVIDENCE INCOMPLETE`, or `NO-GO RECOMMENDED`; grants no production authority**)** before **pass 3 (Product Owner GO / NO-GO / DEFER decision pass)**. A GO recorded before the Architect review pass is invalid. This sequence applies whether the Operator and Product Owner roles are held separately (the normal preference) or combined under the approved named exception (`hoanganh-ng`, R14c Gate 2 only).
+
 Usage (see [`room-cutover-gate2-readiness.md`](./room-cutover-gate2-readiness.md) Sections 6–9, and [`room-cutover-gate2-preflight-ledger.md`](./room-cutover-gate2-preflight-ledger.md)):
 
 1. Copy this file to an operator-controlled location **outside the repository working tree and outside any web-served path**.
@@ -41,7 +43,7 @@ For each item record every column. Status uses the ledger model (`Not started` /
 
 | ID | Redacted result (attestation) | Status / conclusion | Protected evidence reference | Safe timestamp | Discrepancy ref | Required follow-up | Operator initials/handle |
 |---|---|---|---|---|---|---|---|
-| B1 | Named Operator and Product Owner-of-record assigned; Operator ≠ Product Owner | `<Not started>` | `<EVID-REF>` | `<YYYY-MM-DD>` | `<D-xx or none>` | `<follow-up or none>` | `<INITIALS>` |
+| B1 | Named Operator and Product Owner-of-record assigned — either separate persons (normal preference) or the approved Sprint 032 named exception (`hoanganh-ng` holds both roles for R14c Gate 2 only); three-pass sequence acknowledged | `<Not started>` | `<EVID-REF>` | `<YYYY-MM-DD>` | `<D-xx or none>` | `<follow-up or none>` | `<INITIALS>` |
 | B2 | All six operator inputs approved and recorded in the input file; live account holder availability confirmed | `<Not started>` | `<EVID-REF>` | `<YYYY-MM-DD>` | `<D-xx or none>` | `<follow-up or none>` | `<INITIALS>` |
 | B3 | Maintenance window agreed; closure/reopen announcement channels identified | `<Not started>` | `<EVID-REF>` | `<YYYY-MM-DD>` | `<D-xx or none>` | `<follow-up or none>` | `<INITIALS>` |
 | B4 | Backup destination writability, ≥ 30-day retention, and restore-readability demonstrated | `<Not started>` | `<EVID-REF>` | `<YYYY-MM-DD>` | `<D-xx or none>` | `<follow-up or none>` | `<INITIALS>` |
@@ -86,4 +88,4 @@ List discrepancy register IDs raised or updated in support of this return (or "n
 | No production action was taken outside the approved window (this return is preflight only) | `<CONFIRM>` |
 | No credential, DSN, live account address, raw identity, or infrastructure path is recorded in this file | `<CONFIRM>` |
 
-This evidence-return does not authorize Gate 2. It supplies redacted inputs to the Product Owner, who alone records GO / NO-GO / DEFER in the readiness package Section 9. A `Resolved` conclusion in this return becomes `Resolved` in the ledger only after the Product Owner accepts the referenced evidence.
+This evidence-return does not authorize Gate 2. It supplies redacted inputs for the Architect review pass and then the Product Owner, who alone records GO / NO-GO / DEFER in the readiness package Section 9 — and only after the Architect review pass has returned `READY FOR PO DECISION`; a GO recorded before the Architect review pass is invalid. A `Resolved` conclusion in this return becomes `Resolved` in the ledger only after the Product Owner accepts the referenced evidence.

@@ -21,7 +21,8 @@ This directory contains documentation for active and past sprints.
 | 028    | Frontend global-path retirement / R14d               | Closed and accepted (2026-07-28; PR #25; merge `67bd57a8`)         |
 | 029    | Coordinated authoritative room cutover / R14c        | Gate 1 integrated (PR #26 squash-merged into `dev` as `c8ab4af0` 2026-07-29); Gate 2 production execution pending |
 | 030    | R14c Gate 2 Readiness Package                        | Closed and accepted (2026-07-29; PR #27; merge `d27c56ff`) — Gate 2 production execution remains pending and unauthorized |
-| 031    | R14c Gate 2 Preflight and Go/No-Go Preparation       | In progress — tracking scaffold integrated (2026-07-29; PR #28; merge `e7e057b6`); all rows `Not started`; `DEFER / NOT READY`; Gate 2 pending and unauthorized |
+| 031    | R14c Gate 2 Preflight and Go/No-Go Preparation       | Paused (2026-07-30) by Sprint 032 — not closed, not superseded; tracking scaffold integrated (2026-07-29; PR #28; merge `e7e057b6`); all rows `Not started`; `DEFER / NOT READY`; Gate 2 pending and unauthorized |
+| 032    | R14c Solo-Operator Governance Amendment              | In progress — documentation-only; sole active sprint; amends Gate 2 role governance (named `hoanganh-ng` exception; Operator → Architect → Product Owner sequence); no status resolved; no GO |
 
 ## File Naming
 
