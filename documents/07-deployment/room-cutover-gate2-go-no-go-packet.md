@@ -2,6 +2,7 @@
 
 **Sprint:** 031 (R14c Gate 2 Preflight and Go/No-Go Preparation) — `documents/00-project-management/SPRINTS/031-r14c-gate2-preflight.md`
 **Overlays:** the authoritative readiness package [`room-cutover-gate2-readiness.md`](./room-cutover-gate2-readiness.md) and runbook [`room-cutover-runbook.md`](./room-cutover-runbook.md).
+**Amended by:** Sprint 032 — R14c Solo-Operator Governance Amendment (`documents/00-project-management/SPRINTS/032-r14c-solo-operator-governance.md`) — role governance and decision sequencing only (Sections 4–7); no readiness status, evidence entry, recommendation, or runbook procedure changed.
 **Status:** Decision-preparation surface. **No decision has been made and no GO is declared.** Blockers B1–B7 are unresolved; Gate 2 production execution remains explicitly pending and unauthorized.
 
 This packet is the single place the Product Owner reads to convene and record the Gate 2 GO / NO-GO / DEFER review. It aggregates — it does not replace — the authoritative documents. On any conflict about *what to execute or in what order*, the runbook prevails; on any conflict about *whether execution is authorized*, the readiness package Section 9 and the Product Owner decision prevail. This packet grants no authority and pre-checks nothing.
@@ -48,16 +49,17 @@ Status terms follow the [ledger status model](./room-cutover-gate2-preflight-led
 
 **`DEFER / NOT READY`** — every tracked row is `Not started`; no blocker is resolved and no entry criterion has accepted evidence. This recommendation is unsigned, is not a decision, and binds no one; the Product Owner alone records the authoritative GO / NO-GO / DEFER in the readiness package Section 9 (see Section 7 below).
 
-## 4. Separation of duties (readiness §3)
+## 4. Role governance and pass sequence (readiness §3, as amended by Sprint 032)
 
 - The **Operator** is the only person who executes runbook commands and provisions the snapshot infrastructure, connection bundle, backup location, and evidence directory.
 - The **Product Owner** approves the six operator inputs, records GO / NO-GO / DEFER, owns the reopen-traffic decision, closes the rollback window, and decides forward-recovery vs restoration after any rollback.
-- **Operator ≠ Product Owner** during the window (E3), so the reopen-traffic GO is a second pair of eyes. One person may hold Product Owner and Scribe.
+- **Separate-role governance remains the normal preference.** By named exception recorded under Sprint 032, **`hoanganh-ng`** is approved to act as both Product Owner-of-record and human Operator **for R14c Gate 2 only**; the exception extends to no other person, gate, or sprint. One person may hold Product Owner and Scribe.
+- **Mandatory three-pass sequence** (applies whether the roles are held separately or combined): (1) **Operator evidence pass** — redacted evidence returned through the evidence-return; (2) **Architect review pass** — the Architect reviews the completed ledger, evidence-return, and discrepancy register and records exactly one outcome: `READY FOR PO DECISION`, `DEFER — EVIDENCE INCOMPLETE`, or `NO-GO RECOMMENDED`; the outcome must be attributable — recorded with the Architect reviewer's name or approved handle, the review date, and a durable review reference (e.g. a GitHub PR/issue review-comment link), and never entered by the combined Product Owner/Operator on the Architect's behalf; the Architect review grants no production authority and does not replace the Product Owner decision; (3) **Product Owner decision pass** — GO / NO-GO / DEFER recorded in the readiness package Section 9. **A GO recorded before the Architect review pass has returned `READY FOR PO DECISION` is invalid.**
 - The **Builder (AI agent)** is **prohibited from all Gate 2 actions**; it may only produce/update documentation before the window on Product Owner instruction. It never signs, never declares GO, and never marks an operational item resolved.
 
 ## 5. Decision rule (restated from readiness §9)
 
-- **GO** — all of E1–E10 `Resolved` against accepted redacted evidence, no ledger row `Failed` or `Blocked`, and no open Blocking or unaccepted Important discrepancy remains. Record date, window, and signatures in the readiness package Section 9; the Operator may then execute the runbook inside `<MAINTENANCE_WINDOW>` only.
+- **GO** — all of E1–E10 `Resolved` against accepted redacted evidence, no ledger row `Failed` or `Blocked`, no open Blocking or unaccepted Important discrepancy remains, **and the Architect review pass (Section 4) has returned `READY FOR PO DECISION`** — a GO recorded before the Architect review pass is invalid. Record date, window, and signatures in the readiness package Section 9; the Operator may then execute the runbook inside `<MAINTENANCE_WINDOW>` only.
 - **NO-GO** — any criterion `Failed` on substance (rehearsal reports inconsistent, backup unverifiable, rollback custody rejected, an open Blocking discrepancy). Record the failed criteria; Gate 2 stays closed; remediation is planned outside the window.
 - **DEFER** — criteria are unmet only because rows are `Not started`, `In progress`, or `Blocked` for scheduling/assignment/availability reasons (inputs pending, window not agreed, personnel unavailable). Record what is pending and the revisit date; no production action of any kind meanwhile.
 
@@ -69,7 +71,8 @@ A discrepancy contradicting a procedure, isolation guarantee, credential rule, p
 - [ ] Every PF-01…PF-15 `Resolved` against accepted redacted evidence per the evidence-return.
 - [ ] No ledger row is `Failed` or `Blocked`, or each such row is understood and reflected in the decision.
 - [ ] Discrepancy register reviewed; no open Blocking discrepancy; every Important one resolved or explicitly ACCEPTED-RISK per the classification rule (Architect + Product Owner for the reserved classes).
-- [ ] Roles assigned; Operator ≠ Product Owner (E3).
+- [ ] Roles assigned per amended E3: either separate persons (normal preference) or the approved Sprint 032 named exception (`hoanganh-ng`, R14c Gate 2 only), with the three-pass sequence acknowledged.
+- [ ] Architect review pass completed with outcome `READY FOR PO DECISION` recorded and attributed (Section 4: reviewer name/approved handle, review date, durable review reference) — a GO before this outcome is invalid.
 - [ ] `<MAINTENANCE_WINDOW>` scheduled with closure/reopen announcement plan (E4).
 - [ ] Backup posture verified (E5); rollback capture/custody rules acknowledged (E6).
 - [ ] Smoke matrix reviewed; live account holder available (E8); abort rules acknowledged (E9).
@@ -82,6 +85,11 @@ The **authoritative** GO / NO-GO / DEFER decision and signatures are recorded in
 
 | Field | Value |
 |---|---|
+| Architect review pass outcome (required before GO; Section 4) | *(unrecorded — READY FOR PO DECISION ☐ / DEFER — EVIDENCE INCOMPLETE ☐ / NO-GO RECOMMENDED ☐)* |
+| Architect reviewer (name or approved handle — must not be the combined Product Owner/Operator) | *(unrecorded)* |
+| Architect review date | *(unrecorded)* |
+| Durable Architect review reference (e.g. GitHub PR/issue review-comment link) | *(unrecorded)* |
+| Confirmation: `READY FOR PO DECISION` grants no production authority and does not replace the Product Owner decision | *(unconfirmed ☐)* |
 | Decision | *(unrecorded — GO ☐ / NO-GO ☐ / DEFER ☐)* |
 | Date | *(unrecorded)* |
 | Approved `<MAINTENANCE_WINDOW>` (GO only) | *(unrecorded)* |

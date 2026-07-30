@@ -2,6 +2,7 @@
 
 **Sprint:** 030 (R14c Gate 2 Readiness Package) — `documents/00-project-management/SPRINTS/030-r14c-gate2-readiness-package.md`
 **Overlays:** the accepted runbook [`room-cutover-runbook.md`](./room-cutover-runbook.md) (written and reviewed under R14c Gate 1, PR #26, integrated into `dev` as `c8ab4af029d10dda889d1165464e16068a5be573`)
+**Amended by:** Sprint 032 — R14c Solo-Operator Governance Amendment (`documents/00-project-management/SPRINTS/032-r14c-solo-operator-governance.md`) — role governance in Section 3, entry criterion E3, and the Section 9 decision-rule sequencing only; every readiness, evidence, rollback, discrepancy, and production-safety control, and every runbook procedure and command, is unchanged.
 **Status:** Documentation only. **Nothing in this package has been executed.** Gate 2 production execution remains explicitly pending and requires a Product Owner GO recorded against this package and the runbook.
 
 This package is the single authoritative readiness and governance overlay for Gate 2. Apart from the Architect-required security corrections applied to the runbook in this same PR (focused documentation-only amendments: non-argv connection supply with un-exported private DSN variables, and allowlisted pairing evidence instead of retained full Compose renders; command order and behavior unchanged), it does **not** modify, replace, or reorder any step of the runbook. On any conflict about *what to execute or in what order*, the runbook prevails; on any conflict about *whether execution is authorized*, this package and the Product Owner decision prevail. Placeholders only — no production hostname, credential, DSN, email address, token, or account identity appears here or may ever be committed.
@@ -76,7 +77,11 @@ This is the **single approved model** for supplying database connection data dur
 | Scribe / witness (optional but recommended) | *(unassigned)* | Timestamps each runbook step, records smoke-matrix initials, keeps the abort/rollback log; must never handle credentials |
 | Builder (AI agent) | n/a | **Prohibited from all Gate 2 actions.** May only produce/update documentation before the window on Product Owner instruction |
 
-One person may hold Product Owner and Scribe; the Operator role must not be combined with the Product Owner role during the window, so the GO to reopen traffic is a second pair of eyes.
+Separate-role governance remains the normal preference: where more than one person is available, the Operator and Product Owner roles should be held by different people, and one person may hold Product Owner and Scribe. By named exception recorded under Sprint 032 — R14c Solo-Operator Governance Amendment, the sole maintainer **`hoanganh-ng`** is approved to act as both Product Owner-of-record and human Operator **for R14c Gate 2 only**; the exception extends to no other person, gate, or sprint. For R14c Gate 2 the former second-pair-of-eyes control is replaced by a mandatory three-pass procedural sequence, which applies whether the roles are held separately or combined:
+
+1. **Operator evidence pass** — the Operator works blockers B1–B6 and preflight checks PF-01…PF-15 and returns redacted evidence through the [evidence-return](./room-cutover-gate2-evidence-return.template.md).
+2. **Architect review pass** — the Architect reviews the completed ledger, evidence-return, and discrepancy register and records exactly one outcome: `READY FOR PO DECISION`, `DEFER — EVIDENCE INCOMPLETE`, or `NO-GO RECOMMENDED`. The outcome must be attributable: it is recorded in the Section 9 decision block together with the Architect reviewer's name or approved handle, the review date, and a durable review reference (e.g. a GitHub PR/issue review-comment link), and it may not be entered by the combined Product Owner/Operator on the Architect's behalf. The Architect review grants no production authority and does not replace the Product Owner decision.
+3. **Product Owner decision pass** — the Product Owner records GO / NO-GO / DEFER in Section 9. **A GO recorded before the Architect review pass has returned `READY FOR PO DECISION` is invalid.**
 
 ## 4. Artifact custody
 
@@ -142,7 +147,7 @@ Gate 2 may be entered only when every entry criterion below is met. The checklis
 |---|---|---|
 | E1 | Gate 1 integrated: PR #26 squash-merged into `dev` as `c8ab4af029d10dda889d1165464e16068a5be573`; runbook accepted | ☐ |
 | E2 | All six operator inputs (Section 2.1) approved, supplied via their secure methods, and recorded in the operator-local input file; the protected connection bundle (Section 2.4) is in place and no command supplies a DSN or credential via argv | ☐ |
-| E3 | Roles assigned (Section 3): named Operator and Product Owner-of-record; Operator ≠ Product Owner | ☐ |
+| E3 | Roles assigned (Section 3): named Operator and Product Owner-of-record recorded — either separate persons (normal preference) or the approved Sprint 032 named exception (`hoanganh-ng` holding both roles for R14c Gate 2 only) — with the Operator → Architect → Product Owner three-pass sequence acknowledged | ☐ |
 | E4 | `<MAINTENANCE_WINDOW>` scheduled with announcement plan for closing and reopening traffic | ☐ |
 | E5 | Backup posture verified: `<BACKUP_LOCATION>` writable, ≥ 30-day retention, restore-readability demonstrated | ☐ |
 | E6 | Rollback pair capture-and-preserve plan understood; protected-tag / no-prune custody rules acknowledged | ☐ |
@@ -153,12 +158,17 @@ Gate 2 may be entered only when every entry criterion below is met. The checklis
 
 **Decision rule:**
 
-- **GO** — all of E1–E10 checked. Record date, window, and signatures; the Operator may then execute the runbook inside `<MAINTENANCE_WINDOW>` only.
+- **GO** — all of E1–E10 checked **and** the Architect review pass (Section 3) has returned `READY FOR PO DECISION`. A GO recorded before the Architect review pass is invalid. Record date, window, and signatures; the Operator may then execute the runbook inside `<MAINTENANCE_WINDOW>` only.
 - **NO-GO** — any criterion is failed on substance (e.g. rehearsal reports inconsistent, backup unverifiable, rollback custody rejected). Record the failed criteria; Gate 2 stays closed; remediation is planned outside the window.
 - **DEFER** — criteria are unmet only for scheduling/assignment reasons (inputs pending, window not agreed, personnel unavailable). Record what is pending and the revisit date; no production action of any kind in the meantime.
 
 | Decision | GO ☐ / NO-GO ☐ / DEFER ☐ |
 |---|---|
+| Architect review pass outcome (required before GO; Section 3) | READY FOR PO DECISION ☐ / DEFER — EVIDENCE INCOMPLETE ☐ / NO-GO RECOMMENDED ☐ |
+| Architect reviewer (name or approved handle — must not be the combined Product Owner/Operator) | |
+| Architect review date | |
+| Durable Architect review reference (e.g. GitHub PR/issue review-comment link) | |
+| Confirmation: `READY FOR PO DECISION` grants no production authority and does not replace the Product Owner decision | ☐ |
 | Date | |
 | Approved `<MAINTENANCE_WINDOW>` (GO only) | |
 | Failed criteria / pending items (NO-GO / DEFER) | |
