@@ -18,7 +18,7 @@ The R14 production cutover follows **discard-and-retire**:
 
 1. **No migrated room.** No migrated, default, or hidden room is created for legacy state (consistent with ADR 001 §3 Decision 2 and Epic #17).
 2. **No legacy state copy.** Legacy global queue state, activities, auto-queue configuration, and play history are **not** copied into any room.
-3. **Clean activation.** Room-authoritative operation begins with no inherited playback state. Users create or join ordinary rooms through the accepted room flows (R04/R05b room entry, invites, membership).
+3. **Clean activation.** Room-authoritative operation begins with no inherited playback state. Users create or join ordinary rooms through the accepted room flows (R04/R05b room entry, invites, membership). "No inherited playback state" means no state copied from the legacy global tables. ADR 004 does not authorize deleting or modifying any pre-existing room-scoped room, membership, queue, activity, auto-queue, play-history, lease, invite, or chat data.
 4. **Retirement unchanged in intent.** The legacy global REST/WS contracts are still retired at cutover (the `410 Gone` tombstone model of ADR 003 §3.1/§3.4 remains the retirement shape); what changes is that no data migration precedes the retirement.
 5. **Rollback preserved.** The mandatory pre-cutover `pg_dump` (retained ≥ 30 days) and the recorded false/false server/SPA rollback pair remain required for rollback and audit throughout the rollback window.
 6. **Legacy tables untouched.** The legacy global tables remain unchanged throughout the rollback window. Destructive cleanup (R14e — migration 0010, schema version 10, legacy-table deletion) remains a later, separately approved action and is NOT authorized by this ADR.
@@ -63,6 +63,6 @@ That sprint is NOT active, NOT shaped, and NOT authorized by ADR 004; it require
 ## 7. Consequences
 
 - Sprint 034 is the sole active sprint; Sprint 031 — R14c Gate 2 Preflight — is **paused** (not closed, not superseded) and must not proceed under the current documents.
-- All blocker (B1–B6/B7), preflight (PF-01–PF-15), and entry-criterion (E1–E10) rows remain `Not started`; the evidence and discrepancy inventories remain empty; all decisions remain unsigned; the recommendation remains `DEFER / NOT READY`.
+- All B1–B6, PF-01–PF-15, and E1–E10 ledger rows remain `Not started`; the B7 GO record remains absent; the evidence and discrepancy inventories remain empty; all decision fields remain unsigned; the recommendation remains `DEFER / NOT READY`.
 - Gate 2 remains pending and unauthorized. Production remains untouched. The `true` server/SPA pair remains undeployed. Legacy global tables remain untouched. R14e remains inactive.
 - No code, migration, schema, test, Docker, frontend, runtime, preflight, production, credential, backup, host, database, cutover, or rollback action is authorized by this ADR.

@@ -10,7 +10,7 @@ The Product Owner decided on 2026-07-30 (Issue #17 comment #5128855220) that the
 
 - no legacy global queue state, activities, auto-queue configuration, or play history is migrated into a room;
 - no migrated, default, or hidden room is created for legacy state;
-- room-authoritative operation activates with no inherited playback state; users create or join ordinary rooms through the accepted room flows;
+- room-authoritative operation activates with no inherited playback state — "no inherited playback state" means no state copied from the legacy global tables, and ADR 004 does not authorize deleting or modifying any pre-existing room-scoped room, membership, queue, activity, auto-queue, play-history, lease, invite, or chat data; users create or join ordinary rooms through the accepted room flows;
 - the pre-cutover database backup and the false/false rollback pair remain mandatory for rollback and audit during the rollback window;
 - the legacy global tables remain untouched during the rollback window; destructive cleanup (R14e) remains a later, separately approved action.
 

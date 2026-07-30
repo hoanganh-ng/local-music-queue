@@ -23,11 +23,11 @@ Replace the accepted migrate-and-retire cutover contract with the **discard-and-
 
 - Replace the accepted migrate-and-retire cutover contract with discard-and-retire.
 - Create no migrated room and carry forward no legacy global queue, activity, auto-queue, or play-history state.
-- Begin room-authoritative operation with no inherited playback state.
+- Begin room-authoritative operation with no inherited playback state — "no inherited playback state" means no state copied from the legacy global tables; nothing in this sprint or ADR 004 authorizes deleting or modifying any pre-existing room-scoped room, membership, queue, activity, auto-queue, play-history, lease, invite, or chat data.
 - Preserve mandatory backup and false/false rollback artifacts.
 - Retain legacy global tables unchanged throughout the rollback window.
 - Pause Sprint 031 while Sprint 034 is active — Sprint 031 is neither closed nor superseded.
-- Define the revised contract, readiness model, rollback model, activation proof, and required implementation correction before revised Gate 2 preflight may resume.
+- Record the current activation proof (`room_cutover_marker`) as **unresolved** and assign its definition and implementation — together with the revised contract, readiness model, rollback model, and preflight surfaces — to the later implementation-correction sprint (ADR 004 Sections 5–6); revised Gate 2 preflight may not resume before that sprint is accepted and integrated. Sprint 034 does not define the revised activation proof.
 
 ## Deliverables (the approved 17-file boundary)
 
@@ -61,7 +61,7 @@ Replace the accepted migrate-and-retire cutover contract with the **discard-and-
 
 ## What this sprint preserves
 
-- Every B1–B6/B7, PF-01–PF-15, and E1–E10 row remains `Not started`; the evidence inventory and discrepancy register remain empty; all decision fields remain unsigned; the recommendation remains `DEFER / NOT READY`.
+- All B1–B6, PF-01–PF-15, and E1–E10 ledger rows remain `Not started`; the B7 GO record remains absent; the evidence inventory and discrepancy register remain empty; all decision fields remain unsigned; the recommendation remains `DEFER / NOT READY`.
 - Mandatory backups, rollback artifacts, closed-traffic execution, paired server/SPA deployment, and fail-closed behavior remain mandatory.
 - The Operator evidence → Architect review → Product Owner decision sequence (Sprint 032 governance) remains mandatory.
 - Legacy global tables remain untouched throughout the rollback window; no R14e cleanup is authorized.
