@@ -1,7 +1,7 @@
 # Project State Baseline
 
-**Last refreshed:** 2026-07-30  
-**Branch:** `dev`  
+**Last refreshed:** 2026-07-30\
+**Branch:** `dev`\
 **Current active sprint:** Sprint 032 — R14c Solo-Operator Governance Amendment ([`SPRINTS/032-r14c-solo-operator-governance.md`](./SPRINTS/032-r14c-solo-operator-governance.md)) — documentation-only; the sole active sprint. It amends the R14c Gate 2 role governance (named `hoanganh-ng` combined Product Owner / Operator exception with a mandatory Operator → Architect → Product Owner three-pass sequence) and resolves nothing: all readiness rows remain `Not started`, the unsigned recommendation remains `DEFER / NOT READY`, and Gate 2 remains pending and unauthorized. Sprint 031 ([`SPRINTS/031-r14c-gate2-preflight.md`](./SPRINTS/031-r14c-gate2-preflight.md)) is paused — not closed, not superseded. Sprint 030 ([`SPRINTS/030-r14c-gate2-readiness-package.md`](./SPRINTS/030-r14c-gate2-readiness-package.md)) is closed and accepted (PR #27 merged into `dev` as `d27c56ff` on 2026-07-29)
 
 ## Current state

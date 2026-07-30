@@ -54,7 +54,7 @@ Status terms follow the [ledger status model](./room-cutover-gate2-preflight-led
 - The **Operator** is the only person who executes runbook commands and provisions the snapshot infrastructure, connection bundle, backup location, and evidence directory.
 - The **Product Owner** approves the six operator inputs, records GO / NO-GO / DEFER, owns the reopen-traffic decision, closes the rollback window, and decides forward-recovery vs restoration after any rollback.
 - **Separate-role governance remains the normal preference.** By named exception recorded under Sprint 032, **`hoanganh-ng`** is approved to act as both Product Owner-of-record and human Operator **for R14c Gate 2 only**; the exception extends to no other person, gate, or sprint. One person may hold Product Owner and Scribe.
-- **Mandatory three-pass sequence** (applies whether the roles are held separately or combined): (1) **Operator evidence pass** — redacted evidence returned through the evidence-return; (2) **Architect review pass** — the Architect reviews the completed ledger, evidence-return, and discrepancy register and records exactly one outcome: `READY FOR PO DECISION`, `DEFER — EVIDENCE INCOMPLETE`, or `NO-GO RECOMMENDED`; the Architect review grants no production authority and does not replace the Product Owner decision; (3) **Product Owner decision pass** — GO / NO-GO / DEFER recorded in the readiness package Section 9. **A GO recorded before the Architect review pass has returned `READY FOR PO DECISION` is invalid.**
+- **Mandatory three-pass sequence** (applies whether the roles are held separately or combined): (1) **Operator evidence pass** — redacted evidence returned through the evidence-return; (2) **Architect review pass** — the Architect reviews the completed ledger, evidence-return, and discrepancy register and records exactly one outcome: `READY FOR PO DECISION`, `DEFER — EVIDENCE INCOMPLETE`, or `NO-GO RECOMMENDED`; the outcome must be attributable — recorded with the Architect reviewer's name or approved handle, the review date, and a durable review reference (e.g. a GitHub PR/issue review-comment link), and never entered by the combined Product Owner/Operator on the Architect's behalf; the Architect review grants no production authority and does not replace the Product Owner decision; (3) **Product Owner decision pass** — GO / NO-GO / DEFER recorded in the readiness package Section 9. **A GO recorded before the Architect review pass has returned `READY FOR PO DECISION` is invalid.**
 - The **Builder (AI agent)** is **prohibited from all Gate 2 actions**; it may only produce/update documentation before the window on Product Owner instruction. It never signs, never declares GO, and never marks an operational item resolved.
 
 ## 5. Decision rule (restated from readiness §9)
@@ -72,7 +72,7 @@ A discrepancy contradicting a procedure, isolation guarantee, credential rule, p
 - [ ] No ledger row is `Failed` or `Blocked`, or each such row is understood and reflected in the decision.
 - [ ] Discrepancy register reviewed; no open Blocking discrepancy; every Important one resolved or explicitly ACCEPTED-RISK per the classification rule (Architect + Product Owner for the reserved classes).
 - [ ] Roles assigned per amended E3: either separate persons (normal preference) or the approved Sprint 032 named exception (`hoanganh-ng`, R14c Gate 2 only), with the three-pass sequence acknowledged.
-- [ ] Architect review pass completed with outcome `READY FOR PO DECISION` recorded (Section 4) — a GO before this outcome is invalid.
+- [ ] Architect review pass completed with outcome `READY FOR PO DECISION` recorded and attributed (Section 4: reviewer name/approved handle, review date, durable review reference) — a GO before this outcome is invalid.
 - [ ] `<MAINTENANCE_WINDOW>` scheduled with closure/reopen announcement plan (E4).
 - [ ] Backup posture verified (E5); rollback capture/custody rules acknowledged (E6).
 - [ ] Smoke matrix reviewed; live account holder available (E8); abort rules acknowledged (E9).
@@ -86,6 +86,10 @@ The **authoritative** GO / NO-GO / DEFER decision and signatures are recorded in
 | Field | Value |
 |---|---|
 | Architect review pass outcome (required before GO; Section 4) | *(unrecorded — READY FOR PO DECISION ☐ / DEFER — EVIDENCE INCOMPLETE ☐ / NO-GO RECOMMENDED ☐)* |
+| Architect reviewer (name or approved handle — must not be the combined Product Owner/Operator) | *(unrecorded)* |
+| Architect review date | *(unrecorded)* |
+| Durable Architect review reference (e.g. GitHub PR/issue review-comment link) | *(unrecorded)* |
+| Confirmation: `READY FOR PO DECISION` grants no production authority and does not replace the Product Owner decision | *(unconfirmed ☐)* |
 | Decision | *(unrecorded — GO ☐ / NO-GO ☐ / DEFER ☐)* |
 | Date | *(unrecorded)* |
 | Approved `<MAINTENANCE_WINDOW>` (GO only) | *(unrecorded)* |

@@ -80,7 +80,7 @@ This is the **single approved model** for supplying database connection data dur
 Separate-role governance remains the normal preference: where more than one person is available, the Operator and Product Owner roles should be held by different people, and one person may hold Product Owner and Scribe. By named exception recorded under Sprint 032 — R14c Solo-Operator Governance Amendment, the sole maintainer **`hoanganh-ng`** is approved to act as both Product Owner-of-record and human Operator **for R14c Gate 2 only**; the exception extends to no other person, gate, or sprint. For R14c Gate 2 the former second-pair-of-eyes control is replaced by a mandatory three-pass procedural sequence, which applies whether the roles are held separately or combined:
 
 1. **Operator evidence pass** — the Operator works blockers B1–B6 and preflight checks PF-01…PF-15 and returns redacted evidence through the [evidence-return](./room-cutover-gate2-evidence-return.template.md).
-2. **Architect review pass** — the Architect reviews the completed ledger, evidence-return, and discrepancy register and records exactly one outcome: `READY FOR PO DECISION`, `DEFER — EVIDENCE INCOMPLETE`, or `NO-GO RECOMMENDED`. The Architect review grants no production authority and does not replace the Product Owner decision.
+2. **Architect review pass** — the Architect reviews the completed ledger, evidence-return, and discrepancy register and records exactly one outcome: `READY FOR PO DECISION`, `DEFER — EVIDENCE INCOMPLETE`, or `NO-GO RECOMMENDED`. The outcome must be attributable: it is recorded in the Section 9 decision block together with the Architect reviewer's name or approved handle, the review date, and a durable review reference (e.g. a GitHub PR/issue review-comment link), and it may not be entered by the combined Product Owner/Operator on the Architect's behalf. The Architect review grants no production authority and does not replace the Product Owner decision.
 3. **Product Owner decision pass** — the Product Owner records GO / NO-GO / DEFER in Section 9. **A GO recorded before the Architect review pass has returned `READY FOR PO DECISION` is invalid.**
 
 ## 4. Artifact custody
@@ -165,6 +165,10 @@ Gate 2 may be entered only when every entry criterion below is met. The checklis
 | Decision | GO ☐ / NO-GO ☐ / DEFER ☐ |
 |---|---|
 | Architect review pass outcome (required before GO; Section 3) | READY FOR PO DECISION ☐ / DEFER — EVIDENCE INCOMPLETE ☐ / NO-GO RECOMMENDED ☐ |
+| Architect reviewer (name or approved handle — must not be the combined Product Owner/Operator) | |
+| Architect review date | |
+| Durable Architect review reference (e.g. GitHub PR/issue review-comment link) | |
+| Confirmation: `READY FOR PO DECISION` grants no production authority and does not replace the Product Owner decision | ☐ |
 | Date | |
 | Approved `<MAINTENANCE_WINDOW>` (GO only) | |
 | Failed criteria / pending items (NO-GO / DEFER) | |

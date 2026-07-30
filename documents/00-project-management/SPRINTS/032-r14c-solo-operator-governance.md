@@ -4,7 +4,7 @@
 **Branch:** `sprint/r14c-solo-operator-governance`
 **Base:** `dev` at `c2ca389475174ad165391085a4e98b65d70f3455`
 **Parent epic:** Issue #17
-**Risk:** Low (documentation only — no code, schema, deployment, or production change)
+**Risk:** Low implementation risk (documentation only — no code, schema, deployment, or production change). The governance change itself carries an **elevated residual operational-governance risk** that is explicitly accepted — see "Risk acceptance" below.
 **Scope:** Project-management and deployment documentation only. No production, snapshot, identity, credential, evidence-storage, deployment-host, container, or infrastructure access of any kind.
 
 ## Goal
@@ -16,7 +16,7 @@ Amend the R14c Gate 2 governance surfaces so that the project's named sole maint
 At the approved base (`dev` at `c2ca389475174ad165391085a4e98b65d70f3455`):
 
 - The Gate 2 decision surfaces — readiness package Section 3 and E3, the preflight ledger B1 and E3 rows, the evidence-return B1 row, and the go/no-go packet Sections 4 and 6 — all require an unconditional `Operator ≠ Product Owner` human role separation, with the reopen-traffic GO justified as "a second pair of eyes".
-- The project has a single named maintainer, `hoanganh-ng`. The unconditional separation requirement therefore makes B1 and E3 permanently unsatisfiable and blocks the Gate 2 go/no-go review from ever being convened, without adding any additional safety over the existing fail-closed evidence, discrepancy, rollback, and abort controls.
+- The project has a single named maintainer, `hoanganh-ng`. The unconditional separation requirement therefore makes B1 and E3 permanently unsatisfiable and blocks the Gate 2 go/no-go review from ever being convened. The separation rule is a real control — it provides independent human observation and decision challenge — but with only one maintainer it cannot be staffed, so the control is replaced (for this gate only) by the procedural sequence below rather than silently waived.
 - Sprint 031 — R14c Gate 2 Preflight and Go/No-Go Preparation — is active; its tracking scaffold is integrated and all rows are `Not started` with recommendation `DEFER / NOT READY`.
 
 ## Desired behavior
@@ -29,6 +29,13 @@ At the approved base (`dev` at `c2ca389475174ad165391085a4e98b65d70f3455`):
 - **B1 and E3 pass conditions amended** to accept either separate named persons or the named `hoanganh-ng` exception with the three-pass sequence acknowledged; both rows remain `Not started`.
 - **Sprint lifecycle:** Sprint 031 is **paused** — not closed, not superseded; its scope, deliverables, and prohibitions remain intact and it resumes after this amendment is integrated. Sprint 032 is the sole active sprint while it is in progress.
 - **Everything else is preserved without change:** all B1–B6, PF-01–PF-15, and E1–E10 statuses remain `Not started`; evidence and discrepancy inventories remain empty; the unsigned recommendation remains `DEFER / NOT READY`; Gate 2 remains pending and unauthorized; production remains untouched; R14e remains inactive; the runbook procedures and command order are unchanged; no AI agent (Builder) may execute any Gate 2 operation.
+
+## Risk acceptance
+
+- **What is lost.** Human role separation (`Operator ≠ Product Owner`) provided an independent human witness: independent observation of execution and an independent challenge to the reopen-traffic decision. Combining both roles in one person removes that independent human witness and **increases residual operational-governance risk** for R14c Gate 2.
+- **What mitigates it — and its limit.** The mandatory Architect review pass restores an independent procedural checkpoint before any GO, but it is a review of recorded evidence, not a live second human in the window; it mitigates the increased risk without fully replacing the second human.
+- **Explicit acceptance.** `hoanganh-ng`, as Product Owner-of-record, explicitly accepts this increased residual operational-governance risk for R14c Gate 2 only. The acceptance does not weaken any fail-closed readiness, evidence, rollback, discrepancy, abort, or production-safety control, all of which remain unchanged.
+- **Risk framing.** This sprint's *implementation* risk is low (documentation only). The *operational-governance consequence* of the exception it records is elevated, and that elevation is knowingly accepted rather than dismissed.
 
 ## Deliverables
 
@@ -76,4 +83,5 @@ No Go, frontend, or Docker verification applies — no code or configuration fil
 - The only named public handle introduced by this sprint is `hoanganh-ng`, the repository's public maintainer handle. No DSN, credential, email address, hostname, infrastructure path, secret, or other real identity is introduced.
 - No production system, snapshot, deployment host, container, connection bundle, evidence directory, credential, or identity was accessed in preparing this sprint. No runbook step was executed. No readiness row left `Not started`, no evidence was recorded, no discrepancy was raised, and no GO was declared.
 - This amendment grants no execution authority. Gate 2 remains pending and unauthorized until the three-pass sequence completes and a valid GO is recorded in the readiness package Section 9; production remains untouched.
+- The increased residual operational-governance risk of combining the Product Owner and Operator roles is recorded in "Risk acceptance" above and is explicitly accepted by `hoanganh-ng` for R14c Gate 2 only.
 - R14e remains inactive. Room epic Issue #17 remains open.
