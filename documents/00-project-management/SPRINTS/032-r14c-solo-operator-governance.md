@@ -1,6 +1,6 @@
 # Sprint 032 — R14c Solo-Operator Governance Amendment
 
-**Status:** In progress — documentation-only governance amendment; no readiness item resolved; no GO declared
+**Status:** Closed and accepted (2026-07-30) — PR #30, accepted head `55b4133ba42a3a880a42e553ea3ed8f0192dd294`, squash-merged into `dev` as `3ed430b3b753e35a00d3127b782537a38008ca56`; documentation-only governance amendment; no readiness item resolved; no GO declared
 **Branch:** `sprint/r14c-solo-operator-governance`
 **Base:** `dev` at `c2ca389475174ad165391085a4e98b65d70f3455`
 **Parent epic:** Issue #17
@@ -80,6 +80,7 @@ No Go, frontend, or Docker verification applies — no code or configuration fil
 ## Record
 
 - Prepared from `dev` at `c2ca389475174ad165391085a4e98b65d70f3455` on branch `sprint/r14c-solo-operator-governance` for Architect review and Product Owner decision, delivered as an unmerged draft pull request.
+- **Closed and accepted (2026-07-30).** Delivered through PR #30; the accepted head `55b4133ba42a3a880a42e553ea3ed8f0192dd294` was squash-merged by the Product Owner into `dev` as `3ed430b3b753e35a00d3127b782537a38008ca56` (`docs(r14c): add solo-operator Gate 2 governance (#30)`) on 2026-07-30. The solo-operator governance amendment is authoritative on `dev`. The merge integrates governance wording only: it resolves no readiness row, records no evidence or discrepancy, signs no decision block, and declares no GO. Sprint 031 resumed as the sole active sprint per Sprint 033 — R14c Governance Lifecycle Transition ([`033-r14c-governance-lifecycle-transition.md`](./033-r14c-governance-lifecycle-transition.md)).
 - The only named public handle introduced by this sprint is `hoanganh-ng`, the repository's public maintainer handle. No DSN, credential, email address, hostname, infrastructure path, secret, or other real identity is introduced.
 - No production system, snapshot, deployment host, container, connection bundle, evidence directory, credential, or identity was accessed in preparing this sprint. No runbook step was executed. No readiness row left `Not started`, no evidence was recorded, no discrepancy was raised, and no GO was declared.
 - This amendment grants no execution authority. Gate 2 remains pending and unauthorized until the three-pass sequence completes and a valid GO is recorded in the readiness package Section 9; production remains untouched.
