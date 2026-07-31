@@ -1,6 +1,6 @@
 # Sprint 034 — R14 Discard-and-Retire Contract Amendment
 
-**Status:** Active — sole active sprint; delivered as an unmerged draft PR pending Architect review and Product Owner acceptance
+**Status:** Closed and accepted — PR #32, accepted head `6686852445d3cf46bf6c46f3b76d94ba9b932098`, squash-merged into `dev` as `e65eef9954b2f4ba24f4866b2b084910e76e090c` on 2026-07-31, following Architect acceptance and Product Owner merge authorization; lifecycle transition recorded by Sprint 035 ([`035-r14-discard-retire-lifecycle-transition.md`](./035-r14-discard-retire-lifecycle-transition.md))
 **Branch:** `sprint/r14-discard-retire-contract-amendment`
 **Base:** `dev` at `96c7d0f8a59bf511eb58f5f7432a4283bca409ef`
 **Parent epic:** Issue #17
@@ -95,3 +95,10 @@ Expected: clean diff, exactly 17 changed files, every changed file under `docume
 - Delivered as the unmerged draft PR `docs(r14): replace migration with discard-and-retire contract`; the Builder does not mark it ready, approve it, merge it, or advance sprint status.
 - No production system, snapshot, deployment host, container, connection bundle, evidence directory, credential, or identity was accessed in preparing this sprint. No runbook step was executed. No readiness item was advanced and no GO was declared.
 - Gate 2 remains pending and unauthorized; production remains untouched; the `true` pair remains undeployed; R14e remains inactive. Room epic Issue #17 remains open.
+
+## Closure record
+
+- **Sprint 034 is closed and accepted.** PR #32, accepted head `6686852445d3cf46bf6c46f3b76d94ba9b932098` (including the corrective pass addressing Architect findings F1–F4, PR #32 review #5129688424), was Architect-accepted and, under Product Owner merge authorization, squash-merged into `dev` as `e65eef9954b2f4ba24f4866b2b084910e76e090c` on 2026-07-31.
+- ADR 004 is accepted architecture authority on `dev` — no longer draft or pending authority. Its product direction is unchanged.
+- The post-merge lifecycle transition is recorded by Sprint 035 — R14 Discard-and-Retire Lifecycle Transition ([`035-r14-discard-retire-lifecycle-transition.md`](./035-r14-discard-retire-lifecycle-transition.md)). After that transition, no sprint is active.
+- The closure resolves nothing beyond the lifecycle: Sprint 031 remains paused (not closed, not completed, not superseded, not resumed); the runbook and all Gate 2 documents remain non-executable; all B1–B6, PF-01–PF-15, and E1–E10 rows remain `Not started`; the B7 GO record remains absent; the evidence and discrepancy inventories remain empty; all decision fields remain unsigned; the recommendation remains `DEFER / NOT READY`; the implementation-correction sprint (ADR 004 Section 6) remains required but unshaped, inactive, and unauthorized; Gate 2 remains pending and unauthorized; production remains untouched; R14e remains inactive. Room epic Issue #17 remains open.

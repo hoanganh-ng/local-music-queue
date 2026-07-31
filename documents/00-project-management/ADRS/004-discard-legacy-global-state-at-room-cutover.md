@@ -1,6 +1,6 @@
 # ADR 004 — Discard legacy global state at room cutover
 
-- Status: Approved product direction — Product Owner decision 2026-07-30 (Issue #17 comment #5128855220); documented through Sprint 034 — R14 Discard-and-Retire Contract Amendment ([`../SPRINTS/034-r14-discard-and-retire-contract-amendment.md`](../SPRINTS/034-r14-discard-and-retire-contract-amendment.md)), delivered as an unmerged draft PR pending Architect review and Product Owner acceptance
+- Status: **Accepted — architecture authority on `dev`** — Product Owner decision 2026-07-30 (Issue #17 comment #5128855220); documented through Sprint 034 — R14 Discard-and-Retire Contract Amendment ([`../SPRINTS/034-r14-discard-and-retire-contract-amendment.md`](../SPRINTS/034-r14-discard-and-retire-contract-amendment.md)), whose delivery (PR #32, accepted head `6686852445d3cf46bf6c46f3b76d94ba9b932098`) was Architect-accepted and squash-merged into `dev` as `e65eef9954b2f4ba24f4866b2b084910e76e090c` on 2026-07-31 under Product Owner merge authorization; acceptance recorded by Sprint 035 ([`../SPRINTS/035-r14-discard-retire-lifecycle-transition.md`](../SPRINTS/035-r14-discard-retire-lifecycle-transition.md))
 - Date: 2026-07-30
 - Scope: Replaces the migrate-and-retire cutover contract (ADR 003 and its R14b/R14c production assumptions) with a **discard-and-retire** contract for the R14 production cutover. ADR 003 remains a historical record; only the portions listed in Section 4 are superseded. ADR 004 is documentation-only: it authorizes no code, schema, migration, Docker, frontend, runtime, preflight, production, cutover, rollback, or R14e action.
 
@@ -62,7 +62,7 @@ That sprint is NOT active, NOT shaped, and NOT authorized by ADR 004; it require
 
 ## 7. Consequences
 
-- Sprint 034 is the sole active sprint; Sprint 031 — R14c Gate 2 Preflight — is **paused** (not closed, not superseded) and must not proceed under the current documents.
+- Sprint 034 is closed and accepted (PR #32, squash-merged into `dev` as `e65eef9954b2f4ba24f4866b2b084910e76e090c` on 2026-07-31); the lifecycle transition is recorded by Sprint 035, after which **no sprint is active**. Sprint 031 — R14c Gate 2 Preflight — remains **paused** (not closed, not superseded, not resumed) and must not proceed under the current documents.
 - All B1–B6, PF-01–PF-15, and E1–E10 ledger rows remain `Not started`; the B7 GO record remains absent; the evidence and discrepancy inventories remain empty; all decision fields remain unsigned; the recommendation remains `DEFER / NOT READY`.
 - Gate 2 remains pending and unauthorized. Production remains untouched. The `true` server/SPA pair remains undeployed. Legacy global tables remain untouched. R14e remains inactive.
 - No code, migration, schema, test, Docker, frontend, runtime, preflight, production, credential, backup, host, database, cutover, or rollback action is authorized by this ADR.
