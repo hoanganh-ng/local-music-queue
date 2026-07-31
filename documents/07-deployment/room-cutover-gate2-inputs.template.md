@@ -1,5 +1,7 @@
 # R14c Gate 2 — Operator-Local Input File (TEMPLATE)
 
+> **NON-EXECUTABLE — direction amendment (ADR 004, Sprint 034, 2026-07-30).** The Product Owner replaced the migrate-and-retire cutover contract with the **discard-and-retire** contract (Issue #17 comment #5128855220; `documents/00-project-management/ADRS/004-discard-legacy-global-state-at-room-cutover.md`). This template collects inputs for a migrated-room production copy that **will no longer happen** (e.g. the target room slug/name and host user id of the migrated room). **This template is non-executable**: it must not be copied, filled, or used until the implementation-correction sprint (ADR 004 Section 6) is accepted and integrated and the Product Owner authorizes a revised Gate 2 with revised inputs. Sprint 031 is paused. Preserved unchanged below as historical record; its no-secrets handling rules carry forward into any revised template.
+
 **This tracked file is a template and contains placeholders only.**
 
 Usage (see [`room-cutover-gate2-readiness.md`](./room-cutover-gate2-readiness.md), Sections 2 and 7):

@@ -1,5 +1,7 @@
 # R14c Gate 2 — Operational Discrepancy Register (Redacted)
 
+> **NON-EXECUTABLE — direction amendment (ADR 004, Sprint 034, 2026-07-30).** The Product Owner replaced the migrate-and-retire cutover contract with the **discard-and-retire** contract (Issue #17 comment #5128855220; `documents/00-project-management/ADRS/004-discard-legacy-global-state-at-room-cutover.md`). This register logs discrepancies from preflight and operational work that is not authorized to begin. **This register is non-executable**: no entry may be recorded under it until the implementation-correction sprint (ADR 004 Section 6) is accepted and integrated and the Product Owner authorizes a revised Gate 2 preflight. Sprint 031 is paused. Preserved unchanged below as historical record; the register remains empty.
+
 **Sprint:** 031 (R14c Gate 2 Preflight and Go/No-Go Preparation) — `documents/00-project-management/SPRINTS/031-r14c-gate2-preflight.md`
 **Overlays:** the accepted readiness package [`room-cutover-gate2-readiness.md`](./room-cutover-gate2-readiness.md), the runbook [`room-cutover-runbook.md`](./room-cutover-runbook.md), and the [preflight status ledger](./room-cutover-gate2-preflight-ledger.md).
 **Status:** Tracking document. **Empty at creation — no discrepancy has been recorded because no preflight or operational step has been executed.** This register does not authorize anything.
