@@ -26,6 +26,7 @@ This directory contains documentation for active and past sprints.
 | 033    | R14c Governance Lifecycle Transition                 | Completed — documentation-only lifecycle bridge; records Sprint 032 closure and restored Sprint 031 as sole active (state since superseded by Sprint 034); no status resolved; no GO |
 | 034    | R14 Discard-and-Retire Contract Amendment            | Closed and accepted (2026-07-31; PR #32; head `66868524`; squash merge `e65eef99`) — documentation-and-architecture amendment recording ADR 004 (discard-and-retire; no migrated room, no legacy-state copy) as accepted architecture authority; pauses Sprint 031; marks the runbook and Gate 2 documents non-executable; no status resolved; no GO |
 | 035    | R14 Discard-and-Retire Lifecycle Transition          | Completed — documentation-only lifecycle bridge; records Sprint 034 closure and ADR 004 acceptance; leaves no active sprint; Sprint 031 remains paused; the implementation-correction sprint remains unshaped and unauthorized; no status resolved; no GO |
+| 036    | R14 Discard-and-Retire Implementation-Correction Shaping | In progress — awaiting Architect review and Product Owner approval — documentation-only shaping sprint; scopes and defines acceptance criteria for the ADR 004 Section 6 implementation-correction sprint; acceptance of its PR authorizes (does not activate) that sprint; no status resolved; no GO |
 
 ## File Naming
 
