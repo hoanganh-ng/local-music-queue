@@ -26,7 +26,9 @@ This directory contains documentation for active and past sprints.
 | 033    | R14c Governance Lifecycle Transition                 | Completed — documentation-only lifecycle bridge; records Sprint 032 closure and restored Sprint 031 as sole active (state since superseded by Sprint 034); no status resolved; no GO |
 | 034    | R14 Discard-and-Retire Contract Amendment            | Closed and accepted (2026-07-31; PR #32; head `66868524`; squash merge `e65eef99`) — documentation-and-architecture amendment recording ADR 004 (discard-and-retire; no migrated room, no legacy-state copy) as accepted architecture authority; pauses Sprint 031; marks the runbook and Gate 2 documents non-executable; no status resolved; no GO |
 | 035    | R14 Discard-and-Retire Lifecycle Transition          | Completed — documentation-only lifecycle bridge; records Sprint 034 closure and ADR 004 acceptance; leaves no active sprint; Sprint 031 remains paused; the implementation-correction sprint remains unshaped and unauthorized; no status resolved; no GO |
-| 036    | R14 Discard-and-Retire Implementation-Correction Shaping | In progress — awaiting Architect review and Product Owner approval — documentation-only shaping sprint; scopes and defines acceptance criteria for the ADR 004 Section 6 implementation-correction sprint; acceptance of its PR authorizes (does not activate) that sprint; no status resolved; no GO |
+| 036    | R14 Discard-and-Retire Implementation-Correction Shaping | Closed and accepted (2026-07-31; PR #34; head `65d17f79`; squash merge `723023fd`) — documentation-only shaping sprint; authorized the Sprint 038 implementation-correction contract; no implementation, preflight, production, readiness, GO, or R14e work |
+| 037    | R14 Discard-and-Retire Correction Activation | Completed — documentation-only lifecycle bridge; records closure of Sprint 036 and activates Sprint 038 as the active implementation-correction sprint; grants no continuing authority; no status resolved; no GO |
+| 038    | R14 Discard-and-Retire Implementation Correction | Active — sole authorized implementation-correction sprint from `e4b94c0aef74ef90a104a9437caeae99e05c1da3`; implementation and revised operational documents only; no preflight or production authority |
 
 ## File Naming
 
@@ -41,7 +43,7 @@ Sprints progress through defined lifecycle states:
 3. **Approved:** Ready for execution.
 4. **Completed / Closed:** Work is finished and accepted.
 
-R14c uses an additional operational gate: Gate 1 implementation and rehearsal are integrated and closed, and that approval does not authorize production execution. Per ADR 004 (Sprint 034), the production direction is now discard-and-retire: the migrate-and-retire runbook and Gate 2 preflight documents are non-executable, Sprint 031 is paused, and any future maintenance window requires the implementation-correction sprint to be accepted and integrated first, followed by a separately resumed revised preflight and a separate Product Owner go/no-go.
+R14c uses an additional operational gate: Gate 1 implementation and rehearsal are integrated and closed, and that approval does not authorize production execution. Per ADR 004 (Sprint 034), the production direction is now discard-and-retire: the migrate-and-retire runbook and Gate 2 preflight documents are non-executable, Sprint 031 is paused, and any new Gate 2 work requires Sprint 038 to be accepted and integrated first, followed by a later successor preflight and a separate Product Owner go/no-go.
 
 ## `active.md` Semantics
 
