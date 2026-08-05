@@ -1,6 +1,6 @@
 # Sprint 036 — R14 Discard-and-Retire Implementation-Correction Shaping
 
-**Status:** In progress — awaiting Architect review and Product Owner approval
+**Status:** Closed and accepted — PR #34 accepted and squash-merged into `dev` on 2026-07-31; acceptance authorized shaping output but did not activate the correction sprint
 **Branch:** `sprint/r14-discard-retire-implementation-correction-shaping`
 **Base:** `dev` at `11c30c4eeccdbc1a2719deb1afed4a9f0273e750`
 **Parent epic:** Issue #17
@@ -100,9 +100,9 @@ Sprint 036 does NOT resume Sprint 031, does NOT make any Gate 2 document executa
 ## Deliverables (the approved five-file boundary)
 
 1. `documents/00-project-management/SPRINTS/036-r14-discard-retire-implementation-correction-shaping.md` (this record, new)
-2. `documents/00-project-management/SPRINTS/active.md` (updated — Sprint 036 sole active)
+2. `documents/00-project-management/SPRINTS/active.md` (updated in PR #34 — historical shaping-period active-sprint pointer)
 3. `documents/00-project-management/SPRINTS/README.md` (index row added)
-4. `documents/00-project-management/PROJECT_STATE.md` (updated — active-sprint header; correction-sprint phrasing)
+4. `documents/00-project-management/PROJECT_STATE.md` (updated in PR #34 — shaping lifecycle header and correction-sprint phrasing)
 5. `documents/00-project-management/ROOM_EPIC_SPRINT_SEQUENCE.md` (direction-amendment blockquote phrase only; no table row)
 
 ## Out of scope
@@ -132,8 +132,16 @@ Expected: clean diff, exactly five changed files, every changed file under `docu
 
 ## Record
 
-- Prepared from `dev` at `11c30c4eeccdbc1a2719deb1afed4a9f0273e750` on branch `sprint/r14-discard-retire-implementation-correction-shaping` for Architect review and Product Owner acceptance, delivered as the unmerged draft PR `docs(r14): shape the discard-and-retire implementation-correction sprint`.
-- This record shapes the implementation-correction sprint; Product Owner acceptance of this PR authorizes it; it remains NOT active and NOT started until separately activated with its own record, base SHA, and Builder authorization.
+- Prepared from `dev` at `11c30c4eeccdbc1a2719deb1afed4a9f0273e750` on branch `sprint/r14-discard-retire-implementation-correction-shaping`; accepted as PR #34 and squash-merged into `dev` on 2026-07-31.
+- This record shaped the implementation-correction sprint; Product Owner acceptance of PR #34 authorized the shaped sprint. The shaped sprint remained dormant until separately activated with its own record, base SHA, and Builder authorization.
 - No production system, snapshot, deployment host, container, connection bundle, evidence directory, credential, or identity was accessed in preparing this sprint. No runbook or preflight step was executed. No readiness row left `Not started`, no evidence was recorded, no discrepancy was raised, no decision block was signed, and no GO was declared.
 - This record grants no execution authority. Gate 2 remains pending and unauthorized; the unsigned recommendation remains `DEFER / NOT READY`; production remains untouched; the `true` pair remains undeployed.
 - Sprint 031 remains paused. R14e remains inactive. Room epic Issue #17 remains open.
+
+## Closure record
+
+- Sprint 036 is closed and accepted. PR #34, accepted head `65d17f7955d0dd9e782c6cb4298467a26613b892`, was squash-merged into `dev` as `723023fd296678bac8aec0ace784ff2e94bb119f` on 2026-07-31.
+- The accepted delivery shaped and authorized the ADR 004 Section 6 implementation-correction sprint; it did not activate that sprint.
+- The Product Owner-approved architecture boundary is `docs/superpowers/specs/2026-08-05-r14-discard-retire-success-design.md`.
+- Sprint 037 records lifecycle reconciliation. Sprint 038 is separately activated from the current `dev` base with its own record and Builder authorization.
+- Sprint 031 remains paused; Gate 2 documents remain non-executable; no readiness, production, rollback, or R14e state changed through Sprint 036 closure.
