@@ -1,9 +1,9 @@
 # R14 Discard-and-Retire Success Design
 
-**Status:** Product Owner-approved design; repository review pending
-**Date:** 2026-08-05
-**Branch baseline:** `dev` at `723023fd296678bac8aec0ace784ff2e94bb119f`
-**Parent epic:** Issue #17
+**Status:** Product Owner-approved design; repository review pending  
+**Date:** 2026-08-05  
+**Branch baseline:** `dev` at `723023fd296678bac8aec0ace784ff2e94bb119f`  
+**Parent epic:** Issue #17  
 **Architecture authority:** ADR 004 — Discard legacy global state at room cutover
 
 ## Purpose
@@ -24,7 +24,7 @@ At the design baseline:
 - The backend image still packages the historical `room-cutover` command.
 - Production cutover has not occurred, the true/true pair is undeployed, legacy global tables remain untouched, and R14e remains inactive.
 
-The first delivery after this design must therefore reconcile sprint authority before implementation begins.
+The first delivery after this design must reconcile sprint authority before implementation begins.
 
 ## Locked product and architecture decisions
 
@@ -44,11 +44,13 @@ Create a new durable discard-and-retire activation record. Do not repurpose or s
 
 `room_cutover_marker` and `cmd/room-cutover` remain accepted historical migrate-and-retire artifacts. They are not reused as current activation proof.
 
-### Migration numbering
+### Migration numbering and retention
 
 - Migration `0010` is assigned to the new discard-and-retire activation proof.
 - R14e destructive cleanup moves from migration `0010` to migration `0011`.
 - The correction sprint updates all authoritative R14e references accordingly but does not implement R14e.
+- R14e may remove obsolete legacy-global and migrated-copy artifacts, including `room_cutover_marker`, only when separately approved.
+- R14e must preserve `room_authoritative_activation` while authoritative startup depends on it. Removing or replacing that proof requires a later explicit architecture decision and matching startup-guard change.
 
 ### Gate 2 lifecycle
 
@@ -88,21 +90,23 @@ The correction sprint does not:
 
 ## Durable activation-record contract
 
-Migration `0010` creates a single-row table named `room_authoritative_activation`.
+Migration `0010` creates a single-row table named `room_authoritative_activation` with the following logical schema and constraints:
 
-The durable record contains only:
+```sql
+CREATE TABLE room_authoritative_activation (
+    id                      INTEGER PRIMARY KEY CHECK (id = 1),
+    activation_id           UUID        NOT NULL,
+    mode                    TEXT        NOT NULL CHECK (mode = 'discard-and-retire'),
+    contract_version        INTEGER     NOT NULL CHECK (contract_version = 1),
+    prepared_schema_version BIGINT      NOT NULL CHECK (prepared_schema_version = 10),
+    prepared_at             TIMESTAMPTZ NOT NULL,
+    binary_build_sha        TEXT        NOT NULL CHECK (length(btrim(binary_build_sha)) > 0)
+);
+```
 
-- `id`, constrained to `1`;
-- `activation_id`, an operator-generated UUID;
-- fixed mode `discard-and-retire`;
-- activation contract version, initially `1`;
-- schema version at preparation, exactly `10`;
-- immutable preparation timestamp;
-- non-empty release or build SHA for audit provenance.
+Equivalent PostgreSQL types or constraint syntax are acceptable only when they preserve exactly the same contract.
 
 The record contains no target room ID, room slug, host ID, source hashes, target hashes, legacy ID offset, copied-row count, or other migrated-room concept.
-
-The database schema should enforce the fixed single-row and fixed-mode invariants where practical. Application verification remains fail-closed even if corruption bypasses constraints.
 
 Applying migration `0010` only makes activation proof possible. It does not activate authoritative mode and does not write the activation row.
 
@@ -152,9 +156,19 @@ It must not provide a DSN command-line flag because process arguments can be exp
 2. reject an existing `room_cutover_marker.id = 1`;
 3. insert only the activation row inside one transaction;
 4. create no room and modify no legacy or room-scoped product data;
-5. treat an exact repeat using the same immutable identity as a verified no-op;
-6. reject a different activation ID or any conflicting immutable field;
+5. treat an exact repeat as a verified no-op;
+6. reject any conflicting repeat;
 7. provide no reset, force, overwrite, delete, bypass, or ignore-conflict operation.
+
+The idempotency identity is exactly:
+
+- operator-supplied `activation_id`;
+- operator-supplied `binary_build_sha`;
+- fixed mode `discard-and-retire`;
+- fixed contract version `1`;
+- fixed preparation schema version `10`.
+
+`prepared_at` is generated and stored on the first successful preparation. An exact repeat retains the original timestamp and never rewrites the row.
 
 The server never prepares activation automatically.
 
@@ -163,13 +177,13 @@ The server never prepares activation automatically.
 `verify` is read-only and accepts no expected activation identity. It reads the authoritative stored record and confirms:
 
 - migration state is clean;
-- schema version is at least `10`;
+- current schema version is at least `10`;
 - exactly one activation row exists;
 - mode is exactly `discard-and-retire`;
-- activation contract version is supported;
-- activation ID is valid;
+- activation contract version is `1`;
+- activation ID is a valid UUID;
 - preparation schema version is exactly `10`;
-- build provenance is non-empty;
+- trimmed build provenance is non-empty;
 - `room_cutover_marker.id = 1` does not exist.
 
 ### Exit codes
@@ -207,7 +221,7 @@ The existing server-facing startup guard remains the entry point used by authori
 With `--room-cutover-authoritative=true`, startup requires:
 
 - clean migration state;
-- schema version at least `10`;
+- current schema version at least `10`;
 - a valid discard-and-retire activation record;
 - absence of `room_cutover_marker.id = 1`.
 
@@ -224,7 +238,7 @@ The guard is read-only. It never:
 With `--room-cutover-authoritative=false`:
 
 - the activation record is not required;
-- schema version `10` remains compatible;
+- schema version `10` and later compatible schemas remain valid;
 - false/false rollback does not require a down migration.
 
 The stored build SHA is audit provenance, not a permanent binary lock. Later true-mode patch releases do not rewrite the immutable activation record.
@@ -360,7 +374,7 @@ PostgreSQL-backed tests prove:
 Real PostgreSQL tests cover:
 
 - first preparation succeeds;
-- exact repeated preparation is a verified no-op;
+- exact repeated preparation is a verified no-op and retains the original timestamp;
 - different activation ID fails;
 - different build SHA fails;
 - missing record fails;
@@ -369,7 +383,7 @@ Real PostgreSQL tests cover:
 - unsupported contract version fails;
 - preparation schema other than `10` fails;
 - dirty migration state fails;
-- schema below `10` fails;
+- current schema below `10` fails;
 - historical copy marker fails;
 - database and transaction failures return non-sensitive errors.
 
@@ -496,7 +510,8 @@ Throughout the rollback window:
 After the rollback window is completed and accepted:
 
 - activate R14e;
-- use migration `0011` for approved cleanup;
+- use migration `0011` for approved legacy-global and obsolete migrated-copy cleanup;
+- preserve `room_authoritative_activation` while the startup guard requires it;
 - remove obsolete global implementation and packaging surfaces;
 - publish final API and architecture documentation;
 - verify no legacy global route can regain authority;
@@ -522,7 +537,7 @@ R10f+, R11b+, R12, and R13 remain outside this core closure boundary unless the 
 - Activation evidence remains truthful and auditable.
 - The server stays fail-closed without depending on copied-room state.
 - The write-capable operator tool is separated from the long-running backend image.
-- False/false rollback remains possible at schema version 10.
+- False/false rollback remains possible at schema version 10 and later compatible schemas.
 - Historical accepted work remains available for audit without remaining executable.
 - Gate 2 evidence cannot accidentally mix old and new cutover contracts.
 - Each lifecycle stage is independently reviewable and reversible until production authorization.
