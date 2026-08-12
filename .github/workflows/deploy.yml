@@ -16,16 +16,34 @@ jobs:
 
       - name: Deploy
         env:
-          FRONTEND_HTTP_PORT: ${{ vars.FRONTEND_HTTP_PORT }}
-          FRONTEND_HTTPS_PORT: ${{ vars.FRONTEND_HTTPS_PORT }}
-          BACKEND_PORT: ${{ vars.BACKEND_PORT }}
-          HOST_EMAILS: ${{ vars.HOST_EMAILS }}
-          ADMIN_EMAILS: ${{ vars.ADMIN_EMAILS }}
-          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+          PROXY_NETWORK_NAME: ${{ vars.PROXY_NETWORK_NAME }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-          DUCKDNS_DOMAIN: ${{ secrets.DUCKDNS_DOMAIN }}
-          DUCKDNS_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
-          LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
-          VITE_GOOGLE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
-        run: docker compose up -d --build
+          HOST_EMAILS: ${{ secrets.HOST_EMAILS }}
+          ADMIN_EMAILS: ${{ secrets.ADMIN_EMAILS }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PROXY_NETWORK_NAME)) {
+            throw "PROXY_NETWORK_NAME is required"
+          }
+
+          docker network inspect $env:PROXY_NETWORK_NAME | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker proxy network '$env:PROXY_NETWORK_NAME' does not exist"
+          }
+
+          $composeUpHelp = docker compose up --help | Out-String
+          if ($LASTEXITCODE -ne 0 -or
+              -not $composeUpHelp.Contains("--wait") -or
+              -not $composeUpHelp.Contains("--wait-timeout")) {
+            throw "Docker Compose must support up --wait and --wait-timeout"
+          }
+
+          docker compose config --quiet
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker Compose configuration validation failed"
+          }
+
+          docker compose up -d --build --remove-orphans --wait --wait-timeout 120
+          if ($LASTEXITCODE -ne 0) {
+            throw "Docker Compose deployment did not become healthy"
+          }
         shell: powershell

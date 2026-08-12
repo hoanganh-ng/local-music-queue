@@ -17,3 +17,7 @@ frontend/dist/
 .agents/
 documents/
 README.md
+
+# Pre-existing Let's Encrypt data (owned by root; blocks Docker build context)
+letsencrypt-backend/
+letsencrypt-frontend/

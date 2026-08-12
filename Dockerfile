@@ -23,37 +23,21 @@ FROM alpine:latest
 
 WORKDIR /app
 
-# Install runtime dependencies including certbot for Let's Encrypt certificates
 RUN apk add --no-cache \
-    python3 \
-    py3-pip \
     yt-dlp \
     ffmpeg \
     ca-certificates \
-    tzdata \
-    certbot \
-    cronie && \
-    pip3 install --break-system-packages certbot-dns-duckdns
+    tzdata
 
-# Create directories
-RUN mkdir -p /app/data /app/certs
+RUN mkdir -p /app/data
 
-# Copy binary from builder
 COPY --from=builder /app/server .
 
-# Copy certificate setup script
-COPY docker/setup-certs.sh /app/setup-certs.sh
-RUN chmod +x /app/setup-certs.sh
-
-# Set environment variables (will be overridden by docker-compose)
-ENV PORT=443
+ENV APP_ENV=production
+ENV PORT=1111
 ENV DB_PATH=/app/data/music_queue.db
 ENV YTDLP_PATH=/usr/bin/yt-dlp
-ENV CERT_FILE=/app/certs/server.crt
-ENV KEY_FILE=/app/certs/server.key
 
-# Expose HTTPS port
-EXPOSE 443
+EXPOSE 1111
 
-# Start cron, setup certificates, and start server
-CMD ["/bin/sh", "-c", "crond && /app/setup-certs.sh && /app/server"]
+CMD ["/app/server"]

@@ -1,452 +1,124 @@
 # Docker Deployment Guide
 
-This guide covers deploying Local Music Queue using Docker and Docker Compose.
+This guide covers deploying Local Music Queue behind Nginx Proxy Manager using Docker Compose and GitHub Actions.
 
 ## Prerequisites
 
-- **Docker 20.10+** - [Installation guide](https://docs.docker.com/get-docker/)
-- **Docker Compose 2.0+** - [Installation guide](https://docs.docker.com/compose/install/)
-- **yt-dlp** - Included in backend Docker image (no manual installation needed)
+- **Nginx Proxy Manager** instance on the same Docker host.
+- **Self-hosted GitHub Actions runner** with Docker and PowerShell.
+- **Docker Compose v2.17+** with `up --wait` and `--wait-timeout` support. The release workflow verifies both flags before deployment.
+- A **custom certificate** imported into Nginx Proxy Manager for the deployment hostname.
+- **DNS** record pointing the hostname to the host's public IP.
 
 ---
 
-## Quick Start
+## 1. Network Setup
 
-### 1. Clone and Configure
-
-```bash
-# Clone repository
-git clone <repository-url>
-cd local-music-queue
-
-# Copy environment template
-cp .env.example .env
-
-# Edit configuration
-nano .env
-```
-
-### 2. Configure Environment Variables
-
-Edit `.env` with your settings:
+Nginx Proxy Manager and the application communicate over a shared external Docker network. Create it once:
 
 ```bash
-# Frontend Ports
-FRONTEND_HTTP_PORT=8011
-FRONTEND_HTTPS_PORT=8012
-
-# Backend Port
-BACKEND_PORT=1111
-
-# Google OAuth Configuration
-GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
-
-# Role Configuration (comma-separated emails)
-HOST_EMAILS=host@urekamedia.vn
-ADMIN_EMAILS=admin@urekamedia.vn
-
-# DuckDNS Configuration for HTTPS (optional)
-DUCKDNS_DOMAIN=yourname.duckdns.org
-DUCKDNS_TOKEN=your-duckdns-token-here
-LETSENCRYPT_EMAIL=your-email@example.com
+docker network create nginx-proxy-manager
 ```
 
-### 3. Start the Application
+Attach NPM to the network if it is not already connected:
 
 ```bash
-# Build and start all services
-docker-compose up --build
-
-# Or run in detached mode
-docker-compose up -d --build
+docker network connect nginx-proxy-manager <npm-container-name>
 ```
 
-### 4. Access the Application
-
-- **HTTP**: http://localhost:8011
-- **HTTPS**: https://yourname.duckdns.org (if configured)
-- **Backend API**: http://localhost:1111
+Record the exact network name — it becomes the `PROXY_NETWORK_NAME` variable.
 
 ---
 
-## Docker Architecture
+## 2. GitHub Environment Setup
 
-### Services
+Release deployment configuration lives in the `local-server` GitHub Environment. No production `.env` file is used.
 
-The `docker-compose.yml` defines three services:
-
-```yaml
-services:
-  backend:      # Go API server
-  frontend:     # Vue.js app served by Nginx
-  # Optional: certbot for Let's Encrypt
-```
-
-### Container Details
-
-**Backend Container:**
-- **Base Image**: Alpine Linux (final stage)
-- **Size**: ~20MB
-- **Exposed Port**: 1111
-- **Volume**: `.localdb/` (SQLite database persistence)
-- **Includes**: yt-dlp binary
-
-**Frontend Container:**
-- **Base Image**: Nginx Alpine
-- **Size**: ~25MB
-- **Exposed Ports**: 8011 (HTTP), 8012 (HTTPS)
-- **Serves**: Static Vue.js build + reverse proxy to backend
+| Name | Type | Description |
+| --- | --- | --- |
+| `PROXY_NETWORK_NAME` | Variable | Docker network shared with NPM (e.g. `nginx-proxy-manager`) |
+| `GOOGLE_CLIENT_ID` | Secret | Google OAuth 2.0 Client ID |
+| `HOST_EMAILS` | Secret | Comma-separated host emails |
+| `ADMIN_EMAILS` | Secret | Comma-separated admin emails |
 
 ---
 
-## Docker Compose Configuration
+## 3. Nginx Proxy Manager Proxy Host
 
-### Basic Configuration (HTTP Only)
+In the NPM admin interface, add a proxy host:
 
-```yaml
-version: '3.8'
-
-services:
-  backend:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
-    ports:
-      - "${BACKEND_PORT}:1111"
-    volumes:
-      - ./.localdb:/app/data
-    environment:
-      - PORT=1111
-      - DB_PATH=/app/data/music_queue.db
-      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
-      - HOST_EMAILS=${HOST_EMAILS}
-      - ADMIN_EMAILS=${ADMIN_EMAILS}
-    restart: unless-stopped
-
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      args:
-        - VITE_API_BASE_URL=http://localhost:${BACKEND_PORT}
-        - VITE_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
-    ports:
-      - "${FRONTEND_HTTP_PORT}:80"
-    depends_on:
-      - backend
-    restart: unless-stopped
-```
-
-### With HTTPS (DuckDNS + Let's Encrypt)
-
-See [HTTPS Setup Guide](../07-deployment/https-setup.md) for full configuration.
+- **Domain Names**: the deployment hostname (e.g. `music.example.com`)
+- **Scheme**: `http`
+- **Forward Hostname / IP**: `local-music-queue-frontend`
+- **Forward Port**: `80`
+- **WebSocket Support**: enabled
+- **Force SSL**: enabled
+- **SSL Certificate**: select the custom certificate
 
 ---
 
-## Building Images
+## 4. Google OAuth Authorized Origin
 
-### Build Backend Image
+In Google Cloud Console, add the deployment hostname to the OAuth client's **Authorized JavaScript origins**:
 
-```bash
-# From project root
-docker build -t local-music-queue-backend -f Dockerfile.backend .
-
-# Run standalone
-docker run -p 1111:1111 \
-  -v $(pwd)/.localdb:/app/data \
-  -e GOOGLE_CLIENT_ID=your-client-id \
-  local-music-queue-backend
+```text
+https://music.example.com
 ```
 
-**Dockerfile.backend** (multi-stage build):
-```dockerfile
-# Stage 1: Build
-FROM golang:1.22-alpine AS builder
-WORKDIR /app
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN go build -o server cmd/server/main.go
-
-# Stage 2: Runtime
-FROM alpine:latest
-RUN apk add --no-cache yt-dlp
-WORKDIR /app
-COPY --from=builder /app/server .
-EXPOSE 1111
-CMD ["./server"]
-```
-
-### Build Frontend Image
-
-```bash
-# From frontend directory
-cd frontend
-
-docker build -t local-music-queue-frontend \
-  --build-arg VITE_API_BASE_URL=http://localhost:1111 \
-  --build-arg VITE_GOOGLE_CLIENT_ID=your-client-id \
-  .
-
-# Run standalone
-docker run -p 80:80 local-music-queue-frontend
-```
-
-**Dockerfile** (multi-stage build):
-```dockerfile
-# Stage 1: Build
-FROM node:18-alpine AS builder
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-ARG VITE_API_BASE_URL
-ARG VITE_GOOGLE_CLIENT_ID
-ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
-ENV VITE_GOOGLE_CLIENT_ID=$VITE_GOOGLE_CLIENT_ID
-RUN npm run build
-
-# Stage 2: Runtime
-FROM nginx:alpine
-COPY --from=builder /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
-```
+Update the **Authorized redirect URIs** to match.
 
 ---
 
-## Managing the Application
+## 5. Release Deployment
 
-### Start Services
+Deployment is triggered by publishing a GitHub Release. The workflow:
 
-```bash
-# Start all services
-docker-compose up -d
+1. Validates `PROXY_NETWORK_NAME` is set and the network exists.
+2. Checks Docker Compose supports `--wait` / `--wait-timeout`.
+3. Validates the Compose configuration with `docker compose config --quiet`.
+4. Runs `docker compose up -d --build --remove-orphans --wait --wait-timeout 120`.
 
-# Start specific service
-docker-compose up -d backend
-```
-
-### Stop Services
-
-```bash
-# Stop all services
-docker-compose down
-
-# Stop and remove volumes (deletes database!)
-docker-compose down -v
-```
-
-### View Logs
-
-```bash
-# All services
-docker-compose logs -f
-
-# Specific service
-docker-compose logs -f backend
-docker-compose logs -f frontend
-
-# Last 100 lines
-docker-compose logs --tail=100 backend
-```
-
-### Restart Services
-
-```bash
-# Restart all
-docker-compose restart
-
-# Restart specific service
-docker-compose restart backend
-```
-
-### Rebuild After Code Changes
-
-```bash
-# Rebuild and restart
-docker-compose up -d --build
-
-# Rebuild specific service
-docker-compose up -d --build backend
-```
+Health checks on both services gate the `--wait` step.
 
 ---
 
-## Data Persistence
+## 6. Post-Deployment Checks
 
-### SQLite Database
+Verify the deployment through the public hostname:
 
-The database is persisted in `.localdb/` directory:
-
-```bash
-# Backup database
-cp .localdb/music_queue.db .localdb/music_queue.db.backup
-
-# Restore database
-cp .localdb/music_queue.db.backup .localdb/music_queue.db
-
-# View database
-sqlite3 .localdb/music_queue.db
-```
-
-### Volume Management
-
-```bash
-# List volumes
-docker volume ls
-
-# Inspect volume
-docker volume inspect local-music-queue_localdb
-
-# Remove volume (deletes data!)
-docker volume rm local-music-queue_localdb
-```
+- **HTTPS page load** — padlock icon, no mixed-content warnings.
+- **Google login** from the authorized origin.
+- **REST**: `GET /api/queue` returns queue JSON.
+- **Mutation**: queue a song through `/api/queue/add`.
+- **WebSocket**: initial `full_sync` arrives after login.
+- **WebSocket delta**: events arrive after a mutation.
+- **WebSocket reconnect**: client reconnects after a controlled disconnect.
+- **Backend outbound**: search YouTube returns results.
+- **Database persistence**: a queue item recorded before deployment remains after the release workflow completes, confirming the unchanged `backend-db` volume was reused.
+- **No published ports**: `docker ps` shows no host ports for either service.
 
 ---
 
-## Troubleshooting
+## 7. Rollback
 
-### Container Won't Start
+To roll back without bypassing the `local-server` GitHub Environment:
 
-```bash
-# Check container status
-docker-compose ps
+1. Open **GitHub Actions** → **Deploy on Release**.
+2. Select the successful workflow run for the preceding published release.
+3. Choose **Re-run all jobs**.
+4. Wait for both services to become healthy, then repeat the post-deployment checks.
 
-# View container logs
-docker-compose logs backend
-
-# Inspect container
-docker inspect local-music-queue-backend-1
-```
-
-### Port Already in Use
-
-```bash
-# Find process using port
-lsof -i :1111
-
-# Change port in .env
-BACKEND_PORT=8080
-
-# Restart services
-docker-compose down
-docker-compose up -d
-```
-
-### Database Locked
-
-```bash
-# Stop all containers
-docker-compose down
-
-# Remove lock files
-rm .localdb/music_queue.db-shm
-rm .localdb/music_queue.db-wal
-
-# Restart
-docker-compose up -d
-```
-
-### yt-dlp Not Working
-
-```bash
-# Enter backend container
-docker-compose exec backend sh
-
-# Test yt-dlp
-yt-dlp --version
-yt-dlp --dump-json "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-
-# Update yt-dlp
-apk update && apk upgrade yt-dlp
-```
-
-### Frontend Can't Connect to Backend
-
-1. Check backend is running: `docker-compose ps`
-2. Check backend logs: `docker-compose logs backend`
-3. Verify `VITE_API_BASE_URL` in frontend build args
-4. Check Nginx configuration: `docker-compose exec frontend cat /etc/nginx/conf.d/default.conf`
+Re-running that release preserves its workflow and injects production values from the `local-server` GitHub Environment. Keep obsolete GitHub values until the 24-hour migration window ends because the preceding release may still require them. The workflow reuses the `backend-db` named volume; never run `docker compose down -v`.
 
 ---
 
-## Production Deployment
+## 8. Cleanup of Old Certificate Artifacts
 
-### Recommended Configuration
+After the new deployment has run healthy for at least 24 hours, the previous deployment's certificate volumes and secrets can be removed manually:
 
-```bash
-# .env for production
-FRONTEND_HTTP_PORT=80
-FRONTEND_HTTPS_PORT=443
-BACKEND_PORT=1111
+- Docker volumes: `backend-letsencrypt`, `frontend-letsencrypt`.
+- GitHub Environment secrets: `DUCKDNS_DOMAIN`, `DUCKDNS_TOKEN`, `LETSENCRYPT_EMAIL`.
+- GitHub Environment variables: `FRONTEND_HTTP_PORT`, `FRONTEND_HTTPS_PORT`, `BACKEND_PORT`, `VITE_API_BASE_URL`.
+- Host directories: `letsencrypt-backend/`, `letsencrypt-frontend/`.
 
-# Use production domain
-DUCKDNS_DOMAIN=yourapp.duckdns.org
-DUCKDNS_TOKEN=your-token
-LETSENCRYPT_EMAIL=admin@yourdomain.com
-
-# Restrict to production emails
-HOST_EMAILS=host@company.com
-ADMIN_EMAILS=admin@company.com
-```
-
-### Security Checklist
-
-- [ ] Change default PINs (if still using PIN auth)
-- [ ] Configure HTTPS with valid certificates
-- [ ] Restrict HOST_EMAILS and ADMIN_EMAILS to trusted users
-- [ ] Set up firewall rules (allow only 80, 443, 1111)
-- [ ] Enable Docker logging driver
-- [ ] Set up automated backups for `.localdb/`
-- [ ] Configure restart policies (`restart: unless-stopped`)
-- [ ] Review Nginx security headers
-
-### Monitoring
-
-```bash
-# Container resource usage
-docker stats
-
-# Disk usage
-docker system df
-
-# Container health
-docker-compose ps
-```
-
----
-
-## Updating the Application
-
-### Pull Latest Changes
-
-```bash
-# Pull from git
-git pull origin main
-
-# Rebuild and restart
-docker-compose down
-docker-compose up -d --build
-```
-
-### Database Migrations
-
-Currently, the application auto-creates tables on first run. For future migrations:
-
-```bash
-# Backup before updating
-cp .localdb/music_queue.db .localdb/music_queue.db.$(date +%Y%m%d)
-
-# Update and restart
-docker-compose up -d --build
-```
-
----
-
-## Next Steps
-
-- [HTTPS Setup](../07-deployment/https-setup.md) - Configure Let's Encrypt and DuckDNS
-- [Nginx Configuration](../07-deployment/nginx-configuration.md) - Customize reverse proxy
-- [Production Checklist](../07-deployment/production-checklist.md) - Pre-launch verification
+Do not remove `backend-db`.

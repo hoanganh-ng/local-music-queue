@@ -52,10 +52,10 @@ documents/
 │   └── database-schema.md          # [Planned] SQLite tables
 │
 ├── 07-deployment/                  # Deployment guides
+│   ├── https-setup.md              # Nginx Proxy Manager custom-certificate guide
+│   ├── 2026-08-11-nginx-proxy-manager-deployment-design.md  # Approved design
 │   ├── docker.md                   # [Planned] Dockerfile details
 │   ├── docker-compose.md           # [Planned] Service orchestration
-│   ├── https-setup.md              # Let's Encrypt, DuckDNS, certificates
-│   ├── nginx-configuration.md      # [Planned] Reverse proxy config
 │   └── production-checklist.md     # [Planned] Pre-launch verification
 │
 ├── 08-development/                 # Development guides

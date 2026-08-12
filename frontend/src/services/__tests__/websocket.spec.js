@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { wsClient } from '../websocket'
+import { buildWebSocketURL, wsClient } from '../websocket'
 import { globalStore } from '../../store'
 
 // Mutable queueState so the legacy fallback can read it during tests.
@@ -470,5 +470,15 @@ describe('WebSocketClient', () => {
 
     expect(fakeWs.send).not.toHaveBeenCalled()
     expect(wsClient.pendingFullSync).toBe(false)
+  })
+
+  it('builds a same-origin secure WebSocket URL with the user ID', () => {
+    expect(buildWebSocketURL('', 'https://music.example.com', 42))
+      .toBe('wss://music.example.com/ws?user_id=42')
+  })
+
+  it('builds a development WebSocket URL from an explicit HTTP API base', () => {
+    expect(buildWebSocketURL('http://localhost:1111/', 'https://music.example.com'))
+      .toBe('ws://localhost:1111/ws')
   })
 })

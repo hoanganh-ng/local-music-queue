@@ -21,7 +21,7 @@ For the authoritative current state of the implementation, including security ca
 - 💎 **Priority Queue System**: Daily token awards for song prioritization
 - 🗳️ **Community Voting**: Democratic skip and priority votes.
 - 🔒 **Role Metadata**: Host, Admin, Guest (Trusted per-request identity and comprehensive backend authorization are not currently implemented. Roles are used as metadata by the frontend and for some client-supplied request checks).
-- 🌐 **HTTPS Support**: Let's Encrypt integration with DuckDNS for production
+- 🌐 **HTTPS Support**: Terminated by Nginx Proxy Manager with custom certificate
 
 ## 🏗️ Architecture
 
@@ -101,18 +101,20 @@ The project follows **Clean Architecture** principles with four distinct layers:
 
 #### Full Stack (Recommended)
 
-Before startup, the three certificate values (`DUCKDNS_DOMAIN`, `DUCKDNS_TOKEN`, `LETSENCRYPT_EMAIL`) and non-conflicting `FRONTEND_HTTPS_PORT`/`BACKEND_PORT` overrides must be configured.
+Release deployment uses the `local-server` GitHub Environment. For local/manual Compose use, copy `.env.example` and set all values.
 
 ```bash
-docker-compose up --build
+docker compose up --build --wait --wait-timeout 120
 ```
+
+HTTPS is terminated by an existing Nginx Proxy Manager instance using a custom certificate. NPM forwards to `local-music-queue-frontend:80` over the shared external Docker network. The frontend proxies `/api` and `/ws` to `backend:1111`. Release deployment configuration is stored in the `local-server` GitHub Environment. No application host ports or production `.env` file are used.
 
 ## ⚙️ Configuration
 
 ### Backend Environment Variables
 
 | Variable | Description | Default |
-|----------|-------------|---------|
+| --- | --- | --- |
 | `PORT` | Server port | `1111` |
 | `GOOGLE_CLIENT_ID` | Google OAuth client ID | Required |
 | `HOST_EMAILS` | Comma-separated host emails | Optional at startup but required to assign any account the Host role |
@@ -124,18 +126,14 @@ docker-compose up --build
 
 ### Docker Compose Variables
 
-*Note: Using Compose without overrides causes frontend HTTPS and backend to compete for host port 443.*
+Release deployments use GitHub Environment variables and secrets; no production `.env` file is required. For local/manual use, see `.env.example`.
 
-`DUCKDNS_DOMAIN`, `DUCKDNS_TOKEN`, and `LETSENCRYPT_EMAIL` are required by the current backend and frontend container startup scripts. Both containers exit during certificate setup if any of those values is absent.
-
-| Variable | Description | Compose Fallback | `.env.example` Sample |
-|----------|-------------|------------------|-----------------------|
-| `FRONTEND_HTTP_PORT` | Frontend HTTP port | `80` | `8011` |
-| `FRONTEND_HTTPS_PORT` | Frontend HTTPS port | `443` | `8012` |
-| `BACKEND_PORT` | Backend API port | `443` | `1111` |
-| `DUCKDNS_DOMAIN` | DuckDNS subdomain | - | Required |
-| `DUCKDNS_TOKEN` | DuckDNS token | - | Required |
-| `LETSENCRYPT_EMAIL` | Let's Encrypt email | - | Required |
+| Variable | Description | Required |
+| --- | --- | --- |
+| `PROXY_NETWORK_NAME` | Existing Docker network shared with NPM | Yes |
+| `GOOGLE_CLIENT_ID` | Google OAuth client ID | Yes |
+| `HOST_EMAILS` | Comma-separated host emails | Yes |
+| `ADMIN_EMAILS` | Comma-separated admin emails | Yes |
 
 ## 🛠️ Development
 
@@ -165,7 +163,7 @@ Comprehensive documentation is available in the `documents/` folder:
 - **[API Reference](documents/04-api-reference/)** - REST endpoints and WebSocket events
 - **[Frontend](documents/05-frontend/)** - Components and state management
 - **[Backend](documents/06-backend/)** - Domain, usecase, and infrastructure layers
-- **[Deployment](documents/07-deployment/)** - Docker, HTTPS, and production setup
+- **[Deployment](documents/07-deployment/)** - Docker, NPM HTTPS, and production setup
 - **[Development](documents/08-development/)** - Local development and testing
 - **[Roadmap](documents/09-roadmap/)** - Implemented and future features
 

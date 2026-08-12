@@ -1,61 +1,61 @@
-version: '3.8'
-
 services:
   backend:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: music-queue-backend
-    ports:
-      - "${BACKEND_PORT:-443}:443"  # HTTPS
     environment:
-      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
-      - HOST_EMAILS=${HOST_EMAILS}
-      - ADMIN_EMAILS=${ADMIN_EMAILS}
-      - DUCKDNS_DOMAIN=${DUCKDNS_DOMAIN}
-      - DUCKDNS_TOKEN=${DUCKDNS_TOKEN}
-      - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL}
+      APP_ENV: production
+      PORT: "1111"
+      DB_PATH: /app/data/music_queue.db
+      YTDLP_PATH: /usr/bin/yt-dlp
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?GOOGLE_CLIENT_ID is required}
+      HOST_EMAILS: ${HOST_EMAILS:?HOST_EMAILS is required}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:?ADMIN_EMAILS is required}
+    expose:
+      - "1111"
     volumes:
       - backend-db:/app/data
-      - backend-letsencrypt:/etc/letsencrypt
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:1111/api/queue"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
     networks:
-      - app-network
+      - app
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID}
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL}
-
-    container_name: music-queue-frontend
-    ports:
-      - "${FRONTEND_HTTP_PORT:-80}:80"      # HTTP → HTTPS redirect
-      - "${FRONTEND_HTTPS_PORT:-443}:443"   # HTTPS
-    environment:
-      - DUCKDNS_DOMAIN=${DUCKDNS_DOMAIN}
-      - DUCKDNS_TOKEN=${DUCKDNS_TOKEN}
-      - LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL}
-      - CERT_FILE=/etc/nginx/ssl/cert.crt
-      - KEY_FILE=/etc/nginx/ssl/cert.key
-    volumes:
-      - frontend-letsencrypt:/etc/letsencrypt
+        VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?GOOGLE_CLIENT_ID is required}
+    expose:
+      - "80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
     networks:
-      - app-network
+      app:
+      proxy:
+        aliases:
+          - local-music-queue-frontend
 
 networks:
-  app-network:
+  app:
     driver: bridge
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK_NAME:?PROXY_NETWORK_NAME is required}
 
 volumes:
   backend-db:
-    driver: local
-  backend-letsencrypt:
-    driver: local
-  frontend-letsencrypt:
     driver: local

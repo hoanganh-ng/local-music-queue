@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"log"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -34,5 +38,36 @@ func TestSetupApp(t *testing.T) {
 
 	if cfg.DBPath != dbPath {
 		t.Errorf("Expected DBPath %s, got %s", dbPath, cfg.DBPath)
+	}
+}
+
+func TestSetupAppDoesNotLogConfiguredRoleEmails(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test executable: %v", err)
+	}
+
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("DB_PATH", filepath.Join(t.TempDir(), "test.db"))
+	t.Setenv("YTDLP_PATH", executable)
+	t.Setenv("HOST_EMAILS", "host-private@example.com")
+	t.Setenv("ADMIN_EMAILS", "admin-private@example.com")
+
+	originalWriter := log.Writer()
+	var output bytes.Buffer
+	log.SetOutput(&output)
+	defer log.SetOutput(originalWriter)
+
+	if _, _, err := setupApp(); err != nil {
+		t.Fatalf("setupApp failed: %v", err)
+	}
+
+	for _, privateValue := range []string{
+		"host-private@example.com",
+		"admin-private@example.com",
+	} {
+		if strings.Contains(output.String(), privateValue) {
+			t.Fatalf("startup log exposed configured role email %q", privateValue)
+		}
 	}
 }

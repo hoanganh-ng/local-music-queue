@@ -1,6 +1,9 @@
 import { sessionHelper } from './session'
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'https://localhost:443'
+export function buildAPIURL(endpoint, configuredBase = import.meta.env.VITE_API_BASE_URL) {
+  const base = (configuredBase || '').replace(/\/+$/, '')
+  return `${base}/api${endpoint}`
+}
 
 export class APIError extends Error {
   constructor(status, message) {
@@ -12,7 +15,7 @@ export class APIError extends Error {
 
 export const api = {
   async request(endpoint, options = {}) {
-    const url = `${API_BASE}/api${endpoint}`
+    const url = buildAPIURL(endpoint)
 
     const defaultHeaders = {
       'Content-Type': 'application/json'

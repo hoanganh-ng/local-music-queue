@@ -83,9 +83,6 @@ func setupApp() (*http.ServeMux, *config.Config, error) {
 		}
 	}
 
-	log.Printf("Host emails: %v", hostEmails)
-	log.Printf("Admin emails: %v", adminEmails)
-
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
 		return nil, nil, err

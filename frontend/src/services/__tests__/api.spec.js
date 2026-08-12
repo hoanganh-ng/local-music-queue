@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { api, APIError } from '../api'
+import { api, APIError, buildAPIURL } from '../api'
 import { sessionHelper } from '../session'
 
 describe('API Service', () => {
@@ -62,5 +62,14 @@ describe('API Service', () => {
       expect(err.status).toBe(403)
       expect(err.message).toBe('Forbidden request')
     }
+  })
+
+  it('builds a same-origin API URL when no override is configured', () => {
+    expect(buildAPIURL('/queue', '')).toBe('/api/queue')
+  })
+
+  it('keeps an explicit development API base URL without a double slash', () => {
+    expect(buildAPIURL('/queue', 'http://localhost:1111/'))
+      .toBe('http://localhost:1111/api/queue')
   })
 })
