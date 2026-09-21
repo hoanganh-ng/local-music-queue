@@ -1,5 +1,0 @@
-.env
-
-# Frontend (if building from root)
-node_modules/
-dist/
